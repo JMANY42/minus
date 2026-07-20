@@ -3,3 +3,7 @@
 __pycache__/
 logs/
 *.log
+
+# Ignore memory files
+# This is different for every version of Minus
+memory/

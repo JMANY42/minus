@@ -1,6 +1,7 @@
 import logging
 
 from response import generate_response
+from memory import ConversationMemory
 from logging_utils import pretty_json
 from tool_handler import ToolHandler
 
@@ -36,9 +37,12 @@ def create_tool_message(tool_call_id, content):
     return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
 
 
-def append_message(messages, message):
+def append_message(messages, message, memory=None):
     messages.append(message)
     logger.debug("New conversation message:\n%s", pretty_json(message))
+
+    if memory is not None:
+        memory.save(messages)
 
 
 def execution_error_message(tool_name, exc):
@@ -48,8 +52,8 @@ def execution_error_message(tool_name, exc):
     )
 
 
-def record_tool_error(messages, tool_call_id, content):
-    append_message(messages, create_tool_message(tool_call_id, content))
+def record_tool_error(messages, tool_call_id, content, memory=None):
+    append_message(messages, create_tool_message(tool_call_id, content), memory=memory)
 
 
 def execute_tool_call(tool_handler, tool_call):
@@ -61,10 +65,15 @@ def process_tool_call(conversation, tool_call):
     try:
         result = execute_tool_call(conversation.tool_handler, tool_call)
         logger.debug("Tool result for %s:\n%s", tool_name, pretty_json(result))
-        append_message(conversation.messages, create_tool_message(tool_call.id, result))
+        append_message(conversation.messages, create_tool_message(tool_call.id, result), memory=conversation.memory)
         return False
     except (ValueError, TypeError, OSError) as exc:
-        record_tool_error(conversation.messages, tool_call.id, execution_error_message(tool_name, exc))
+        record_tool_error(
+            conversation.messages,
+            tool_call.id,
+            execution_error_message(tool_name, exc),
+            memory=conversation.memory,
+        )
         return True
 
 
@@ -79,7 +88,7 @@ def process_tool_calls(conversation, tool_calls):
 def build_reply(conversation, completion):
     message = completion.choices[0].message
     assistant_message = create_assistant_message(message)
-    append_message(conversation.messages, assistant_message)
+    append_message(conversation.messages, assistant_message, memory=conversation.memory)
 
     tool_calls = getattr(message, "tool_calls", None) or []
     if not tool_calls:
@@ -92,12 +101,13 @@ def build_reply(conversation, completion):
 class Conversation:
     def __init__(self, tools_path=None, max_tool_rounds=5):
         self.messages = []
+        self.memory = ConversationMemory()
         self.tool_handler = ToolHandler(tools_path=tools_path)
         self.tools = self.tool_handler.load_tools()
         self.max_tool_rounds = max_tool_rounds
 
     def reply(self, transcript):
-        append_message(self.messages, create_user_message(transcript))
+        append_message(self.messages, create_user_message(transcript), memory=self.memory)
         completed_tool_rounds = 0
 
         while completed_tool_rounds < self.max_tool_rounds:

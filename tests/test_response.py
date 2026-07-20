@@ -27,8 +27,9 @@ class _FakeGroqClient:
 fake_groq.Groq = _FakeGroqClient
 fake_groq.BadRequestError = FakeBadRequestError
 
-sys.modules.setdefault("dotenv", fake_dotenv)
-sys.modules.setdefault("groq", fake_groq)
+sys.modules["dotenv"] = fake_dotenv
+sys.modules["groq"] = fake_groq
+sys.modules.pop("response", None)
 
 import response as response_module
 

@@ -17,6 +17,12 @@
 - Plan out tasks
     - Planning mode
     - Save plan, when idle execute plan
+- Idle tasks:
+    - Summarize memory to make future recall faster
+- Multi Modal
+    - Route different tasks to different quality of LLM
+    - Start with simple LLM to classify, then select model to do tasks if needed and keep the conversation going.
+        - Current groq model shouuld not keep doing any thinking, it kinda sucks. It's only good for conversations bc its fast.
 
 ## Quality of Life
 - Generate first chunk of speech in cloud to make playback faster. VPS or dedicated TTS model (or Mark's GPU in a couple months)

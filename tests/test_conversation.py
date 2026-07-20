@@ -26,8 +26,9 @@ class _FakeGroqClient:
 fake_groq.Groq = _FakeGroqClient
 fake_groq.BadRequestError = FakeBadRequestError
 
-sys.modules.setdefault("dotenv", fake_dotenv)
-sys.modules.setdefault("groq", fake_groq)
+sys.modules["dotenv"] = fake_dotenv
+sys.modules["groq"] = fake_groq
+sys.modules.pop("response", None)
 
 import conversation as conversation_module
 
@@ -56,12 +57,21 @@ class FakeCompletion:
         self.choices = [types.SimpleNamespace(message=message)]
 
 
+class FakeMemory:
+    def __init__(self, *args, **kwargs):
+        self.saved_messages = []
+
+    def save(self, messages):
+        self.saved_messages.append(list(messages))
+
+
 class ConversationToolLoopTests(unittest.TestCase):
     def test_repeated_identical_tool_calls_are_not_reexecuted(self):
-        conversation = conversation_module.Conversation(tools_path="/tmp/unused-tools.json")
-
         first_response = FakeCompletion(FakeMessage(content=None, tool_calls=[FakeToolCall("list_workspace_files", '{"path":"."}')]))
         second_response = FakeCompletion(FakeMessage(content="I have the workspace listing.", tool_calls=[]))
+
+        with patch.object(conversation_module, "ConversationMemory", FakeMemory):
+            conversation = conversation_module.Conversation(tools_path="/tmp/unused-tools.json")
 
         with patch.object(conversation_module, "generate_response", side_effect=[first_response, second_response]) as mock_generate:
             with patch.object(conversation.tool_handler, "execute", return_value="workspace listing") as mock_execute:
