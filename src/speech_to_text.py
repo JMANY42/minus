@@ -4,6 +4,7 @@ from text_to_speech import request_interrupt
 
 
 logger = logging.getLogger(__name__)
+logger.disabled = True
 
 def update(text):
     if text and text.strip():
