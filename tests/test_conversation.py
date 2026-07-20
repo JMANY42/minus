@@ -10,12 +10,21 @@ fake_dotenv = types.ModuleType("dotenv")
 fake_dotenv.load_dotenv = lambda *args, **kwargs: None
 
 fake_groq = types.ModuleType("groq")
+
+
+class FakeBadRequestError(Exception):
+    def __init__(self, message, body=None):
+        super().__init__(message)
+        self.body = body
+
+
 class _FakeGroqClient:
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
 
 fake_groq.Groq = _FakeGroqClient
+fake_groq.BadRequestError = FakeBadRequestError
 
 sys.modules.setdefault("dotenv", fake_dotenv)
 sys.modules.setdefault("groq", fake_groq)
