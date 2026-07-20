@@ -1,0 +1,49 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_current_time",
+      "description": "Get the current date and time in Central Time.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_workspace_files",
+      "description": "List files and folders inside a workspace-relative directory.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative directory path to inspect. Defaults to the repo root."
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_workspace_file",
+      "description": "Read a workspace-relative file and return its contents.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative file path to read."
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  }
+]

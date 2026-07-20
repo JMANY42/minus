@@ -1,0 +1,3 @@
+- Generate first chunk of speech in cloud to make playback faster. VPS or dedicated TTS model.
+- Test external mics
+- Come up with more general archeticture than just a harness
