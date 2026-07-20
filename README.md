@@ -8,7 +8,7 @@ Personal AI Assistant + Home Integration
 
 ## Current Status
 
-This project is a work in progress and currently focused on tool calls.
+This project is a work in progress and currently focused on giving Minus a persistent memory.
 
 Currently, Minus is essentially just a custom harness around a Groq model for fast responses. A more robust archeticture to be more generally useful is in progress.
 
