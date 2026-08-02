@@ -30,6 +30,8 @@ fake_groq.BadRequestError = FakeBadRequestError
 sys.modules["dotenv"] = fake_dotenv
 sys.modules["groq"] = fake_groq
 sys.modules.pop("response", None)
+sys.modules.pop("services.groq", None)
+sys.modules.pop("services", None)
 
 import response as response_module
 
@@ -81,7 +83,7 @@ class ResponseRetryTests(unittest.TestCase):
         )
         final_completion = FakeCompletion(FakeMessage(content="retry worked", tool_calls=None))
         completions = FakeCompletions([first_error, final_completion])
-        response_module.client = FakeClient(completions)
+        response_module.groq_call = completions.create
 
         result = response_module.generate_response(
             messages=[{"role": "user", "content": "list files"}],

@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import os
 import re
+import signal
 import threading
 
 from kokoro_onnx import Kokoro
@@ -98,29 +99,40 @@ def speak(text, voice="am_puck", speed=1.0, lang="en-us"):
     if not chunks:
         return
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        next_chunk_future = executor.submit(_synthesize_chunk, chunks[0], voice, speed, lang)
+    def _handle_sigint(signum, frame):
+        request_interrupt()
 
-        for index in range(len(chunks)):
-            if _current_interrupt_generation() != start_generation:
-                return
+    previous_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _handle_sigint)
 
-            samples, sample_rate = next_chunk_future.result()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            next_chunk_future = executor.submit(_synthesize_chunk, chunks[0], voice, speed, lang)
 
-            if index + 1 < len(chunks):
-                next_chunk_future = executor.submit(
-                    _synthesize_chunk,
-                    chunks[index + 1],
-                    voice,
-                    speed,
-                    lang,
-                )
+            for index in range(len(chunks)):
+                if _current_interrupt_generation() != start_generation:
+                    return
 
-            if _current_interrupt_generation() != start_generation:
-                return
+                samples, sample_rate = next_chunk_future.result()
 
-            sd.play(samples, sample_rate)
-            sd.wait()
+                if index + 1 < len(chunks):
+                    next_chunk_future = executor.submit(
+                        _synthesize_chunk,
+                        chunks[index + 1],
+                        voice,
+                        speed,
+                        lang,
+                    )
+
+                if _current_interrupt_generation() != start_generation:
+                    return
+
+                sd.play(samples, sample_rate)
+                sd.wait()
+    except KeyboardInterrupt:
+        request_interrupt()
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
 # for testing
 if __name__ == "__main__":

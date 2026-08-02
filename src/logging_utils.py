@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 from datetime import datetime
@@ -69,13 +68,3 @@ def setup_logging(level=logging.DEBUG):
     logging.getLogger("phonemizer").setLevel(logging.ERROR)
 
     return log_file
-
-
-def pretty_json(value):
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return value
-
-    return json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True, default=str)

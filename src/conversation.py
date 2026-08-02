@@ -2,7 +2,7 @@ import logging
 
 from response import generate_response
 from memory import ConversationMemory
-from logging_utils import pretty_json
+from services.json import pretty_json
 from tool_handler import ToolHandler
 
 
@@ -121,3 +121,6 @@ class Conversation:
                 completed_tool_rounds += 1
 
         raise RuntimeError("Tool call limit reached before the model produced a final response.")
+
+    def post_conversation(self):
+        return self.memory.condense_conversation(self.messages)

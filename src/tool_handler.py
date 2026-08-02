@@ -1,8 +1,9 @@
-import json
 import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from services.json import parse_json, read_json, serialize_json
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
@@ -38,8 +39,7 @@ class ToolHandler:
         if not self.tools_path.exists():
             return []
 
-        with self.tools_path.open("r", encoding="utf-8") as file_handle:
-            tools = json.load(file_handle)
+        tools = read_json(self.tools_path)
 
         if not isinstance(tools, list):
             raise ValueError("tools.json must contain a JSON array of tool definitions")
@@ -52,7 +52,7 @@ class ToolHandler:
         if isinstance(raw_arguments, dict):
             return raw_arguments
         if isinstance(raw_arguments, str):
-            return json.loads(raw_arguments)
+            return parse_json(raw_arguments)
 
         raise TypeError(f"Unsupported tool argument type: {type(raw_arguments)!r}")
 
@@ -72,7 +72,7 @@ class ToolHandler:
     def _get_current_time(self, arguments):
         central_time = datetime.now(ZoneInfo("America/Chicago"))
         dt_string = central_time.strftime("%Y-%m-%d %H:%M:%S %Z%z")
-        return json.dumps({"central_time": dt_string}, ensure_ascii=False)
+        return serialize_json({"central_time": dt_string}, ensure_ascii=False)
 
     def _list_workspace_files(self, arguments):
         relative_path = arguments.get("path", ".")
@@ -92,7 +92,7 @@ class ToolHandler:
                 }
             )
 
-        return json.dumps(
+        return serialize_json(
             {
                 "path": str(directory_path.relative_to(WORKSPACE_ROOT)),
                 "entries": entries,
@@ -114,7 +114,7 @@ class ToolHandler:
             raise IsADirectoryError(f"Path is not a file: {relative_path}")
 
         content = file_path.read_text(encoding="utf-8")
-        return json.dumps(
+        return serialize_json(
             {
                 "path": str(file_path.relative_to(WORKSPACE_ROOT)),
                 "content": content,

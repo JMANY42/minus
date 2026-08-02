@@ -3,8 +3,10 @@ import logging
 
 from speech_to_text import create_recorder, iter_cli_transcripts, iter_transcripts
 from conversation import Conversation
-from logging_utils import pretty_json, setup_logging
+from logging_utils import setup_logging
 from text_to_speech import speak
+
+from services.json import pretty_json
 
 
 logger = logging.getLogger(__name__)
@@ -22,9 +24,13 @@ def main():
     )
     args = parser.parse_args()
 
+    transcripts = iter_cli_transcripts() if args.no_mic else iter_transcripts(create_recorder())
+    conversation_loop(transcripts)
+
+
+def conversation_loop(transcripts):
     conversation = Conversation()
 
-    transcripts = iter_cli_transcripts() if args.no_mic else iter_transcripts(create_recorder())
 
     for transcript in transcripts:
         logger.info("Transcript received:\n%s", pretty_json(transcript))
@@ -32,6 +38,7 @@ def main():
         response = conversation.reply(transcript)
         logger.info("Assistant response:\n%s", pretty_json(response))
         speak(response)
+    conversation.post_conversation()
 
 
 if __name__ == "__main__":

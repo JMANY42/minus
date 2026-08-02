@@ -29,6 +29,8 @@ fake_groq.BadRequestError = FakeBadRequestError
 sys.modules["dotenv"] = fake_dotenv
 sys.modules["groq"] = fake_groq
 sys.modules.pop("response", None)
+sys.modules.pop("services.groq", None)
+sys.modules.pop("services", None)
 
 import conversation as conversation_module
 
@@ -60,9 +62,14 @@ class FakeCompletion:
 class FakeMemory:
     def __init__(self, *args, **kwargs):
         self.saved_messages = []
+        self.condense_calls = []
 
     def save(self, messages):
         self.saved_messages.append(list(messages))
+
+    def condense_conversation(self, messages):
+        self.condense_calls.append(list(messages))
+        return Path("memory/condensed_conversations/fake.json")
 
 
 class ConversationToolLoopTests(unittest.TestCase):
@@ -80,6 +87,20 @@ class ConversationToolLoopTests(unittest.TestCase):
         self.assertEqual(result, "I have the workspace listing.")
         self.assertEqual(mock_execute.call_count, 1)
         self.assertEqual(mock_generate.call_count, 2)
+
+    def test_post_conversation_delegates_to_memory(self):
+        with patch.object(conversation_module, "ConversationMemory", FakeMemory):
+            conversation = conversation_module.Conversation(tools_path="/tmp/unused-tools.json")
+
+        conversation.messages = [
+            {"role": "user", "content": "Please update memory naming."},
+            {"role": "assistant", "content": "Updated to conversation_id.json."},
+        ]
+
+        saved_path = conversation.post_conversation()
+
+        self.assertEqual(saved_path, Path("memory/condensed_conversations/fake.json"))
+        self.assertEqual(conversation.memory.condense_calls, [conversation.messages])
 
 
 if __name__ == "__main__":

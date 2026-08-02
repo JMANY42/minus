@@ -1,13 +1,10 @@
-import os
 import logging
 
-from dotenv import load_dotenv
-from groq import BadRequestError, Groq
+from groq import BadRequestError
+
+from services.groq import groq_call
 
 
-load_dotenv()
-
-client = Groq(api_key=os.getenv("GROQ_KEY"))
 logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = (
     "You are Minus, a concise helpful voice assistant. Keep responses short and natural for speech. "
@@ -74,7 +71,7 @@ def generate_response(messages, tools=None, model="llama-3.1-8b-instant", max_re
 
     for attempt in range(1, max_retries + 1):
         try:
-            completion = client.chat.completions.create(**payload)
+            completion = groq_call(**payload)
             return _validate_completion(completion)
         except BadRequestError as exc:
             last_error = exc
