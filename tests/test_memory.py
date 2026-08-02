@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from services.json import parse_json, serialize_json
 
-import memory as memory_module
+import memory.conversation_memory as memory_module
+import memory.condense_conversation as condense_module
 
 
 class ConversationMemoryTests(unittest.TestCase):
@@ -73,8 +74,13 @@ class ConversationMemoryTests(unittest.TestCase):
                 {"role": "assistant", "content": "Updated to conversation_id.json."},
             ]
 
-            with patch.object(memory_module, "_groq_call", return_value=completion) as mock_call:
-                saved_path = conversation_memory.condense_conversation(messages)
+            with patch.object(condense_module, "_groq_call", return_value=completion) as mock_call:
+                saved_path = condense_module.condense_conversation(
+                    messages,
+                    conversation_id=conversation_memory.conversation_id,
+                    source_conversation_file=conversation_memory.file_path,
+                    condensed_base_dir=condensed_dir,
+                )
 
             self.assertEqual(mock_call.call_count, 1)
             self.assertEqual(saved_path, condensed_dir / "conv-1234.json")

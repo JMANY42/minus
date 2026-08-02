@@ -7,3 +7,6 @@ logs/
 # Ignore memory files
 # This is different for every version of Minus
 memory/
+
+# Keep the src/memory source code folder
+!src/memory
