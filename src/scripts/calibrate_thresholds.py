@@ -37,7 +37,7 @@ Add your own (query, raw_text) pairs matching your actual attributes/values
 for the most accurate calibration -- the ones below are just a starting point.
 """
 
-from memory.store_semantic_memory import embed, default_raw_text
+from memory.memory_store import embed, default_raw_text
 import struct
 import statistics
 

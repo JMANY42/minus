@@ -40,6 +40,8 @@ EXTRACTION_PROMPT = """Extract durable facts from this conversation as a JSON ar
 - value: short canonical value, no filler words
 - multi_valued: true if multiple values can be true at once (interests, allergies), false if only one can be true at a time (timezone, job, location)
 
+Known attributes already in use: __ATTRIBUTE_LIST__
+When extracting a fact, reuse an existing attribute name if it matches the same concept, even if the conversation phrased it differently. Only introduce a new attribute if none of the existing ones genuinely fit.
 Only extract facts that would still matter in 3 months and would change how you'd respond in a future conversation. Skip one-off task details, pleasantries, and anything already implied by a fact you've already extracted. Do not include facts about the current conversation's topic unless they reflect a lasting preference or attribute.
 
 For each fact, also include:
@@ -48,7 +50,8 @@ For each fact, also include:
 Respond with ONLY a JSON array of objects, each shaped like:
 {"attribute": str, "value": str, "multi_valued": bool, "raw_text": str}
 
-Do not include any preamble, explanation, or markdown code fences — just the raw JSON array. If no durable facts are found, respond with an empty array: []
+Do not include any preamble, explanation, or markdown code fences — just the raw JSON array. 
+**IMPORTANT**: If no durable facts are found, respond with an empty array: []. Do not make up information or put value: "not available" or "unknown"
 """
 
 
@@ -118,16 +121,18 @@ def _groq_call(**payload):
     return groq_call(**payload)
 
 
-def extract_facts_from_conversation(conversation, model=MODEL):
+def extract_facts_from_conversation(conversation, known_attributes, model=MODEL):
     """Given a conversation (list of {role, content} dicts), return a list of fact dicts."""
     transcript_text = format_transcript(conversation)
 
+    full_extraction_prompt = EXTRACTION_PROMPT.replace("__ATTRIBUTE_LIST__", known_attributes)
+    print("full_extraction_prompt: ",full_extraction_prompt)
     completion = _groq_call(
         model=model,
         messages=[
             {
                 "role": "user",
-                "content": f"{EXTRACTION_PROMPT}\n\nCONVERSATION:\n{transcript_text}",
+                "content": f"{full_extraction_prompt}\n\nCONVERSATION:\n{transcript_text}",
             }
         ],
     )

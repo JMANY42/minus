@@ -2,7 +2,7 @@ import logging
 from dataclasses import asdict, is_dataclass
 
 from response import generate_response
-from memory import ConversationMemory
+from memory import MemoryManager
 from services.json import pretty_json
 from tool_handler import ToolHandler
 
@@ -117,9 +117,9 @@ def build_reply(conversation, completion):
 
 
 class Conversation:
-    def __init__(self, tools_path=None, max_tool_rounds=5):
+    def __init__(self, tools_path=None, max_tool_rounds=5, memory=None):
         self.messages = []
-        self.memory = ConversationMemory()
+        self.memory = memory or MemoryManager()
         self.tool_handler = ToolHandler(tools_path=tools_path)
         self.tools = self.tool_handler.load_tools()
         self.max_tool_rounds = max_tool_rounds
@@ -127,7 +127,9 @@ class Conversation:
     def reply(self, transcript):
         current_user_message = create_user_message(transcript)
         relevent_facts = [f.raw_text.strip() for f in self.memory.search_facts(current_user_message["content"], 5)]
-        current_user_message["content"] += "\n\nRELEVANT FACTS:\n" + pretty_json(relevent_facts)
+        if relevent_facts:
+            current_user_message["content"] += "\n\nRELEVANT FACTS:\n" + pretty_json(relevent_facts)
+        
         print("current_user_message", current_user_message)
         append_message(self.messages, current_user_message, memory=self.memory)
         # append_message(self.messages, create_fact_message(relevent_facts), memory=self.memory)
@@ -146,6 +148,7 @@ class Conversation:
 
         raise RuntimeError("Tool call limit reached before the model produced a final response.")
 
+    # When a conversation finishes, we need to condense it and extract semantic memory from it.
     def post_conversation(self):
         condensed_convo = self.memory.condense_conversation(self.messages)
         return self.memory.extract_and_store_semantic_memory(condensed_convo)

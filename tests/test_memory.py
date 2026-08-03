@@ -17,7 +17,7 @@ class ConversationMemoryTests(unittest.TestCase):
     def test_creates_and_updates_conversation_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             base_dir = Path(temp_dir)
-            conversation_memory = memory_module.ConversationMemory(base_dir=base_dir)
+            conversation_memory = memory_module.MemoryManager(base_dir=base_dir)
 
             self.assertTrue(conversation_memory.file_path.exists())
             self.assertEqual(conversation_memory.file_path.name, f"{conversation_memory.conversation_id}.json")
@@ -63,7 +63,7 @@ class ConversationMemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             base_dir = Path(temp_dir) / "conversations"
             condensed_dir = Path(temp_dir) / "condensed_conversations"
-            conversation_memory = memory_module.ConversationMemory(
+            conversation_memory = memory_module.MemoryManager(
                 base_dir=base_dir,
                 condensed_base_dir=condensed_dir,
                 conversation_id="conv-1234",

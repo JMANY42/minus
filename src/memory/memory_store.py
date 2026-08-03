@@ -126,7 +126,7 @@ class Fact:
     similarity: Optional[float] = None  # populated on search results only
 
 
-class StoreSemanticMemory:
+class MemoryStore:
     def __init__(self, db_path: str = "memory.db"):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
@@ -340,6 +340,71 @@ class StoreSemanticMemory:
             created_at=r[7], active=bool(r[8]), superseded_by=r[9],
         )
 
+    def get_known_attributes(self, only_active: bool = True) -> list[dict]:
+        """Return every distinct attribute currently in use, with one example
+        value each. Feed this into your extraction LLM's prompt so it can
+        reuse an existing attribute name instead of inventing a near-duplicate
+        (e.g. 'preferred_language' vs 'programming_language') -- this is the
+        cheap, reliable fix; don't try to catch that with embedding similarity
+        on the attribute names themselves, which is unreliable for short
+        labels. See merge_attributes() for a backstop cleanup pass."""
+        active_filter = "AND active = 1" if only_active else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT attribute, value FROM facts f1
+            WHERE f1.created_at = (
+                SELECT MAX(f2.created_at) FROM facts f2
+                WHERE f2.attribute = f1.attribute {active_filter.replace("active", "f2.active")}
+            )
+            {active_filter}
+            ORDER BY attribute
+            """
+        ).fetchall()
+        return [{"attribute": r[0], "example_value": r[1]} for r in rows]
+
+    # NOT USED YET
+    def merge_attributes(self, duplicate_attributes: list[str], canonical_attribute: str) -> dict:
+        """
+        Backstop for near-duplicate attribute names that slipped past the
+        known-attributes prompt (e.g. an LLM consolidation pass decides
+        'programming_language' and 'preferred_language' are the same concept
+        and canonical_attribute should be 'preferred_language').
+ 
+        Reassigns every fact under any name in duplicate_attributes to
+        canonical_attribute, then re-runs the normal add_fact() dedupe/
+        supersede rules against what's already under the canonical name --
+        so if merging creates an exact duplicate or a single-valued conflict,
+        it's resolved the same way any other fact would be.
+ 
+        Returns a summary dict of what happened per moved fact.
+        """
+        canonical_attribute = normalize_attribute(canonical_attribute)
+        moved = []
+ 
+        for dup_attr in duplicate_attributes:
+            dup_attr = normalize_attribute(dup_attr)
+            if dup_attr == canonical_attribute:
+                continue
+            facts_to_move = self.get_facts_by_attribute(dup_attr, only_active=True)
+            for f in facts_to_move:
+                # Mark the old row inactive first so add_fact's own lookup
+                # under canonical_attribute doesn't see a stale duplicate.
+                self.conn.execute("UPDATE facts SET active = 0 WHERE id = ?", (f.id,))
+                self.conn.commit()
+                result = self.add_fact(
+                    canonical_attribute, f.value, f.multi_valued,
+                    confidence=f.confidence, source_session_id=f.source_session_id,
+                )
+                # Link the old fact forward for history, same as a normal supersede.
+                new_id = result.get("fact_id") or result.get("new_fact_id") or result.get("existing_fact_id")
+                self.conn.execute(
+                    "UPDATE facts SET superseded_by = ? WHERE id = ?", (new_id, f.id)
+                )
+                self.conn.commit()
+                moved.append({"old_attribute": dup_attr, "old_fact_id": f.id, "result": result})
+ 
+        return {"canonical_attribute": canonical_attribute, "moved": moved}
+
     def close(self):
         self.conn.close()
 
@@ -348,42 +413,45 @@ class StoreSemanticMemory:
 # Demo / smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    store = StoreSemanticMemory(":memory:")
+    store = MemoryStore("memory/semantic_memory.db")
 
-    print("--- Inserting single-valued facts ---")
-    print(store.add_fact("timezone", "PST"))
-    print(store.add_fact("preferred_editor", "VS Code"))
-    print(store.add_fact("job_title", "Software Engineer"))
+    # print("--- Inserting single-valued facts ---")
+    # print(store.add_fact("timezone", "PST"))
+    # print(store.add_fact("preferred_editor", "VS Code"))
+    # print(store.add_fact("job_title", "Software Engineer"))
 
-    print("\n--- Inserting an exact duplicate (should be skipped) ---")
-    print(store.add_fact("timezone", "PST"))
+    # print("\n--- Inserting an exact duplicate (should be skipped) ---")
+    # print(store.add_fact("timezone", "PST"))
 
-    print("\n--- Inserting an update to a single-valued attribute (should auto-supersede) ---")
-    print(store.add_fact("timezone", "EST"))
+    # print("\n--- Inserting an update to a single-valued attribute (should auto-supersede) ---")
+    # print(store.add_fact("timezone", "EST"))
 
-    print("\n--- Inserting multi-valued facts (allergies) ---")
-    print(store.add_fact("allergy", "peanuts", multi_valued=True))
-    print(store.add_fact("allergy", "shellfish", multi_valued=True))
-    print("Duplicate allergy (should be skipped):", store.add_fact("allergy", "peanuts", multi_valued=True))
+    # print("\n--- Inserting multi-valued facts (allergies) ---")
+    # print(store.add_fact("allergy", "peanuts", multi_valued=True))
+    # print(store.add_fact("allergy", "shellfish", multi_valued=True))
+    # print("Duplicate allergy (should be skipped):", store.add_fact("allergy", "peanuts", multi_valued=True))
 
-    print("\n--- Attribute-normalization collapsing variant spellings ---")
-    print(store.add_fact("Preferred Editor", "Neovim"))  # should collide with preferred_editor and supersede
+    # print("\n--- Attribute-normalization collapsing variant spellings ---")
+    # print(store.add_fact("Preferred Editor", "Neovim"))  # should collide with preferred_editor and supersede
 
-    print("\n--- Active facts ---")
-    for f in store.get_all_facts():
-        print(f" - [{f.attribute}={f.value}] multi_valued={f.multi_valued}")
+    # print("\n--- Active facts ---")
+    # for f in store.get_all_facts():
+    #     print(f" - [{f.attribute}={f.value}] multi_valued={f.multi_valued}")
 
-    print("\n--- All facts including inactive (history) ---")
-    for f in store.get_all_facts(only_active=False):
-        print(f" - active={f.active} attr={f.attribute} value={f.value} superseded_by={f.superseded_by}")
+    # print("\n--- All facts including inactive (history) ---")
+    # for f in store.get_all_facts(only_active=False):
+    #     print(f" - active={f.active} attr={f.attribute} value={f.value} superseded_by={f.superseded_by}")
 
-    print("\n--- get_facts_by_attribute('allergy') ---")
-    for f in store.get_facts_by_attribute("allergy"):
-        print(f" - {f.value}")
+    # print("\n--- get_facts_by_attribute('allergy') ---")
+    # for f in store.get_facts_by_attribute("allergy"):
+    #     print(f" - {f.value}")
 
-    relevant = store.search_facts("what editor does the user like?", top_k=5)
-    print("\n--- Relevant facts ---")
-    for f in relevant:
-        print(f" - {f.value} - {f.similarity:.3f}")
+    # relevant = store.search_facts("what editor does the user like?", top_k=5)
+    # print("\n--- Relevant facts ---")
+    # for f in relevant:
+    #     print(f" - {f.value} - {f.similarity:.3f}")
+
+    print(store.get_known_attributes())
+    print(store.get_all_facts(only_active=False))
 
     store.close()

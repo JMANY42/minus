@@ -6,7 +6,6 @@ from services.json import JSONDecodeError, parse_json, serialize_json, write_jso
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_CONDENSED_MEMORY_DIR = Path(__file__).resolve().parents[2] / "memory" / "condensed_conversations"
 CONDENSE_MODEL = "llama-3.1-8b-instant"
 CONDENSED_CONVERSATION_KEY = "conversation"
 
@@ -87,7 +86,7 @@ def _parse_condensed_json(content):
     return _normalize_condensed_json(parsed)
 
 
-def condense_conversation(messages, conversation_id, source_conversation_file, condensed_base_dir=DEFAULT_CONDENSED_MEMORY_DIR):
+def condense_conversation(messages, conversation_id, source_conversation_file, condensed_base_dir):
     if not messages:
         logger.info("Skipping post-conversation condensation because no messages were recorded.")
         return None

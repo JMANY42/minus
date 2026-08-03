@@ -11,12 +11,12 @@ SYSTEM_PROMPT = (
     "You operate inside a workspace rooted at /home/jmany42/Projects/minus. "
     "When using file tools, always provide paths relative to this workspace root. "
     "Do not invent absolute paths or paths outside the workspace. "
-    "Always make sure the path exists before trying to read the content of a file."
+    "Always make sure the file exists before trying to read the content of a file."
     "IMPORTANT: If a file path is not known, ask the user or use the workspace listing tool first. "
     "Do not repeat the same tool call with identical arguments after you already have the result for it."
     # maybe don't say absolute truth
     "You will sometimes be given a list of relevant facts about the user. These are not in a file, "
-    "they will be appended to the user prompt. Look for RELEVENT FACTS: for the list of facts"
+    "they will be appended to the user prompt. Look for RELEVENT FACTS: for the list of facts."
     "Treat these as the absolute truth and use them to inform your responses. "
 )
 MAX_RETRIES = 3

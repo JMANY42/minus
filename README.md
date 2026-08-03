@@ -22,7 +22,7 @@ I just gave Minus semantic memory. Minus now can remember facts and preferences 
 - Facts can be superceded by new facts.
 
 Improvements:
-- Similar attributes (e.g. preferred_language vs programming_language) are treated as seperate facts
+- Similar attributes (e.g. preferred_language vs programming_language) are treated as seperate facts (fixed)
 - Sometimes Groq makes a ton of unnecessary tool calls. Tweak system prompt or look into better LLMs (OpenRouter?)
 - Seperate script to look at all current facts and manually go through and modify/delete them. More of a QOL feature. Could be incorporated into future dashboard.
 
