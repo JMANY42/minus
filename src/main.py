@@ -40,6 +40,8 @@ def conversation_loop(transcripts):
         speak(response)
     conversation.post_conversation()
 
+    print(conversation.memory._semantic_memory.get_all_facts() if conversation.memory._semantic_memory else "No semantic memory extracted.")
+
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,5 @@
 import logging
+from dataclasses import asdict, is_dataclass
 
 from response import generate_response
 from memory import ConversationMemory
@@ -32,14 +33,31 @@ def create_assistant_message(message):
 
     return assistant_message
 
+def _make_json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {key: _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_make_json_safe(item) for item in value]
+    if is_dataclass(value):
+        return _make_json_safe(asdict(value))
+    if hasattr(value, "__dict__"):
+        return {key: _make_json_safe(item) for key, item in vars(value).items() if not key.startswith("_")}
+    return str(value)
+
+
+def create_fact_message(facts):
+    return {"role": "user", "content": _make_json_safe(facts)}
 
 def create_tool_message(tool_call_id, content):
     return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
 
 
 def append_message(messages, message, memory=None):
-    messages.append(message)
-    logger.debug("New conversation message:\n%s", pretty_json(message))
+    serializable_message = _make_json_safe(message)
+    messages.append(serializable_message)
+    logger.debug("New conversation message:\n%s", pretty_json(serializable_message))
 
     if memory is not None:
         memory.save(messages)
@@ -107,8 +125,14 @@ class Conversation:
         self.max_tool_rounds = max_tool_rounds
 
     def reply(self, transcript):
-        append_message(self.messages, create_user_message(transcript), memory=self.memory)
+        current_user_message = create_user_message(transcript)
+        relevent_facts = [f.raw_text.strip() for f in self.memory.search_facts(current_user_message["content"], 5)]
+        current_user_message["content"] += "\n\nRELEVANT FACTS:\n" + pretty_json(relevent_facts)
+        print("current_user_message", current_user_message)
+        append_message(self.messages, current_user_message, memory=self.memory)
+        # append_message(self.messages, create_fact_message(relevent_facts), memory=self.memory)
         completed_tool_rounds = 0
+        print("relevent facts", relevent_facts)
 
         while completed_tool_rounds < self.max_tool_rounds:
             completion = generate_response(self.messages, tools=self.tools)
@@ -123,4 +147,5 @@ class Conversation:
         raise RuntimeError("Tool call limit reached before the model produced a final response.")
 
     def post_conversation(self):
-        return self.memory.condense_conversation(self.messages)
+        condensed_convo = self.memory.condense_conversation(self.messages)
+        return self.memory.extract_and_store_semantic_memory(condensed_convo)

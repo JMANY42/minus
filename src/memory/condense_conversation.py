@@ -75,7 +75,7 @@ def _normalize_condensed_json(parsed):
     if not normalized_conversation:
         raise ValueError("Condensed conversation payload must contain at least one user or assistant turn.")
 
-    return {CONDENSED_CONVERSATION_KEY: normalized_conversation}
+    return normalized_conversation
 
 
 def _parse_condensed_json(content):
@@ -94,18 +94,21 @@ def condense_conversation(messages, conversation_id, source_conversation_file, c
 
     payload = _build_condense_payload(messages)
 
-    try:
-        completion = _groq_call(**payload)
-        message = completion.choices[0].message
-        condensed_json = _parse_condensed_json(getattr(message, "content", ""))
-    except JSONDecodeError:
-        logger.exception("Groq returned invalid JSON for condensed conversation %s", conversation_id)
-        return None
-    except ValueError:
-        logger.exception("Failed to condense conversation %s", conversation_id)
-        return None
-    except Exception:
-        logger.exception("Failed to condense conversation %s", conversation_id)
+    max_errors = 3
+    for attempt in range(max_errors):
+        try:
+            completion = _groq_call(**payload)
+            message = completion.choices[0].message
+            condensed_json = _parse_condensed_json(getattr(message, "content", ""))
+            break
+        except JSONDecodeError:
+            logger.exception("Groq returned invalid JSON for condensed conversation %s. Retrying... (%d/%d)", conversation_id, attempt, max_errors)
+        except ValueError:
+            logger.exception("Failed to condense conversation %s. Retrying... (%d/%d)", conversation_id, attempt, max_errors)
+        except Exception:
+            logger.exception("Failed to condense conversation %s. Retrying... (%d/%d)", conversation_id, attempt, max_errors)
+    else:
+        logger.error("Failed to condense conversation %s after %s attempts", conversation_id, max_errors)
         return None
 
     condensed_payload = {
@@ -119,7 +122,7 @@ def condense_conversation(messages, conversation_id, source_conversation_file, c
     try:
         write_json(condensed_path, condensed_payload)
         logger.info("Saved condensed conversation to %s", condensed_path)
-        return condensed_path
+        return condensed_payload
     except OSError:
         logger.exception("Failed to persist condensed conversation to %s", condensed_path)
         return None
