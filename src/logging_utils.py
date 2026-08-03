@@ -55,7 +55,7 @@ def setup_logging(level=logging.DEBUG):
     root_logger.addHandler(file_handler)
     root_logger.addHandler(stream_handler)
 
-    for logger_name in ("groq", "groq._base_client", "httpx", "httpcore"):
+    for logger_name in ("openai", "openai._base_client", "httpx", "httpcore"):
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
     # Suppress verbose STT module logs so only warnings and above are emitted from STT.

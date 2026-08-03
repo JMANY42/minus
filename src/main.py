@@ -1,6 +1,7 @@
 import argparse
 import logging
 
+from memory.memory_manager import MemoryManager
 from speech_to_text import create_recorder, iter_cli_transcripts, iter_transcripts
 from conversation import Conversation
 from logging_utils import setup_logging
@@ -25,13 +26,13 @@ def main():
     args = parser.parse_args()
 
     transcripts = iter_cli_transcripts() if args.no_mic else iter_transcripts(create_recorder())
-    conversation_loop(transcripts)
+    memory = MemoryManager()
+    conversation = Conversation(memory=memory)
+
+    conversation_loop(transcripts, conversation)
 
 
-def conversation_loop(transcripts):
-    conversation = Conversation()
-
-
+def conversation_loop(transcripts, conversation):
     for transcript in transcripts:
         logger.info("Transcript received:\n%s", pretty_json(transcript))
 
@@ -39,6 +40,11 @@ def conversation_loop(transcripts):
         logger.info("Assistant response:\n%s", pretty_json(response))
         speak(response)
     conversation.post_conversation()
+
+    if conversation.memory._memory_store:
+        logger.info("Semantic memory facts:\n%s", pretty_json(conversation.memory._memory_store.get_all_facts()))
+    else:
+        logger.info("No semantic memory extracted.")
 
 
 if __name__ == "__main__":
