@@ -49,8 +49,17 @@ class MemoryManager:
 
     def save(self, messages):
         self._state["updated_at"] = _utc_timestamp()
-        self._state["messages"] = list(messages)
+        self._state["messages"] = self._with_system_message(messages)
         self._persist()
+
+    def _with_system_message(self, messages):
+        # Lazy import avoids pulling in the LLM client module just to read the system prompt.
+        from response import SYSTEM_PROMPT
+
+        if messages and messages[0].get("role") == "system":
+            return list(messages)
+
+        return [{"role": "system", "content": SYSTEM_PROMPT}, *messages]
 
     def condense_conversation(self, messages):
         return condense_conversation(
@@ -67,17 +76,17 @@ class MemoryManager:
             logger.info("Skipping semantic memory extraction because condensed conversation is None.")
             return []
 
-        print(f"Condensed conversation: {condensed_conversation}")
+        logger.debug("Condensed conversation: %s", condensed_conversation)
         condensed_messages = condensed_conversation.get("condensed_conversation", [])
         if not condensed_messages:
             logger.info("Skipping semantic memory extraction because condensed conversation is empty.")
             return []
-        print("known attributes:" , self._memory_store.get_known_attributes())
+        logger.debug("known attributes: %s", self._memory_store.get_known_attributes())
         return extract_facts_from_conversation(condensed_messages, known_attributes=serialize_json(self._memory_store.get_known_attributes()))
 
     def store_facts(self, facts):
         for fact in facts:
-            print(f"Adding fact to semantic memory: {fact})")
+            logger.info("Adding fact to semantic memory: %s", fact)
             self._memory_store.add_fact(
                 attribute=fact["attribute"],
                 value=fact["value"],

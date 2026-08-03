@@ -41,7 +41,10 @@ def conversation_loop(transcripts, conversation):
         speak(response)
     conversation.post_conversation()
 
-    print(conversation.memory._memory_store.get_all_facts() if conversation.memory._memory_store else "No semantic memory extracted.")
+    if conversation.memory._memory_store:
+        logger.info("Semantic memory facts:\n%s", pretty_json(conversation.memory._memory_store.get_all_facts()))
+    else:
+        logger.info("No semantic memory extracted.")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Extract durable facts from a conversation transcript using Groq.
+Extract durable facts from a conversation transcript using an LLM.
 
 Input: a JSON file containing:
 {
@@ -29,11 +29,14 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import re
+import time
 
-MODEL = "llama-3.1-8b-instant"
+
+logger = logging.getLogger(__name__)
 
 EXTRACTION_PROMPT = """Extract durable facts from this conversation as a JSON array. For each fact:
 - attribute: normalized snake_case category (e.g. timezone, diet, job_title, preferred_editor)
@@ -57,7 +60,7 @@ Do not include any preamble, explanation, or markdown code fences — just the r
 
 def format_transcript(conversation):
     """Turn the conversation list into a plain-text transcript for the prompt."""
-    print("conversation: ",conversation)
+    logger.debug("conversation: %s", conversation)
     lines = []
     for turn in conversation:
         role = turn.get("role", "unknown")
@@ -114,37 +117,47 @@ def validate_facts(facts):
     return valid
 
 
-def _groq_call(**payload):
-    # Lazy import keeps this script usable in contexts that do not need Groq.
-    from services.groq import groq_call
+def _generate_completion(**kwargs):
+    # Lazy import keeps this script usable in contexts that do not need the LLM client.
+    from services.llm import generate_completion
 
-    return groq_call(**payload)
+    return generate_completion(**kwargs)
 
 
-def extract_facts_from_conversation(conversation, known_attributes, model=MODEL):
+def extract_facts_from_conversation(conversation, known_attributes, model=None):
     """Given a conversation (list of {role, content} dicts), return a list of fact dicts."""
+    logger.info("Extracting semantic facts from conversation (%d turn(s))", len(conversation))
     transcript_text = format_transcript(conversation)
 
     full_extraction_prompt = EXTRACTION_PROMPT.replace("__ATTRIBUTE_LIST__", known_attributes)
-    print("full_extraction_prompt: ",full_extraction_prompt)
-    completion = _groq_call(
-        model=model,
-        messages=[
+    logger.debug("full_extraction_prompt: %s", full_extraction_prompt)
+    completion_kwargs = {
+        "messages": [
             {
                 "role": "user",
                 "content": f"{full_extraction_prompt}\n\nCONVERSATION:\n{transcript_text}",
             }
         ],
-    )
+    }
+    if model:
+        completion_kwargs["model"] = model
+
+    start = time.monotonic()
+    completion = _generate_completion(**completion_kwargs)
+    logger.info("Fact extraction LLM call took %.2fs", time.monotonic() - start)
 
     message = completion.choices[0].message
     raw_text = getattr(message, "content", "") or ""
 
     facts = extract_json_array(raw_text)
-    return validate_facts(facts)
+    valid_facts = validate_facts(facts)
+    logger.info("Extracted %d fact(s) from conversation", len(valid_facts))
+    return valid_facts
 
 
 def main():
+    from services.llm import DEFAULT_MODEL
+
     parser = argparse.ArgumentParser(description="Extract durable facts from a conversation transcript.")
     parser.add_argument(
         "input",
@@ -157,8 +170,8 @@ def main():
     )
     parser.add_argument(
         "--model",
-        help=f"Model to use (default: {MODEL})",
-        default=MODEL,
+        help=f"Model to use (default: {DEFAULT_MODEL})",
+        default=None,
     )
     args = parser.parse_args()
 

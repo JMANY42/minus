@@ -15,25 +15,26 @@ class FakeBadRequestError(Exception):
         self.body = body
 
 
-fake_groq = types.ModuleType("groq")
+fake_openai = types.ModuleType("openai")
 
 
-class _FakeGroqClient:
+class _FakeOpenAIClient:
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
 
 
-fake_groq.Groq = _FakeGroqClient
-fake_groq.BadRequestError = FakeBadRequestError
+fake_openai.OpenAI = _FakeOpenAIClient
+fake_openai.BadRequestError = FakeBadRequestError
 
 sys.modules["dotenv"] = fake_dotenv
-sys.modules["groq"] = fake_groq
+sys.modules["openai"] = fake_openai
 sys.modules.pop("response", None)
-sys.modules.pop("services.groq", None)
+sys.modules.pop("services.llm", None)
 sys.modules.pop("services", None)
 
 import response as response_module
+import services.llm as llm_module
 
 
 class FakeMessage:
@@ -60,16 +61,6 @@ class FakeCompletions:
         return result
 
 
-class FakeChat:
-    def __init__(self, completions):
-        self.completions = completions
-
-
-class FakeClient:
-    def __init__(self, completions):
-        self.chat = FakeChat(completions)
-
-
 class ResponseRetryTests(unittest.TestCase):
     def test_retries_failed_generation_then_returns_valid_completion(self):
         first_error = FakeBadRequestError(
@@ -83,7 +74,7 @@ class ResponseRetryTests(unittest.TestCase):
         )
         final_completion = FakeCompletion(FakeMessage(content="retry worked", tool_calls=None))
         completions = FakeCompletions([first_error, final_completion])
-        response_module.groq_call = completions.create
+        llm_module.llm_call = completions.create
 
         result = response_module.generate_response(
             messages=[{"role": "user", "content": "list files"}],

@@ -14,8 +14,30 @@ def create_user_message(transcript):
     return {"role": "user", "content": transcript}
 
 
-def create_assistant_message(message):
-    assistant_message = {"role": "assistant", "content": message.content}
+def _effective_content(message):
+    """Prefer message.content; fall back to reasoning if content came back blank.
+
+    Some models (e.g. gpt-oss-20b via OpenRouter) sometimes stop right after
+    reasoning and leave content empty. Treat that reasoning as the actual
+    response rather than returning nothing.
+    """
+    content = (message.content or "").strip()
+    if content:
+        return content
+
+    reasoning = (getattr(message, "reasoning", None) or "").strip()
+    if reasoning:
+        logger.info("Assistant message content was blank; falling back to reasoning as the response.")
+        return reasoning
+
+    return content
+
+
+def create_assistant_message(message, content=None):
+    if content is None:
+        content = message.content
+
+    assistant_message = {"role": "assistant", "content": content}
 
     tool_calls = getattr(message, "tool_calls", None) or []
     if tool_calls:
@@ -105,13 +127,16 @@ def process_tool_calls(conversation, tool_calls):
 
 def build_reply(conversation, completion):
     message = completion.choices[0].message
+    tool_calls = getattr(message, "tool_calls", None) or []
+
+    if not tool_calls:
+        response_text = _effective_content(message)
+        assistant_message = create_assistant_message(message, content=response_text)
+        append_message(conversation.messages, assistant_message, memory=conversation.memory)
+        return response_text, False
+
     assistant_message = create_assistant_message(message)
     append_message(conversation.messages, assistant_message, memory=conversation.memory)
-
-    tool_calls = getattr(message, "tool_calls", None) or []
-    if not tool_calls:
-        return (message.content or "").strip(), False
-
     tool_round_failed = process_tool_calls(conversation, tool_calls)
     return None, tool_round_failed
 
@@ -130,11 +155,11 @@ class Conversation:
         if relevent_facts:
             current_user_message["content"] += "\n\nRELEVANT FACTS:\n" + pretty_json(relevent_facts)
         
-        print("current_user_message", current_user_message)
+        logger.debug("current_user_message: %s", current_user_message)
         append_message(self.messages, current_user_message, memory=self.memory)
         # append_message(self.messages, create_fact_message(relevent_facts), memory=self.memory)
         completed_tool_rounds = 0
-        print("relevent facts", relevent_facts)
+        logger.debug("relevent facts: %s", relevent_facts)
 
         while completed_tool_rounds < self.max_tool_rounds:
             completion = generate_response(self.messages, tools=self.tools)

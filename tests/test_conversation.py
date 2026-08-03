@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 fake_dotenv = types.ModuleType("dotenv")
 fake_dotenv.load_dotenv = lambda *args, **kwargs: None
 
-fake_groq = types.ModuleType("groq")
+fake_openai = types.ModuleType("openai")
 
 
 class FakeBadRequestError(Exception):
@@ -20,18 +20,18 @@ class FakeBadRequestError(Exception):
         self.body = body
 
 
-class _FakeGroqClient:
+class _FakeOpenAIClient:
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
 
-fake_groq.Groq = _FakeGroqClient
-fake_groq.BadRequestError = FakeBadRequestError
+fake_openai.OpenAI = _FakeOpenAIClient
+fake_openai.BadRequestError = FakeBadRequestError
 
 sys.modules["dotenv"] = fake_dotenv
-sys.modules["groq"] = fake_groq
+sys.modules["openai"] = fake_openai
 sys.modules.pop("response", None)
-sys.modules.pop("services.groq", None)
+sys.modules.pop("services.llm", None)
 sys.modules.pop("services", None)
 
 import conversation as conversation_module
@@ -112,7 +112,7 @@ class ConversationToolLoopTests(unittest.TestCase):
         first_response = FakeCompletion(FakeMessage(content=None, tool_calls=[FakeToolCall("list_workspace_files", '{"path":"."}')]))
         second_response = FakeCompletion(FakeMessage(content="I have the workspace listing.", tool_calls=[]))
 
-        with patch.object(conversation_module, "ConversationMemory", FakeMemory):
+        with patch.object(conversation_module, "MemoryManager", FakeMemory):
             conversation = conversation_module.Conversation(tools_path="/tmp/unused-tools.json")
 
         with patch.object(conversation_module, "generate_response", side_effect=[first_response, second_response]) as mock_generate:
@@ -124,7 +124,7 @@ class ConversationToolLoopTests(unittest.TestCase):
         self.assertEqual(mock_generate.call_count, 2)
 
     def test_post_conversation_delegates_to_memory(self):
-        with patch.object(conversation_module, "ConversationMemory", FakeMemory):
+        with patch.object(conversation_module, "MemoryManager", FakeMemory):
             conversation = conversation_module.Conversation(tools_path="/tmp/unused-tools.json")
 
         conversation.messages = [
