@@ -28,6 +28,15 @@ def create_recorder():
         device="cuda",
         post_speech_silence_duration=0.2,
         silero_sensitivity=0.4,
+        # RealtimeSTT keeps the recorder armed for voice activity while we're
+        # speaking (for barge-in), and its internal worker loop disarms
+        # start_recording_on_voice_activity unconditionally after any voice
+        # detection - even when the resulting self.start() silently no-ops
+        # because it landed within min_gap_between_recordings of the previous
+        # recording's stop. That permanently stops voice detection until the
+        # next wait_audio() call, hanging the recorder in "listening" forever.
+        # Zeroing the gap removes that no-op window.
+        min_gap_between_recordings=0.0,
     )
 
 

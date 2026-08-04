@@ -1,5 +1,7 @@
 import argparse
+import faulthandler
 import logging
+import signal
 
 from memory.memory_manager import MemoryManager
 from speech_to_text import create_recorder, iter_cli_transcripts, iter_transcripts
@@ -16,6 +18,14 @@ logger = logging.getLogger(__name__)
 def main():
     log_file = setup_logging()
     logger.info("Logging to %s", log_file)
+
+    # When the recorder/TTS pipeline wedges, Ctrl-C isn't always reliable
+    # (whatever's stuck may not be checking for interrupts). Send SIGUSR1
+    # (kill -USR1 <pid>) to dump every thread's live Python stack to stderr
+    # without killing the process - that pinpoints exactly what's blocked.
+    faulthandler.enable()
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1)
 
     parser = argparse.ArgumentParser(description="Run the MINUS assistant")
     parser.add_argument(

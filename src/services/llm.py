@@ -10,7 +10,8 @@ load_dotenv()
 
 # gpt-oss-120b:nitro is very expensive but its super fast and could chain together multiple tool calls without failing.
 # Next change it to switch to a multi model architecture
-DEFAULT_MODEL = "openai/gpt-oss-120b:nitro"
+# DEFAULT_MODEL = "openai/gpt-oss-120b:nitro"
+DEFAULT_MODEL = "openai/gpt-oss-20b:free"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
