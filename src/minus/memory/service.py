@@ -4,7 +4,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from minus.config import Settings
+from minus.core.prompts import SYSTEM_PROMPT
 from minus.memory.condense import condense_conversation
+from minus.memory.extraction import extract_facts_from_conversation
 from minus.memory.facts.store import MemoryStore
 from minus.paths import condensed_conversations_dir, conversations_dir, semantic_memory_db
 from minus.services.json import serialize_json, write_json
@@ -14,7 +17,13 @@ DEFAULT_MEMORY_DIR = conversations_dir()
 DEFAULT_CONDENSED_MEMORY_DIR = condensed_conversations_dir()
 DEFAULT_SEMANTIC_MEMORY_DB = semantic_memory_db()
 
-RELEVENCE_THRESHOLD = 0.356 # magic number from calibrate_threshold.py
+# Default relevance cutoff for fact retrieval. Derived by `minus calibrate` as
+# the midpoint between the direct-match and related-topic similarity
+# distributions; Settings.relevance_threshold is the value actually used at
+# runtime and overrides this.
+DEFAULT_RELEVANCE_THRESHOLD = Settings.model_fields["relevance_threshold"].default
+DEFAULT_FACT_SEARCH_TOP_K = Settings.model_fields["fact_search_top_k"].default
+
 
 def _utc_timestamp():
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -53,9 +62,6 @@ class MemoryManager:
         self._persist()
 
     def _with_system_message(self, messages):
-        # Lazy import avoids pulling in the LLM client module just to read the system prompt.
-        from minus.core.prompts import SYSTEM_PROMPT
-
         if messages and messages[0].get("role") == "system":
             return list(messages)
 
@@ -70,8 +76,6 @@ class MemoryManager:
         )
 
     def extract_facts(self, condensed_conversation):
-        from minus.memory.extraction import extract_facts_from_conversation
-
         if condensed_conversation is None:
             logger.info("Skipping semantic memory extraction because condensed conversation is None.")
             return []
@@ -103,12 +107,29 @@ class MemoryManager:
         return facts
 
 
-    def search_facts(self, query, top_k=5, threshold=RELEVENCE_THRESHOLD):
-        top_k_facts = self._memory_store.search_facts(query, top_k=top_k)
+    def search_facts(
+        self,
+        query,
+        top_k=DEFAULT_FACT_SEARCH_TOP_K,
+        threshold=DEFAULT_RELEVANCE_THRESHOLD,
+    ):
+        """Return stored facts semantically close enough to `query` to be worth injecting."""
+        candidates = self._memory_store.search_facts(query, top_k=top_k)
 
-        relevent_facts = []
-        for fact in top_k_facts:
-            if fact.similarity is not None and (threshold is None or fact.similarity >= threshold):
-                relevent_facts.append(fact)
+        return [
+            fact
+            for fact in candidates
+            if fact.similarity is not None
+            and (threshold is None or fact.similarity >= threshold)
+        ]
 
-        return relevent_facts
+    def all_facts(self, only_active=True):
+        """Every stored fact.
+
+        Exists so callers stop reaching into `_memory_store`; the CLI used to
+        touch that private attribute directly to log the session's facts.
+        """
+        return self._memory_store.get_all_facts(only_active=only_active)
+
+    def close(self):
+        self._memory_store.close()
