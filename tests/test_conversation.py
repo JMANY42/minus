@@ -8,6 +8,10 @@ from unittest.mock import patch
 
 fake_dotenv = types.ModuleType("dotenv")
 fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+# pydantic-settings reaches for dotenv_values too. Stubbing a third-party
+# module means tracking every symbol its consumers use -- these stubs go
+# away entirely once the LLM client is dependency-injected.
+fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
 
 fake_openai = types.ModuleType("openai")
 

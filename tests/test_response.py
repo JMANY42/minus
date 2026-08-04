@@ -4,6 +4,10 @@ import unittest
 
 fake_dotenv = types.ModuleType("dotenv")
 fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+# pydantic-settings reaches for dotenv_values too. Stubbing a third-party
+# module means tracking every symbol its consumers use -- these stubs go
+# away entirely once the LLM client is dependency-injected.
+fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
 
 
 class FakeBadRequestError(Exception):
@@ -30,8 +34,10 @@ sys.modules.pop("minus.core.prompts", None)
 sys.modules.pop("minus.llm.client", None)
 sys.modules.pop("minus.llm", None)
 
-import minus.core.prompts as response_module
 import minus.llm.client as llm_module
+
+# generate_response now lives with the LLM client; prompts.py is pure text.
+response_module = llm_module
 
 
 class FakeMessage:

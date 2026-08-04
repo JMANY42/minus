@@ -1,7 +1,8 @@
 import logging
 from dataclasses import asdict, is_dataclass
 
-from minus.core.prompts import generate_response
+from minus.core.prompts import FACTS_MARKER
+from minus.llm.client import generate_response
 from minus.memory.service import MemoryManager
 from minus.services.json import pretty_json
 from minus.tools.registry import ToolHandler
@@ -149,15 +150,19 @@ class Conversation:
 
     def reply(self, transcript):
         current_user_message = create_user_message(transcript)
-        relevent_facts = [f.raw_text.strip() for f in self.memory.search_facts(current_user_message["content"], 5)]
-        if relevent_facts:
-            current_user_message["content"] += "\n\nRELEVANT FACTS:\n" + pretty_json(relevent_facts)
+        relevant_facts = [
+            f.raw_text.strip()
+            for f in self.memory.search_facts(current_user_message["content"], 5)
+        ]
+        if relevant_facts:
+            current_user_message["content"] += (
+                f"\n\n{FACTS_MARKER}\n" + pretty_json(relevant_facts)
+            )
 
         logger.debug("current_user_message: %s", current_user_message)
         append_message(self.messages, current_user_message, memory=self.memory)
-        # append_message(self.messages, create_fact_message(relevent_facts), memory=self.memory)
         completed_tool_rounds = 0
-        logger.debug("relevent facts: %s", relevent_facts)
+        logger.debug("relevant facts: %s", relevant_facts)
 
         while completed_tool_rounds < self.max_tool_rounds:
             try:

@@ -5,6 +5,8 @@ import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from minus.core.prompts import RETRY_NOTE, SYSTEM_PROMPT
+
 load_dotenv()
 
 # gpt-oss-120b:nitro is very expensive but its super fast and could chain together multiple tool calls without failing.
@@ -172,3 +174,23 @@ def generate_completion(
     raise RuntimeError(
         f"LLM failed to produce a valid response after retries. Last error: {last_error}"
     ) from last_error
+
+
+MAX_RETRIES = 3
+
+
+def generate_response(messages, tools=None, model=DEFAULT_MODEL, max_retries=MAX_RETRIES):
+    """Generate an assistant turn bound to the standing system prompt.
+
+    Temporary home: phase 4 replaces this with an injected ChatModel built in
+    the composition root. It lives here rather than in prompts.py so that
+    prompt text stays free of behaviour (and of the import cycle).
+    """
+    return generate_completion(
+        messages,
+        model=model,
+        system_prompt=SYSTEM_PROMPT,
+        tools=tools,
+        max_retries=max_retries,
+        retry_note=RETRY_NOTE,
+    )
