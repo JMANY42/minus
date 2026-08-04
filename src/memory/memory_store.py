@@ -405,6 +405,14 @@ class MemoryStore:
  
         return {"canonical_attribute": canonical_attribute, "moved": moved}
 
+    def delete_fact(self, fact_id: str):
+        """Permanently remove a fact and its embedding. Unlike supersede, this
+        is a hard delete -- use it for pruning bad/unwanted facts, not for
+        recording that a value changed (that's add_fact's job)."""
+        self.conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        self.conn.execute("DELETE FROM fact_embeddings WHERE fact_id = ?", (fact_id,))
+        self.conn.commit()
+
     def close(self):
         self.conn.close()
 
