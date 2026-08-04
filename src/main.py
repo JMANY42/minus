@@ -27,7 +27,7 @@ def main():
 
     transcripts = iter_cli_transcripts() if args.no_mic else iter_transcripts(create_recorder())
     memory = MemoryManager()
-    conversation = Conversation(memory=memory)
+    conversation = Conversation(max_tool_rounds=7, memory=memory)
 
     conversation_loop(transcripts, conversation)
 

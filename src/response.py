@@ -21,7 +21,9 @@ MAX_RETRIES = 3
 RETRY_NOTE = (
     "The previous attempt failed to generate a valid tool call. "
     "Return a valid response that matches the tool schema exactly. "
-    "Do not repeat malformed arguments or duplicate keys."
+    "Do not repeat malformed arguments or duplicate keys. "
+    "A directory that appears in a listing has NOT been explored yet - list it "
+    "before concluding that a file does not exist anywhere in the workspace."
 )
 
 

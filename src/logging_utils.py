@@ -26,16 +26,15 @@ def setup_logging(level=logging.DEBUG):
             self.blocked = tuple(blocked)
 
         def filter(self, record):
+            # Match on the record's origin only. Matching the formatted message
+            # would drop our own logs whenever a blocked name appears in the
+            # payload (e.g. a directory listing containing speech_to_text.py).
             name = getattr(record, "name", "") or ""
             module = getattr(record, "module", "") or ""
             pathname = getattr(record, "pathname", "") or ""
-            try:
-                msg = record.getMessage() or ""
-            except Exception:
-                msg = ""
 
             for b in self.blocked:
-                if b and (b in name or b in module or b in pathname or b in msg):
+                if b and (b in name or b in module or b in pathname):
                     return False
 
             return True

@@ -14,25 +14,6 @@ def create_user_message(transcript):
     return {"role": "user", "content": transcript}
 
 
-def _effective_content(message):
-    """Prefer message.content; fall back to reasoning if content came back blank.
-
-    Some models (e.g. gpt-oss-20b via OpenRouter) sometimes stop right after
-    reasoning and leave content empty. Treat that reasoning as the actual
-    response rather than returning nothing.
-    """
-    content = (message.content or "").strip()
-    if content:
-        return content
-
-    reasoning = (getattr(message, "reasoning", None) or "").strip()
-    if reasoning:
-        logger.info("Assistant message content was blank; falling back to reasoning as the response.")
-        return reasoning
-
-    return content
-
-
 def create_assistant_message(message, content=None):
     if content is None:
         content = message.content
@@ -85,6 +66,23 @@ def append_message(messages, message, memory=None):
         memory.save(messages)
 
 
+def generation_failure_message(exc):
+    """Record a failed generation in the transcript.
+
+    Retries inside generate_completion are invisible to later rounds, so a
+    round that burned all its retries would otherwise leave no trace and the
+    next round would regenerate the same dead end.
+    """
+    return {
+        "role": "system",
+        "content": (
+            f"The previous assistant turn could not be generated: {exc} "
+            "Do not repeat that attempt. Either call one of the available tools "
+            "with valid arguments, or answer the user in plain text."
+        ),
+    }
+
+
 def execution_error_message(tool_name, exc):
     return (
         f"Tool execution failed for {tool_name!r}: {exc}. "
@@ -130,7 +128,8 @@ def build_reply(conversation, completion):
     tool_calls = getattr(message, "tool_calls", None) or []
 
     if not tool_calls:
-        response_text = _effective_content(message)
+        # validate_completion guarantees non-blank content when there are no tool calls.
+        response_text = message.content.strip()
         assistant_message = create_assistant_message(message, content=response_text)
         append_message(conversation.messages, assistant_message, memory=conversation.memory)
         return response_text, False
@@ -162,7 +161,16 @@ class Conversation:
         logger.debug("relevent facts: %s", relevent_facts)
 
         while completed_tool_rounds < self.max_tool_rounds:
-            completion = generate_response(self.messages, tools=self.tools)
+            try:
+                completion = generate_response(self.messages, tools=self.tools)
+            except RuntimeError as exc:
+                # Keep the failure in the transcript and spend a round on it, so the
+                # next attempt sees the dead end instead of walking back into it.
+                logger.warning("Generation failed this round; recording it and continuing. Error: %s", exc)
+                append_message(self.messages, generation_failure_message(exc), memory=self.memory)
+                completed_tool_rounds += 1
+                continue
+
             response_text, tool_round_failed = build_reply(self, completion)
 
             if response_text is not None:
