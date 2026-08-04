@@ -38,7 +38,7 @@ import time
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_PROMPT = """Extract durable facts from this conversation as a JSON array. For each fact:
+EXTRACTION_PROMPT = """Extract durable facts from this conversation as a JSON array. Only extract facts about the user or about the user's preferences. Do not extract facts about yourself. For each fact:
 - attribute: normalized snake_case category (e.g. timezone, diet, job_title, preferred_editor)
 - value: short canonical value, no filler words
 - multi_valued: true if multiple values can be true at once (interests, allergies), false if only one can be true at a time (timezone, job, location)
