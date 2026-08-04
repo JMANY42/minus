@@ -18,10 +18,13 @@ jobs:
 
       # Deliberately no --extra audio and no --extra embeddings: those pull in
       # torch, CUDA wheels and a native audio stack. The fact store takes an
-      # injected Embedder and the audio tests skip themselves, so the whole
-      # suite runs without any of it.
+      # injected Embedder, and the audio logic worth testing lives in modules
+      # that import neither sounddevice nor kokoro-onnx, so the whole suite
+      # runs without any of it -- 94 tests, 0 skipped.
+      #
+      # The dev dependency group installs by default; it needs no flag.
       - name: Install
-        run: uv sync --extra dev
+        run: uv sync
 
       - name: Lint
         run: uv run ruff check .

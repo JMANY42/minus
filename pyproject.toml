@@ -35,6 +35,13 @@ audio = [
 embeddings = [
     "sentence-transformers>=5.0",
 ]
+
+# Tooling, not a feature of the package. A dependency group rather than an
+# extra: extras describe optional capabilities a consumer can ask for
+# (`minus[audio]`), whereas groups are for working on the project itself and
+# are never published. uv installs the `dev` group by default, so `uv run
+# pytest` needs no flags.
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

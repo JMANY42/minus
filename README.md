@@ -14,8 +14,8 @@ persistent semantic memory, speech in and speech out.
 ## Install
 
 ```bash
-uv sync --extra dev                              # core + test tooling
-uv sync --extra dev --extra audio --extra embeddings   # everything, incl. mic/TTS
+uv sync                                          # core + dev tooling
+uv sync --extra audio --extra embeddings         # everything, incl. mic/TTS
 ```
 
 Audio (`kokoro-onnx`, `sounddevice`, `RealtimeSTT`) and embeddings
@@ -61,6 +61,7 @@ docstring, so there is no second place to keep in sync:
 
 ```python
 from minus.tools.registry import registry
+
 
 @registry.tool
 def set_light(room: str, brightness: int = 100) -> dict:

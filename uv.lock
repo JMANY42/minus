@@ -874,31 +874,37 @@ audio = [
     { name = "realtimestt", extra = ["faster-whisper", "silero-vad"] },
     { name = "sounddevice" },
 ]
+embeddings = [
+    { name = "sentence-transformers" },
+]
+
+[package.dev-dependencies]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
 ]
-embeddings = [
-    { name = "sentence-transformers" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "kokoro-onnx", marker = "extra == 'audio'", specifier = ">=0.5.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "openai", specifier = ">=2.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "realtimestt", extras = ["faster-whisper", "silero-vad"], marker = "extra == 'audio'", specifier = ">=1.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=5.0" },
     { name = "sounddevice", marker = "extra == 'audio'", specifier = ">=0.5" },
     { name = "sqlite-vec", specifier = ">=0.1.9" },
 ]
-provides-extras = ["audio", "embeddings", "dev"]
+provides-extras = ["audio", "embeddings"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.6" },
+]
 
 [[package]]
 name = "mpmath"
