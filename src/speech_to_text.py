@@ -6,6 +6,13 @@ from text_to_speech import request_interrupt
 logger = logging.getLogger(__name__)
 logger.disabled = True
 
+EXIT_PHRASES = {"exit", "quit", "end conversation"}
+
+
+def is_exit_phrase(text):
+    return text.strip().lower().rstrip(".!?") in EXIT_PHRASES
+
+
 def update(text):
     if text and text.strip():
         request_interrupt()
@@ -41,10 +48,21 @@ def create_recorder():
 
 
 def iter_transcripts(recorder):
-    while True:
-        text = recorder.text()
-        if text:
-            yield text.strip()
+    # RealtimeSTT's background reader/transcription workers are non-daemon
+    # threads on Linux (a `deamon` typo in its own _start_thread() leaves the
+    # real `daemon` flag False), so without an explicit shutdown() call they
+    # keep running after this generator ends and the interpreter hangs at
+    # exit waiting for them to finish.
+    try:
+        while True:
+            text = recorder.text()
+            if text:
+                text = text.strip()
+                if is_exit_phrase(text):
+                    return
+                yield text
+    finally:
+        recorder.shutdown()
 
 
 def iter_cli_transcripts(prompt="You: "):
@@ -61,7 +79,7 @@ def iter_cli_transcripts(prompt="You: "):
         if not text:
             continue
 
-        if text.lower() in {"exit", "quit"}:
+        if is_exit_phrase(text):
             return
 
         yield text
