@@ -19,10 +19,16 @@ dependencies = [
 
 [project.optional-dependencies]
 # Microphone input and speech output. Needs a working PortAudio/ALSA stack.
+#
+# RealtimeSTT 1.0 made its transcription engine and VAD optional extras, so a
+# bare "RealtimeSTT" installs a recorder that cannot actually transcribe. The
+# two named here reproduce the previously working setup: faster-whisper is the
+# engine stt.py configures via model=/realtime_model_type=, and silero-vad
+# backs the silero_sensitivity= and on_vad_start= barge-in path.
 audio = [
     "kokoro-onnx>=0.5.0",
     "sounddevice>=0.5",
-    "RealtimeSTT>=1.0",
+    "RealtimeSTT[faster-whisper,silero-vad]>=1.0",
 ]
 # Semantic fact embeddings. Pulls in torch, so it is deliberately opt-in:
 # the fact store takes an injected embedder and tests supply a fake one.
