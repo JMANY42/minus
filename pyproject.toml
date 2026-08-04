@@ -29,6 +29,17 @@ audio = [
     "kokoro-onnx>=0.5.0",
     "sounddevice>=0.5",
     "RealtimeSTT[faster-whisper,silero-vad]>=1.0",
+    # faster-whisper runs on ctranslate2, which links against the CUDA 12
+    # runtime (libcublas.so.12, libcudnn.so.9) and declares no nvidia
+    # dependencies of its own -- supplying them is the caller's job. torch
+    # brings CUDA *13* libraries, so without these the GPU path dies at the
+    # first encode() with "Library libcublas.so.12 is not found". The two
+    # generations install to separate paths (nvidia/cu13/lib vs
+    # nvidia/cublas/lib) and coexist, which is how this worked before.
+    "nvidia-cublas-cu12>=12.9; sys_platform == 'linux'",
+    "nvidia-cudnn-cu12>=9.22; sys_platform == 'linux'",
+    "nvidia-cuda-nvrtc-cu12>=12.9; sys_platform == 'linux'",
+    "nvidia-cuda-runtime-cu12>=12.9; sys_platform == 'linux'",
 ]
 # Semantic fact embeddings. Pulls in torch, so it is deliberately opt-in:
 # the fact store takes an injected embedder and tests supply a fake one.
