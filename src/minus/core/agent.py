@@ -1,11 +1,10 @@
 import logging
 from dataclasses import asdict, is_dataclass
 
-from minus.core.prompts import FACTS_MARKER
-from minus.llm.client import generate_response
+from minus.core.prompts import FACTS_MARKER, RETRY_NOTE, SYSTEM_PROMPT
+from minus.errors import GenerationFailedError, LLMError, ToolError
 from minus.memory.service import MemoryManager
 from minus.services.json import pretty_json
-from minus.errors import ToolError
 from minus.tools import registry as default_registry
 
 logger = logging.getLogger(__name__)
@@ -145,16 +144,27 @@ def build_reply(conversation, completion):
 
 
 class Conversation:
-    def __init__(self, tools=None, max_tool_rounds=5, memory=None):
+    def __init__(
+        self,
+        model,
+        tools=None,
+        max_tool_rounds=5,
+        memory=None,
+        system_prompt=SYSTEM_PROMPT,
+    ):
         """
         Args:
+            model: A ChatModel. Injected rather than imported so that swapping
+                providers, or stubbing the model in tests, is a caller's choice.
             tools: A ToolRegistry. Defaults to the shared registry holding the
                 built-in tools; pass your own to scope what the model can call.
         """
+        self.model = model
         self.messages = []
         self.memory = memory or MemoryManager()
         self.tools = tools if tools is not None else default_registry
         self.max_tool_rounds = max_tool_rounds
+        self.system_prompt = system_prompt
 
     def reply(self, transcript):
         current_user_message = create_user_message(transcript)
@@ -174,8 +184,13 @@ class Conversation:
 
         while completed_tool_rounds < self.max_tool_rounds:
             try:
-                completion = generate_response(self.messages, tools=self.tools.schemas())
-            except RuntimeError as exc:
+                completion = self.model.complete(
+                    self.messages,
+                    system_prompt=self.system_prompt,
+                    tools=self.tools.schemas(),
+                    retry_note=RETRY_NOTE,
+                )
+            except LLMError as exc:
                 # Keep the failure in the transcript and spend a round on it, so the
                 # next attempt sees the dead end instead of walking back into it.
                 logger.warning("Generation failed this round; recording it and continuing. Error: %s", exc)
@@ -191,7 +206,9 @@ class Conversation:
             if not tool_round_failed:
                 completed_tool_rounds += 1
 
-        raise RuntimeError("Tool call limit reached before the model produced a final response.")
+        raise GenerationFailedError(
+            "Tool call limit reached before the model produced a final response."
+        )
 
     # When a conversation finishes, we need to condense it and extract semantic memory from it.
     def post_conversation(self):

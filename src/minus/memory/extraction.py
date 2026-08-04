@@ -1,59 +1,23 @@
-#!/usr/bin/env python3
-"""
-Extract durable facts from a conversation transcript using an LLM.
+"""Extract durable facts from a conversation transcript using an LLM.
 
-Input: a JSON file containing:
-{
-  "conversation": [
-    {"role": "user" | "assistant", "content": "..."},
-    ...
-  ]
-}
+Returns a list of fact dicts shaped like::
 
-Output: a JSON array of fact objects:
-[
-  {
-    "attribute": "timezone",
-    "value": "PST",
-    "multi_valued": false,
-    "raw_text": "I'm on Pacific time"
-  },
-  ...
-]
+    {"attribute": "timezone", "value": "PST",
+     "multi_valued": False, "raw_text": "I'm on Pacific time"}
 
-Usage:
-    python extract_facts.py transcript.json
-    python extract_facts.py transcript.json -o facts.json
-    cat transcript.json | python extract_facts.py -
+The model is passed in rather than imported; see extract_facts_from_conversation.
 """
 
-import argparse
 import json
 import logging
 import re
-import sys
 import time
 
+from minus.core.prompts import FACT_EXTRACTION_PROMPT
+
 logger = logging.getLogger(__name__)
+EXTRACTION_PROMPT = FACT_EXTRACTION_PROMPT
 
-EXTRACTION_PROMPT = """Extract durable facts from this conversation as a JSON array. Only extract facts about the user or about the user's preferences. Do not extract facts about yourself. For each fact:
-- attribute: normalized snake_case category (e.g. timezone, diet, job_title, preferred_editor)
-- value: short canonical value, no filler words
-- multi_valued: true if multiple values can be true at once (interests, allergies), false if only one can be true at a time (timezone, job, location)
-
-Known attributes already in use: __ATTRIBUTE_LIST__
-When extracting a fact, reuse an existing attribute name if it matches the same concept, even if the conversation phrased it differently. Only introduce a new attribute if none of the existing ones genuinely fit.
-Only extract facts that would still matter in 3 months and would change how you'd respond in a future conversation. Skip one-off task details, pleasantries, and anything already implied by a fact you've already extracted. Do not include facts about the current conversation's topic unless they reflect a lasting preference or attribute.
-
-For each fact, also include:
-- raw_text: a short natural sentance that directly encodes the fact
-
-Respond with ONLY a JSON array of objects, each shaped like:
-{"attribute": str, "value": str, "multi_valued": bool, "raw_text": str}
-
-Do not include any preamble, explanation, or markdown code fences — just the raw JSON array. 
-**IMPORTANT**: If no durable facts are found, respond with an empty array: []. Do not make up information or put value: "not available" or "unknown"
-"""
 
 
 def format_transcript(conversation):
@@ -115,33 +79,28 @@ def validate_facts(facts):
     return valid
 
 
-def _generate_completion(**kwargs):
-    # Lazy import keeps this script usable in contexts that do not need the LLM client.
-    from minus.llm.client import generate_completion
+def extract_facts_from_conversation(conversation, known_attributes, model, model_name=None):
+    """Given a conversation (list of {role, content} dicts), return a list of fact dicts.
 
-    return generate_completion(**kwargs)
-
-
-def extract_facts_from_conversation(conversation, known_attributes, model=None):
-    """Given a conversation (list of {role, content} dicts), return a list of fact dicts."""
+    Args:
+        model: A ChatModel. Injected so extraction can be exercised without a
+            network call, and so the roadmap's cheaper extraction tier is a
+            caller's choice rather than a hard-coded import.
+    """
     logger.info("Extracting semantic facts from conversation (%d turn(s))", len(conversation))
     transcript_text = format_transcript(conversation)
 
     full_extraction_prompt = EXTRACTION_PROMPT.replace("__ATTRIBUTE_LIST__", known_attributes)
     logger.debug("full_extraction_prompt: %s", full_extraction_prompt)
-    completion_kwargs = {
-        "messages": [
-            {
-                "role": "user",
-                "content": f"{full_extraction_prompt}\n\nCONVERSATION:\n{transcript_text}",
-            }
-        ],
-    }
-    if model:
-        completion_kwargs["model"] = model
+    messages = [
+        {
+            "role": "user",
+            "content": f"{full_extraction_prompt}\n\nCONVERSATION:\n{transcript_text}",
+        }
+    ]
 
     start = time.monotonic()
-    completion = _generate_completion(**completion_kwargs)
+    completion = model.complete(messages, model=model_name)
     logger.info("Fact extraction LLM call took %.2fs", time.monotonic() - start)
 
     message = completion.choices[0].message
@@ -153,49 +112,3 @@ def extract_facts_from_conversation(conversation, known_attributes, model=None):
     return valid_facts
 
 
-def main():
-    from minus.llm.client import DEFAULT_MODEL
-
-    parser = argparse.ArgumentParser(description="Extract durable facts from a conversation transcript.")
-    parser.add_argument(
-        "input",
-        help="Path to a JSON file with a top-level 'conversation' key, or '-' to read from stdin.",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        help="Path to write the resulting facts JSON array. Defaults to stdout.",
-        default=None,
-    )
-    parser.add_argument(
-        "--model",
-        help=f"Model to use (default: {DEFAULT_MODEL})",
-        default=None,
-    )
-    args = parser.parse_args()
-
-    if args.input == "-":
-        raw = sys.stdin.read()
-    else:
-        with open(args.input, encoding="utf-8") as f:
-            raw = f.read()
-
-    data = json.loads(raw)
-    conversation = data.get("conversation")
-    if conversation is None:
-        print("Error: input JSON must have a top-level 'conversation' key.", file=sys.stderr)
-        sys.exit(1)
-
-
-    facts = extract_facts_from_conversation(conversation, model=args.model)
-    output_json = json.dumps(facts, indent=2, ensure_ascii=False)
-
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output_json + "\n")
-        print(f"Wrote {len(facts)} fact(s) to {args.output}", file=sys.stderr)
-    else:
-        print(output_json)
-
-
-if __name__ == "__main__":
-    main()

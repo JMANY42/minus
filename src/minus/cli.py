@@ -17,6 +17,8 @@ from minus.audio.stt import create_recorder, iter_cli_transcripts, iter_transcri
 from minus.audio.tts import speak
 from minus.config import Settings, load_settings
 from minus.core.agent import Conversation
+from minus.core.prompts import build_system_prompt
+from minus.llm.client import OpenRouterClient
 from minus.logging_config import setup_logging
 from minus.memory.service import MemoryManager
 from minus.services.json import pretty_json
@@ -74,9 +76,23 @@ def conversation_loop(transcripts, conversation) -> None:
 
 
 def run(settings: Settings, use_mic: bool) -> None:
+    """Build the object graph and drive one conversation.
+
+    Every collaborator is constructed here and handed down, so switching model
+    provider, tool set or audio backend is a change to this function alone.
+    """
+    model = OpenRouterClient(settings)
+    memory = MemoryManager(
+        model=model,
+        extraction_model_name=settings.fact_extraction_model,
+    )
+    conversation = Conversation(
+        model=model,
+        max_tool_rounds=settings.max_tool_rounds,
+        memory=memory,
+        system_prompt=build_system_prompt(settings.project_root),
+    )
     transcripts = iter_transcripts(create_recorder()) if use_mic else iter_cli_transcripts()
-    memory = MemoryManager()
-    conversation = Conversation(max_tool_rounds=settings.max_tool_rounds, memory=memory)
     conversation_loop(transcripts, conversation)
 
 

@@ -31,9 +31,22 @@ def _utc_timestamp():
 
 @dataclass
 class MemoryManager:
+    """Conversation persistence plus the semantic fact store.
+
+    `model` is optional so that a conversation can be recorded without an LLM
+    available; fact extraction is skipped when it is absent rather than
+    failing at the end of the session.
+    """
+
     base_dir: Path = DEFAULT_MEMORY_DIR
     condensed_base_dir: Path = DEFAULT_CONDENSED_MEMORY_DIR
-    conversation_id: str = field(default_factory=lambda: datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8])
+    conversation_id: str = field(
+        default_factory=lambda: datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        + "-"
+        + uuid4().hex[:8]
+    )
+    model: object | None = None
+    extraction_model_name: str | None = None
 
     def __post_init__(self):
         self.base_dir = Path(self.base_dir)
@@ -85,8 +98,18 @@ class MemoryManager:
         if not condensed_messages:
             logger.info("Skipping semantic memory extraction because condensed conversation is empty.")
             return []
-        logger.debug("known attributes: %s", self._memory_store.get_known_attributes())
-        return extract_facts_from_conversation(condensed_messages, known_attributes=serialize_json(self._memory_store.get_known_attributes()))
+        if self.model is None:
+            logger.info("Skipping semantic memory extraction because no model was provided.")
+            return []
+
+        known_attributes = self._memory_store.get_known_attributes()
+        logger.debug("known attributes: %s", known_attributes)
+        return extract_facts_from_conversation(
+            condensed_messages,
+            known_attributes=serialize_json(known_attributes),
+            model=self.model,
+            model_name=self.extraction_model_name,
+        )
 
     def store_facts(self, facts):
         for fact in facts:
