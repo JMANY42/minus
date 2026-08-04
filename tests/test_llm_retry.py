@@ -131,9 +131,7 @@ class TestRetry:
         assert len(transport.calls) == 1
 
     def test_system_prompt_is_prepended_and_tools_forwarded(self, settings):
-        client, transport = make_client(
-            settings, [FakeCompletion(FakeMessage(content="hello"))]
-        )
+        client, transport = make_client(settings, [FakeCompletion(FakeMessage(content="hello"))])
 
         client.complete([{"role": "user", "content": "hi"}], system_prompt="SYS", tools=TOOLS)
 

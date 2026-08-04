@@ -43,12 +43,16 @@ def condense_conversation(
 
     condensed_conversation = _build_condensable_conversation(messages, system_prompt)
     if len(condensed_conversation) <= 1:
-        logger.info("Skipping post-conversation condensation because no user/assistant turns were recorded.")
+        logger.info(
+            "Skipping post-conversation condensation because no user/assistant turns were recorded."
+        )
         return None
 
     logger.info(
         "Condensed conversation %s: %d message(s) -> %d turn(s) (tool calls removed)",
-        conversation_id, len(messages), len(condensed_conversation),
+        conversation_id,
+        len(messages),
+        len(condensed_conversation),
     )
 
     condensed_payload = {

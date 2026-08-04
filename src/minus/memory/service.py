@@ -69,8 +69,8 @@ class MemoryService:
             started_at=self.started_at,
             system_prompt=self.system_prompt,
         )
-        self._store = self.store if self.store is not None else SqliteFactStore(
-            DEFAULT_SEMANTIC_MEMORY_DB
+        self._store = (
+            self.store if self.store is not None else SqliteFactStore(DEFAULT_SEMANTIC_MEMORY_DB)
         )
 
     @property

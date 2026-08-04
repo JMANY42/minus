@@ -48,9 +48,7 @@ class TestWireFormat:
         transcript = Transcript()
         transcript.append(Message.user("hi"))
         transcript.append(
-            Message.from_completion(
-                FakeMessage(tool_calls=[FakeToolCall("get_time", "{}", "c1")])
-            )
+            Message.from_completion(FakeMessage(tool_calls=[FakeToolCall("get_time", "{}", "c1")]))
         )
         transcript.append(Message.tool_result("c1", "12:00"))
 

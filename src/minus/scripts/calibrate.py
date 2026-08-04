@@ -53,7 +53,7 @@ def cosine_similarity_from_embeddings(a: bytes, b: bytes) -> float:
     n = len(a) // 4
     va = struct.unpack(f"{n}f", a)
     vb = struct.unpack(f"{n}f", b)
-    dot = sum(x * y for x, y in zip(va, vb))
+    dot = sum(x * y for x, y in zip(va, vb, strict=True))
     norm_a = sum(x * x for x in va) ** 0.5
     norm_b = sum(x * x for x in vb) ** 0.5
     return dot / (norm_a * norm_b)
@@ -124,29 +124,39 @@ def score_group(triples, label):
         raw_text = default_raw_text(attribute, value)
         sim = cosine_similarity_from_embeddings(embed(query), embed(raw_text))
         scores.append(sim)
-        print(f"  {sim:.3f}  |  \"{query}\"  vs  \"{raw_text}\"")
+        print(f'  {sim:.3f}  |  "{query}"  vs  "{raw_text}"')
     if len(scores) >= 2:
         mean = statistics.mean(scores)
         stdev = statistics.stdev(scores)
-        print(f"  n={len(scores)}  mean={mean:.3f}  stdev={stdev:.3f}  range=[{min(scores):.3f}, {max(scores):.3f}]")
+        print(
+            f"  n={len(scores)}  mean={mean:.3f}  stdev={stdev:.3f}  range=[{min(scores):.3f}, {max(scores):.3f}]"
+        )
     return scores
 
 
 def run_calibration() -> None:
     """Print similarity distributions and a suggested relevance threshold."""
-    direct_scores = score_group(direct_match, "Direct match (query clearly asks about this attribute)")
-    related_scores = score_group(related_topic, "Related topic, different attribute (highest false-positive risk)")
+    direct_scores = score_group(
+        direct_match, "Direct match (query clearly asks about this attribute)"
+    )
+    related_scores = score_group(
+        related_topic, "Related topic, different attribute (highest false-positive risk)"
+    )
     unrelated_scores = score_group(unrelated, "Unrelated")
 
     print("\n--- Summary statistics ---")
-    for label, scores in [("Direct match", direct_scores),
-                           ("Related, different attribute", related_scores),
-                           ("Unrelated", unrelated_scores)]:
+    for label, scores in [
+        ("Direct match", direct_scores),
+        ("Related, different attribute", related_scores),
+        ("Unrelated", unrelated_scores),
+    ]:
         if len(scores) >= 2:
             mean = statistics.mean(scores)
             stdev = statistics.stdev(scores)
-            print(f"  {label:30s} mean={mean:.3f}  stdev={stdev:.3f}  "
-                  f"(1 stdev band: [{mean - stdev:.3f}, {mean + stdev:.3f}])")
+            print(
+                f"  {label:30s} mean={mean:.3f}  stdev={stdev:.3f}  "
+                f"(1 stdev band: [{mean - stdev:.3f}, {mean + stdev:.3f}])"
+            )
 
     print("\n--- Suggested relevance_threshold ---")
     if direct_scores and related_scores:
@@ -154,17 +164,35 @@ def run_calibration() -> None:
         r_mean, r_std = statistics.mean(related_scores), statistics.stdev(related_scores)
         suggested = (d_mean - d_std + r_mean + r_std) / 2
         print(f"relevance_threshold ~= {suggested:.3f}")
-        print(f"   (direct-match mean-1std = {d_mean - d_std:.3f}, related-topic mean+1std = {r_mean + r_std:.3f})")
+        print(
+            f"   (direct-match mean-1std = {d_mean - d_std:.3f}, related-topic mean+1std = {r_mean + r_std:.3f})"
+        )
         if d_mean - d_std <= r_mean + r_std:
-            print("   WARNING: direct-match and related-topic distributions overlap within 1 stdev.")
-            print("   That means search_facts() will sometimes surface a fact for the WRONG attribute")
+            print(
+                "   WARNING: direct-match and related-topic distributions overlap within 1 stdev."
+            )
+            print(
+                "   That means search_facts() will sometimes surface a fact for the WRONG attribute"
+            )
             print("   just because it's topically nearby (e.g. a 'diet' fact showing up for an")
-            print("   'allergy' question). Consider: (a) adding more query variety per attribute to")
-            print("   check if this holds up, (b) also returning `attribute` alongside search results")
-            print("   so your agent can sanity-check the match, or (c) accepting some false positives")
-            print("   since showing an extra, slightly-off fact is usually cheaper than missing one.")
+            print(
+                "   'allergy' question). Consider: (a) adding more query variety per attribute to"
+            )
+            print(
+                "   check if this holds up, (b) also returning `attribute` alongside search results"
+            )
+            print(
+                "   so your agent can sanity-check the match, or (c) accepting some false positives"
+            )
+            print(
+                "   since showing an extra, slightly-off fact is usually cheaper than missing one."
+            )
 
     print("\nNote: unlike the old dedupe thresholds, getting this exactly right matters less --")
-    print("worst case here is injecting one irrelevant fact into context, not silently losing data.")
-    print("A reasonable default if you don't want to calibrate further: keep relevance_threshold low")
+    print(
+        "worst case here is injecting one irrelevant fact into context, not silently losing data."
+    )
+    print(
+        "A reasonable default if you don't want to calibrate further: keep relevance_threshold low"
+    )
     print("and rely on top_k to bound how much gets injected, rather than a strict cutoff.")

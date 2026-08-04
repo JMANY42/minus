@@ -69,7 +69,7 @@ class TestToolLoop:
         assert "tool" in roles
 
     def test_unknown_tool_is_reported_back_instead_of_crashing(self, memory):
-        conversation, model = build_conversation(
+        conversation, _ = build_conversation(
             [
                 FakeCompletion(FakeMessage(tool_calls=[FakeToolCall("set_light", "{}")])),
                 FakeCompletion(FakeMessage(content="Sorry, I cannot do that.")),

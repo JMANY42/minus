@@ -345,9 +345,7 @@ class SqliteFactStore:
                     "UPDATE facts SET superseded_by = ? WHERE id = ?", (new_id, fact.id)
                 )
                 self.conn.commit()
-                moved.append(
-                    {"old_attribute": duplicate, "old_fact_id": fact.id, "result": result}
-                )
+                moved.append({"old_attribute": duplicate, "old_fact_id": fact.id, "result": result})
 
         return {"canonical_attribute": canonical_attribute, "moved": moved}
 

@@ -15,14 +15,18 @@ class ConversationMemoryTests(unittest.TestCase):
             conversation_memory = memory_module.MemoryManager(base_dir=base_dir)
 
             self.assertTrue(conversation_memory.file_path.exists())
-            self.assertEqual(conversation_memory.file_path.name, f"{conversation_memory.conversation_id}.json")
+            self.assertEqual(
+                conversation_memory.file_path.name, f"{conversation_memory.conversation_id}.json"
+            )
 
             first_messages = [{"role": "user", "content": "hello"}]
             conversation_memory.save(first_messages)
 
             payload = parse_json(conversation_memory.file_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["conversation_id"], conversation_memory.conversation_id)
-            self.assertEqual(payload["messages"], [{"role": "system", "content": SYSTEM_PROMPT}, *first_messages])
+            self.assertEqual(
+                payload["messages"], [{"role": "system", "content": SYSTEM_PROMPT}, *first_messages]
+            )
             self.assertIn("updated_at", payload)
 
             second_messages = [
@@ -32,8 +36,13 @@ class ConversationMemoryTests(unittest.TestCase):
             conversation_memory.save(second_messages)
 
             payload = parse_json(conversation_memory.file_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["messages"], [{"role": "system", "content": SYSTEM_PROMPT}, *second_messages])
-            self.assertEqual(payload["started_at"], conversation_memory.started_at.isoformat(timespec="seconds"))
+            self.assertEqual(
+                payload["messages"],
+                [{"role": "system", "content": SYSTEM_PROMPT}, *second_messages],
+            )
+            self.assertEqual(
+                payload["started_at"], conversation_memory.started_at.isoformat(timespec="seconds")
+            )
 
     def test_condenses_conversation_by_filtering_out_tool_calls(self):
         with tempfile.TemporaryDirectory() as temp_dir:

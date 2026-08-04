@@ -77,9 +77,14 @@ def conversation_loop(transcripts, conversation, speaker) -> None:
         for transcript in transcripts:
             logger.info("Transcript received:\n%s", pretty_json(transcript))
 
+            # Captured before generation starts: if the user begins talking
+            # while the model is still thinking, this token goes stale and the
+            # reply is dropped rather than spoken over them.
+            token = speaker.token()
+
             response = conversation.reply(transcript)
             logger.info("Assistant response:\n%s", pretty_json(response))
-            speaker(response)
+            speaker.speak(response, token=token)
     except KeyboardInterrupt:
         logger.info("Interrupted; wrapping up the conversation.")
     finally:
@@ -112,13 +117,23 @@ def build_conversation(settings: Settings) -> tuple[Conversation, MemoryService]
 
 
 def run_assistant(settings: Settings, use_mic: bool) -> None:
-    from minus.audio.stt import create_recorder, iter_cli_transcripts, iter_transcripts
-    from minus.audio.tts import speak
+    from minus.audio.interrupt import InterruptBus
+    from minus.audio.stt import CliTranscriptSource, MicrophoneTranscriptSource
+    from minus.audio.tts import KokoroSpeaker
 
-    source = iter_transcripts(create_recorder()) if use_mic else iter_cli_transcripts()
+    # One bus shared by input and output: the recognizer publishes barge-in,
+    # the speaker consumes it. Neither knows the other exists.
+    interrupts = InterruptBus()
+    speaker = KokoroSpeaker(interrupts, settings)
+    source = (
+        MicrophoneTranscriptSource(interrupts, settings)
+        if use_mic
+        else CliTranscriptSource(interrupts)
+    )
+
     conversation, memory = build_conversation(settings)
     try:
-        conversation_loop(source, conversation, speak)
+        conversation_loop(source, conversation, speaker)
     finally:
         memory.close()
 

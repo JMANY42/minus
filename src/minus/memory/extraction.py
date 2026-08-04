@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 EXTRACTION_PROMPT = FACT_EXTRACTION_PROMPT
 
 
-
 def format_transcript(conversation):
     """Turn the conversation list into a plain-text transcript for the prompt."""
     logger.debug("conversation: %s", conversation)
@@ -49,7 +48,7 @@ def extract_json_array(text):
     start = text.find("[")
     end = text.rfind("]")
     if start != -1 and end != -1 and end > start:
-        candidate = text[start:end + 1]
+        candidate = text[start : end + 1]
         return json.loads(candidate)
 
     raise ValueError(f"Could not parse JSON array from model output:\n{text}")
@@ -70,12 +69,14 @@ def validate_facts(facts):
             continue
         if not isinstance(fact["raw_text"], str):
             continue
-        valid.append({
-            "attribute": fact["attribute"].strip(),
-            "value": fact["value"].strip(),
-            "multi_valued": fact["multi_valued"],
-            "raw_text": fact["raw_text"].strip(),
-        })
+        valid.append(
+            {
+                "attribute": fact["attribute"].strip(),
+                "value": fact["value"].strip(),
+                "multi_valued": fact["multi_valued"],
+                "raw_text": fact["raw_text"].strip(),
+            }
+        )
     return valid
 
 
@@ -110,5 +111,3 @@ def extract_facts_from_conversation(conversation, known_attributes, model, model
     valid_facts = validate_facts(facts)
     logger.info("Extracted %d fact(s) from conversation", len(valid_facts))
     return valid_facts
-
-

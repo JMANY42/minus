@@ -96,8 +96,7 @@ class Conversation:
         turn because the model attends to them far more reliably there.
         """
         facts = [
-            fact.raw_text.strip()
-            for fact in self.memory.search_facts(transcript, self.fact_top_k)
+            fact.raw_text.strip() for fact in self.memory.search_facts(transcript, self.fact_top_k)
         ]
         logger.debug("Relevant facts: %s", facts)
 

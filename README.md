@@ -8,33 +8,96 @@ Personal AI Assistant + Home Integration
 
 ## Current Status
 
-This project is a work in progress and currently focused on giving Minus a persistent memory.
+A work in progress. Minus is a custom harness around an LLM (via OpenRouter) with
+persistent semantic memory, speech in and speech out.
 
-Currently, Minus is essentially just a custom harness around an LLM (via OpenRouter) for fast responses. A more robust archeticture to be more generally useful is in progress.
+## Install
 
-## What's New?
+```bash
+uv sync --extra dev                              # core + test tooling
+uv sync --extra dev --extra audio --extra embeddings   # everything, incl. mic/TTS
+```
 
-### Semantic Memory
-I just gave Minus semantic memory. Minus now can remember facts and preferences between conversation sessions. It works as follows.
+Audio (`kokoro-onnx`, `sounddevice`, `RealtimeSTT`) and embeddings
+(`sentence-transformers`, which pulls in torch) are optional extras so that
+tests and CI stay fast and GPU-free.
 
-- Every user message is appended with potentially relevent facts ranked by comparing the embedding of the user message vs the fact
-- Every time a conversation ends and is condensed, the LLM extracts facts from the transcript. 
-- Duplicate facts (facts with the same attribute) are not allowed. Multi-valued facts are allowed.
-- Facts can be superceded by new facts.
-
-Improvements:
-- Similar attributes (e.g. preferred_language vs programming_language) are treated as seperate facts (fixed)
-- Sometimes the model makes a ton of unnecessary tool calls. Tweak system prompt or try a different OpenRouter model.
-- Seperate script to look at all current facts and manually go through and modify/delete them. More of a QOL feature. Could be incorporated into future dashboard.
-
-### OpenRouter
-Replaced the groq dependency with OpenRouter so that future expansion into different tiers of thinking is easier
+Set `OPENROUTER_API_KEY` in `.env`. Everything else is optional and overridable
+with `MINUS_`-prefixed environment variables — see `src/minus/config.py`.
 
 ## Run
 
-- Microphone mode: `python3 src/main.py`
-- No-mic mode: `python3 src/main.py --no-mic`
+```bash
+minus                  # microphone mode
+minus --no-mic         # type instead of talking
+minus tools            # list the tools the assistant can call
+minus memory           # interactively prune stored facts
+minus calibrate        # recompute the fact-relevance threshold
+```
 
+## Architecture
+
+```
+src/minus/
+├── cli.py          composition root — the only place that picks implementations
+├── config.py       every tunable value, env-overridable
+├── paths.py        the single definition of where data lives
+├── core/           protocols, typed messages, prompts, the agent loop
+├── llm/            OpenRouter client + malformed-tool-call retry
+├── tools/          @tool registry, schema derivation, built-in tools
+├── memory/         transcripts, condensation, fact extraction, fact store
+└── audio/          interrupt bus, speech-to-text, text-to-speech
+```
+
+Collaborators are injected rather than imported, and the seams are declared as
+protocols in `core/protocols.py` (`ChatModel`, `TranscriptSource`,
+`SpeechSynthesizer`, `FactStore`, `Embedder`). Swapping a model provider, TTS
+backend or fact store is a change to `cli.py`.
+
+### Adding a tool
+
+One decorated function. The JSON schema is derived from the signature and the
+docstring, so there is no second place to keep in sync:
+
+```python
+from minus.tools.registry import registry
+
+@registry.tool
+def set_light(room: str, brightness: int = 100) -> dict:
+    """Set a room's light brightness.
+
+    Args:
+        room: Room name, e.g. "office".
+        brightness: Brightness from 0 to 100.
+    """
+    ...
+```
+
+Import it in `src/minus/tools/__init__.py` and it is live.
+
+### Semantic Memory
+
+Minus remembers facts and preferences between sessions:
+
+- Every user message is appended with potentially relevant facts, ranked by
+  comparing the embedding of the message against each fact.
+- When a conversation ends it is condensed, and the LLM extracts durable facts
+  from the transcript.
+- Facts are structured `(attribute, value)` slots. Dedupe and supersede are
+  exact matches on the normalized attribute, not similarity thresholds.
+- Single-valued attributes supersede; multi-valued ones accumulate.
+
+Known attributes are fed back into the extraction prompt so the model reuses
+`preferred_language` instead of inventing `programming_language`.
+
+## Development
+
+```bash
+uv run pytest             # 94 tests, no audio or torch needed
+uv run ruff check .
+uv run ruff format .
+uv run mypy src
+```
 
 ## Features
 
@@ -57,8 +120,8 @@ Replaced the groq dependency with OpenRouter so that future expansion into diffe
 
 ## Design Guidelines
 
-- Be funny 
-- Be helpful 
-- Call out bad ideas 
-- Avoid unnecessary refusals 
-- Prioritize fast responses over in depth analysis for conversations. 
+- Be funny
+- Be helpful
+- Call out bad ideas
+- Avoid unnecessary refusals
+- Prioritize fast responses over in depth analysis for conversations.

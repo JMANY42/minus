@@ -150,7 +150,7 @@ def _argument_validator(func: Callable[..., Any], name: str) -> Any:
         default = ... if parameter.default is inspect.Parameter.empty else parameter.default
         fields[param_name] = (hints.get(param_name, str), default)
 
-    return create_model(f"{name}_Validator", **fields)  # type: ignore[call-overload]
+    return create_model(f"{name}_Validator", **fields)
 
 
 def _parse_arguments(raw_arguments: str | dict | None, tool_name: str) -> dict:
@@ -168,8 +168,7 @@ def _parse_arguments(raw_arguments: str | dict | None, tool_name: str) -> dict:
             ) from exc
         if not isinstance(parsed, dict):
             raise ToolArgumentError(
-                f"Arguments for {tool_name!r} must be a JSON object, "
-                f"got {type(parsed).__name__}"
+                f"Arguments for {tool_name!r} must be a JSON object, got {type(parsed).__name__}"
             )
         return parsed
 

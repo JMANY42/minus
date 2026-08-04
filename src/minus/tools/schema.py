@@ -81,7 +81,7 @@ def build_parameters_schema(func: Callable[..., Any]) -> dict[str, Any]:
         default = ... if parameter.default is inspect.Parameter.empty else parameter.default
         fields[name] = (annotation, default)
 
-    model = create_model(f"{func.__name__}_Arguments", **fields)  # type: ignore[call-overload]
+    model = create_model(f"{func.__name__}_Arguments", **fields)
     schema = model.model_json_schema()
 
     properties = schema.get("properties", {})
