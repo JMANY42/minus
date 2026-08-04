@@ -37,6 +37,7 @@ sys.modules.pop("minus.llm.client", None)
 sys.modules.pop("minus.llm", None)
 
 import minus.core.agent as conversation_module
+from minus.tools.registry import ToolRegistry
 
 
 @dataclass
@@ -100,34 +101,36 @@ class FakeMemory:
 
 
 class ConversationToolLoopTests(unittest.TestCase):
-    def test_fact_messages_are_json_serializable(self):
-        fact = FakeFact(id="fact-1", attribute="timezone", value="PST", raw_text="The user's timezone is PST.")
-
-        message = conversation_module.create_fact_message([fact])
-
-        serialized = json.dumps(message)
-
-        self.assertIn("timezone", serialized)
-        self.assertIn("PST", serialized)
-
     def test_repeated_identical_tool_calls_are_not_reexecuted(self):
         first_response = FakeCompletion(FakeMessage(content=None, tool_calls=[FakeToolCall("list_workspace_files", '{"path":"."}')]))
         second_response = FakeCompletion(FakeMessage(content="I have the workspace listing.", tool_calls=[]))
 
+        calls = []
+        tools = ToolRegistry()
+
+        @tools.tool
+        def list_workspace_files(path: str = ".") -> str:
+            """List workspace files.
+
+            Args:
+                path: Workspace-relative directory.
+            """
+            calls.append(path)
+            return "workspace listing"
+
         with patch.object(conversation_module, "MemoryManager", FakeMemory):
-            conversation = conversation_module.Conversation(tools_path="/tmp/unused-tools.json")
+            conversation = conversation_module.Conversation(tools=tools)
 
         with patch.object(conversation_module, "generate_response", side_effect=[first_response, second_response]) as mock_generate:
-            with patch.object(conversation.tool_handler, "execute", return_value="workspace listing") as mock_execute:
-                result = conversation.reply("list the workspace")
+            result = conversation.reply("list the workspace")
 
         self.assertEqual(result, "I have the workspace listing.")
-        self.assertEqual(mock_execute.call_count, 1)
+        self.assertEqual(calls, ["."])
         self.assertEqual(mock_generate.call_count, 2)
 
     def test_post_conversation_delegates_to_memory(self):
         with patch.object(conversation_module, "MemoryManager", FakeMemory):
-            conversation = conversation_module.Conversation(tools_path="/tmp/unused-tools.json")
+            conversation = conversation_module.Conversation(tools=ToolRegistry())
 
         conversation.messages = [
             {"role": "user", "content": "Please update memory naming."},

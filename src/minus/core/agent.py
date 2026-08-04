@@ -5,7 +5,8 @@ from minus.core.prompts import FACTS_MARKER
 from minus.llm.client import generate_response
 from minus.memory.service import MemoryManager
 from minus.services.json import pretty_json
-from minus.tools.registry import ToolHandler
+from minus.errors import ToolError
+from minus.tools import registry as default_registry
 
 logger = logging.getLogger(__name__)
 
@@ -94,18 +95,21 @@ def record_tool_error(messages, tool_call_id, content, memory=None):
     append_message(messages, create_tool_message(tool_call_id, content), memory=memory)
 
 
-def execute_tool_call(tool_handler, tool_call):
-    return tool_handler.execute(tool_call.function.name, tool_call.function.arguments)
-
-
 def process_tool_call(conversation, tool_call):
     tool_name = tool_call.function.name
     try:
-        result = execute_tool_call(conversation.tool_handler, tool_call)
+        result = conversation.tools.dispatch(tool_name, tool_call.function.arguments)
         logger.debug("Tool result for %s:\n%s", tool_name, pretty_json(result))
-        append_message(conversation.messages, create_tool_message(tool_call.id, result), memory=conversation.memory)
+        append_message(
+            conversation.messages,
+            create_tool_message(tool_call.id, result),
+            memory=conversation.memory,
+        )
         return False
-    except (ValueError, TypeError, OSError) as exc:
+    # ToolError covers unknown tools, bad arguments and failures inside a tool
+    # body. OSError is kept because a tool may touch the filesystem in ways the
+    # registry cannot wrap. Anything else is a genuine bug and should surface.
+    except (ToolError, OSError) as exc:
         record_tool_error(
             conversation.messages,
             tool_call.id,
@@ -141,11 +145,15 @@ def build_reply(conversation, completion):
 
 
 class Conversation:
-    def __init__(self, tools_path=None, max_tool_rounds=5, memory=None):
+    def __init__(self, tools=None, max_tool_rounds=5, memory=None):
+        """
+        Args:
+            tools: A ToolRegistry. Defaults to the shared registry holding the
+                built-in tools; pass your own to scope what the model can call.
+        """
         self.messages = []
         self.memory = memory or MemoryManager()
-        self.tool_handler = ToolHandler(tools_path=tools_path)
-        self.tools = self.tool_handler.load_tools()
+        self.tools = tools if tools is not None else default_registry
         self.max_tool_rounds = max_tool_rounds
 
     def reply(self, transcript):
@@ -166,7 +174,7 @@ class Conversation:
 
         while completed_tool_rounds < self.max_tool_rounds:
             try:
-                completion = generate_response(self.messages, tools=self.tools)
+                completion = generate_response(self.messages, tools=self.tools.schemas())
             except RuntimeError as exc:
                 # Keep the failure in the transcript and spend a round on it, so the
                 # next attempt sees the dead end instead of walking back into it.

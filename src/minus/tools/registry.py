@@ -1,123 +1,180 @@
-import os
-from datetime import datetime
-from pathlib import Path
-from zoneinfo import ZoneInfo
+"""The tool registry: one place to declare, describe and dispatch a tool.
 
-from minus.paths import project_root
-from minus.services.json import parse_json, read_json, serialize_json
+Adding a capability used to mean editing two files that nothing kept in sync
+-- a schema entry in tools.json and a branch in an if/else chain. Here a tool
+is a decorated function; its schema is derived from its signature and its
+dispatch entry is its registration. There is no second place to update, so
+there is nothing to drift.
 
-WORKSPACE_ROOT = project_root()
+    @registry.tool
+    def set_light(room: str, brightness: int = 100) -> str:
+        '''Set a room's light brightness.
+
+        Args:
+            room: Room name, e.g. "office".
+            brightness: Brightness from 0 to 100.
+        '''
+        ...
+
+Arguments arrive from the model as JSON and are validated against the derived
+schema before the function runs, so a tool body can trust its parameters.
+"""
+
+from __future__ import annotations
+
+import inspect
+import logging
+import typing
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from pydantic import ValidationError, create_model
+
+from minus.errors import ToolArgumentError, ToolExecutionError, UnknownToolError
+from minus.services.json import JSONDecodeError, parse_json, serialize_json
+from minus.tools.schema import build_parameters_schema, build_tool_schema
+
+logger = logging.getLogger(__name__)
 
 
-class ToolHandler:
-    def __init__(self, tools_path=None):
-        self.tools_path = Path(tools_path) if tools_path else WORKSPACE_ROOT / "tools.json"
-        self.tools = self._load_tools()
-        self.tool_names = {
-            tool["function"]["name"]: tool for tool in self.tools if tool.get("function", {}).get("name")
-        }
+@dataclass(frozen=True)
+class Tool:
+    """A registered capability: the callable plus its derived schema."""
 
-    def load_tools(self):
-        return self.tools
+    name: str
+    func: Callable[..., Any]
+    schema: dict
+    validator: Any
 
-    def execute(self, tool_name, raw_arguments):
-        if tool_name not in self.tool_names:
-            raise ValueError(f"Unknown tool: {tool_name}")
+    def validate(self, arguments: dict) -> dict:
+        try:
+            return self.validator(**arguments).model_dump()
+        except ValidationError as exc:
+            raise ToolArgumentError(f"Invalid arguments for {self.name!r}: {exc}") from exc
 
-        arguments = self._parse_arguments(raw_arguments)
+    def __call__(self, **kwargs: Any) -> Any:
+        return self.func(**kwargs)
 
-        if tool_name == "get_current_time":
-            return self._get_current_time(arguments)
-        if tool_name == "list_workspace_files":
-            return self._list_workspace_files(arguments)
-        if tool_name == "read_workspace_file":
-            return self._read_workspace_file(arguments)
 
-        raise ValueError(f"No executor registered for tool: {tool_name}")
+class ToolRegistry:
+    """A named collection of tools, with schema generation and dispatch."""
 
-    def _load_tools(self):
-        if not self.tools_path.exists():
-            return []
+    def __init__(self) -> None:
+        self._tools: dict[str, Tool] = {}
 
-        tools = read_json(self.tools_path)
+    def tool(
+        self,
+        func: Callable[..., Any] | None = None,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> Any:
+        """Register a function as a tool. Usable bare or with arguments."""
 
-        if not isinstance(tools, list):
-            raise ValueError("tools.json must contain a JSON array of tool definitions")
+        def register(target: Callable[..., Any]) -> Callable[..., Any]:
+            tool_name = name or target.__name__
+            if tool_name in self._tools:
+                raise ValueError(f"Tool {tool_name!r} is already registered")
 
-        return tools
-
-    def _parse_arguments(self, raw_arguments):
-        if raw_arguments in (None, ""):
-            return {}
-        if isinstance(raw_arguments, dict):
-            return raw_arguments
-        if isinstance(raw_arguments, str):
-            return parse_json(raw_arguments)
-
-        raise TypeError(f"Unsupported tool argument type: {type(raw_arguments)!r}")
-
-    def _resolve_workspace_path(self, relative_path="."):
-        candidate = Path(relative_path)
-        if candidate.is_absolute():
-            raise ValueError("Tool paths must be workspace-relative")
-
-        resolved = (WORKSPACE_ROOT / candidate).resolve()
-        workspace_prefix = str(WORKSPACE_ROOT.resolve()) + os.sep
-
-        if resolved != WORKSPACE_ROOT.resolve() and not str(resolved).startswith(workspace_prefix):
-            raise ValueError("Tool path escapes the workspace root")
-
-        return resolved
-
-    def _get_current_time(self, arguments):
-        central_time = datetime.now(ZoneInfo("America/Chicago"))
-        dt_string = central_time.strftime("%Y-%m-%d %H:%M:%S %Z%z")
-        return serialize_json({"central_time": dt_string}, ensure_ascii=False)
-
-    def _list_workspace_files(self, arguments):
-        relative_path = arguments.get("path", ".")
-        directory_path = self._resolve_workspace_path(relative_path)
-
-        if not directory_path.exists():
-            raise FileNotFoundError(f"Path does not exist: {relative_path}")
-        if not directory_path.is_dir():
-            raise NotADirectoryError(f"Path is not a directory: {relative_path}")
-
-        entries = []
-        for item in sorted(directory_path.iterdir(), key=lambda path: path.name.lower()):
-            entries.append(
-                {
-                    "name": item.name,
-                    "type": "directory" if item.is_dir() else "file",
-                }
+            parameters = build_parameters_schema(target)
+            self._tools[tool_name] = Tool(
+                name=tool_name,
+                func=target,
+                schema=build_tool_schema(target, tool_name, description),
+                validator=_argument_validator(target, tool_name),
             )
+            logger.debug(
+                "Registered tool %s with parameters %s",
+                tool_name,
+                sorted(parameters["properties"]),
+            )
+            return target
 
-        return serialize_json(
-            {
-                "path": str(directory_path.relative_to(WORKSPACE_ROOT)),
-                "entries": entries,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        if func is not None:
+            return register(func)
+        return register
 
-    def _read_workspace_file(self, arguments):
-        relative_path = arguments.get("path")
-        if not relative_path:
-            raise ValueError("read_workspace_file requires a path")
+    # ---- Introspection ----
 
-        file_path = self._resolve_workspace_path(relative_path)
+    def __contains__(self, name: object) -> bool:
+        return name in self._tools
 
-        if not file_path.exists():
-            raise FileNotFoundError(f"File does not exist: {relative_path}")
-        if not file_path.is_file():
-            raise IsADirectoryError(f"Path is not a file: {relative_path}")
+    def __len__(self) -> int:
+        return len(self._tools)
 
-        content = file_path.read_text(encoding="utf-8")
-        return serialize_json(
-            {
-                "path": str(file_path.relative_to(WORKSPACE_ROOT)),
-                "content": content,
-            },
-            ensure_ascii=False,
-        )
+    def names(self) -> list[str]:
+        return sorted(self._tools)
+
+    def get(self, name: str) -> Tool:
+        try:
+            return self._tools[name]
+        except KeyError:
+            raise UnknownToolError(
+                f"Unknown tool: {name}. Available tools: {', '.join(self.names()) or 'none'}"
+            ) from None
+
+    def schemas(self) -> list[dict]:
+        """Every tool's schema, in the array shape the chat API expects."""
+        return [self._tools[name].schema for name in self.names()]
+
+    # ---- Dispatch ----
+
+    def dispatch(self, name: str, raw_arguments: str | dict | None = None) -> str:
+        """Run a tool by name and return its result as a JSON string.
+
+        Results are serialized here so that every tool body can return an
+        ordinary Python object rather than remembering to encode itself --
+        which the previous handlers each did by hand, inconsistently.
+        """
+        tool = self.get(name)
+        arguments = tool.validate(_parse_arguments(raw_arguments, name))
+
+        try:
+            result = tool(**arguments)
+        except (ToolArgumentError, UnknownToolError):
+            raise
+        except Exception as exc:
+            raise ToolExecutionError(f"Tool {name!r} failed: {exc}") from exc
+
+        return result if isinstance(result, str) else serialize_json(result, ensure_ascii=False)
+
+
+def _argument_validator(func: Callable[..., Any], name: str) -> Any:
+    """A pydantic model mirroring `func`'s parameters, used to validate input."""
+    hints = typing.get_type_hints(func)
+    fields: dict[str, Any] = {}
+    for param_name, parameter in inspect.signature(func).parameters.items():
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            continue
+        default = ... if parameter.default is inspect.Parameter.empty else parameter.default
+        fields[param_name] = (hints.get(param_name, str), default)
+
+    return create_model(f"{name}_Validator", **fields)  # type: ignore[call-overload]
+
+
+def _parse_arguments(raw_arguments: str | dict | None, tool_name: str) -> dict:
+    """Normalise the model's tool arguments into a dict."""
+    if raw_arguments in (None, ""):
+        return {}
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if isinstance(raw_arguments, str):
+        try:
+            parsed = parse_json(raw_arguments)
+        except JSONDecodeError as exc:
+            raise ToolArgumentError(
+                f"Arguments for {tool_name!r} were not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ToolArgumentError(
+                f"Arguments for {tool_name!r} must be a JSON object, "
+                f"got {type(parsed).__name__}"
+            )
+        return parsed
+
+    raise ToolArgumentError(f"Unsupported argument type for {tool_name!r}: {type(raw_arguments)!r}")
+
+
+# The registry the built-in tools attach to. Importing minus.tools populates it.
+registry = ToolRegistry()
