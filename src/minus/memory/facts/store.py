@@ -1,140 +1,75 @@
-"""
-memory_store.py
+"""SQLite + sqlite-vec storage for durable facts.
 
-Semantic memory store for a local, single-user AI agent: SQLite + sqlite-vec
-for fuzzy retrieval, with facts stored as structured (attribute, value) slots
-rather than free-form sentences.
+See models.py for why facts are structured slots rather than sentences.
 
-WHY STRUCTURED FACTS INSTEAD OF FREE SENTENCES
------------------------------------------------
-An earlier version of this store compared whole sentences via cosine
-similarity to detect duplicates/conflicts ("The timezone is PST" vs "Timezone
-is Pacific Standard Time"). That asks embeddings to solve two different
-problems at once:
-  1. "Is this the same slot with a different value?" (timezone: PST -> EST)
-  2. "Is this semantically related content?" (fuzzy retrieval)
-Problem 1 doesn't need embeddings at all if facts are structured -- it's an
-exact match on a normalized attribute name. Problem 2 is what embeddings are
-actually good at, and they do it better once they're not also being asked to
-resolve exact-duplicate/conflict questions with a similarity threshold.
+Dedupe and supersede are exact-match on the normalized attribute, not
+threshold-based -- there is no dup_threshold or conflict_threshold left to
+tune:
 
-So: every fact is (attribute, value, multi_valued), plus a canonical raw_text
-used only for embedding/fuzzy search and display -- not for dedupe logic.
-  - attribute: normalized snake_case category, e.g. "timezone", "diet",
-    "preferred_editor". Same category -> same slot, every time.
-  - value: the short canonical answer, not a sentence.
-  - multi_valued: False if only one value can be true at a time (timezone,
-    job, home_city -- a new value replaces the old one). True if several
-    values can coexist (allergies, interests, hobbies -- a new value is
-    appended alongside existing ones).
-  - raw_text: a consistently-templated sentence ("{attribute}: {value}" by
-    default) used purely for the embedding, so surface-form variance (tense,
-    phrasing, filler words) doesn't fragment cosine similarity the way full
-    free-form sentences did.
+  multi_valued=False, attribute already active
+      same value (case-insensitive) -> duplicate; refresh confidence/timestamp
+      different value               -> supersede; old marked inactive and linked
+  multi_valued=True, attribute already active
+      same value                    -> duplicate; refresh
+      different value               -> insert alongside (no supersede)
+  no active fact for the attribute  -> plain insert
 
-DEDUPE / SUPERSEDE LOGIC (now exact-match, not threshold-based)
------------------------------------------------------------------
-- multi_valued=False, same attribute already active:
-    - same value (case-insensitive)  -> duplicate, just refresh confidence/timestamp
-    - different value                -> automatically supersede: old fact marked
-                                         inactive, new fact inserted and linked
-- multi_valued=True, same attribute already active:
-    - same value (case-insensitive)  -> duplicate, just refresh confidence/timestamp
-    - different value                -> insert as an additional active fact under
-                                         that attribute (no supersede)
-- No attribute match yet             -> plain insert
-
-Embeddings (and search_facts) are still there, but now only serve fuzzy
-retrieval -- "what do we know that's relevant to this new message?" -- not
-duplicate/conflict detection. There is no dup_threshold/conflict_threshold
-left to tune.
+Embeddings serve fuzzy retrieval only -- "what do we know that is relevant to
+this message?" -- never duplicate detection.
 """
 
-import re
+from __future__ import annotations
+
+import logging
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import sqlite_vec
-from sentence_transformers import SentenceTransformer
 
-EMBEDDING_DIM = 384  # matches all-MiniLM-L6-v2
-_model = None
+from minus.errors import FactStoreError
+from minus.memory.facts.embeddings import DEFAULT_DIMENSIONS, SentenceTransformerEmbedder
+from minus.memory.facts.models import Fact, default_raw_text, normalize_attribute
 
+logger = logging.getLogger(__name__)
 
-def get_model():
-    """Lazy-load the embedding model (avoids slow import at module load time)."""
-    global _model
-    if _model is None:
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _model
-
-
-def embed(text: str) -> bytes:
-    """Return a fact's embedding as raw bytes for sqlite-vec storage."""
-    vec = get_model().encode(text, normalize_embeddings=True)
-    return sqlite_vec.serialize_float32(vec.tolist())
-
-
-def normalize_attribute(attribute: str) -> str:
-    """Force attribute names into a consistent snake_case slot name so
-    'Preferred Editor', 'preferred-editor', and 'preferred_editor' all
-    collide into the same slot instead of silently creating three."""
-    s = attribute.strip().lower()
-    s = re.sub(r"[\s\-]+", "_", s)
-    s = re.sub(r"[^a-z0-9_]", "", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s
+_COLUMNS = (
+    "id",
+    "attribute",
+    "value",
+    "multi_valued",
+    "raw_text",
+    "confidence",
+    "source_session_id",
+    "created_at",
+    "active",
+    "superseded_by",
+)
+_SELECT_COLUMNS = ", ".join(_COLUMNS)
+_SELECT_COLUMNS_F = ", ".join(f"f.{column}" for column in _COLUMNS)
 
 
-def default_raw_text(attribute: str, value: str) -> str:
-    """Consistently-templated NATURAL SENTENCE used for embedding.
- 
-    This intentionally does NOT use a terse "attribute: value" format.
-    Dedupe/supersede logic is exact-match on `attribute` (see module
-    docstring), so raw_text's embedding has exactly one job: matching
-    against natural-language queries in search_facts(). General-purpose
-    sentence embedding models align best when both sides of a comparison
-    look like natural language -- a query like "what editor do you use?"
-    matches "The user's preferred editor is VS Code." much better than it
-    matches the technical token "preferred_editor: VS Code".
- 
-    For fact styles where this generic template reads awkwardly (e.g.
-    "The user's allergy is peanuts"), prefer having your extraction LLM
-    generate a natural raw_text directly and pass it to add_fact(raw_text=...)
-    instead of relying on this fallback.
-    """
-    readable = attribute.replace("_", " ")
-    return f"The user's {readable} is {value}."
+class SqliteFactStore:
+    """A FactStore backed by SQLite with a sqlite-vec embedding index."""
 
-
-
-@dataclass
-class Fact:
-    id: str
-    attribute: str
-    value: str
-    multi_valued: bool
-    raw_text: str
-    confidence: float
-    source_session_id: str | None
-    created_at: float
-    active: bool
-    superseded_by: str | None
-    similarity: float | None = None  # populated on search results only
-
-
-class MemoryStore:
-    def __init__(self, db_path: str = "memory.db"):
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+    def __init__(self, db_path: str | Path = "memory.db", embedder: Any | None = None) -> None:
+        """
+        Args:
+            embedder: An Embedder. Defaults to the sentence-transformers one;
+                injected so the store can be tested without torch installed.
+        """
+        self.db_path = str(db_path)
+        self.embedder = embedder or SentenceTransformerEmbedder()
+        self.conn = sqlite3.connect(self.db_path)
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
         self._init_schema()
 
-    def _init_schema(self):
+    def _init_schema(self) -> None:
+        dimensions = getattr(self.embedder, "dimensions", DEFAULT_DIMENSIONS)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS facts (
                 id TEXT PRIMARY KEY,
@@ -149,22 +84,20 @@ class MemoryStore:
                 superseded_by TEXT
             )
         """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_facts_attribute
-            ON facts (attribute, active)
-        """)
-        # sqlite-vec virtual table for embeddings, keyed by fact id.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_facts_attribute ON facts (attribute, active)"
+        )
         # distance_metric=cosine is required -- vec0 defaults to L2, which
         # produces meaningless "similarity" values on normalized vectors.
         self.conn.execute(f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings USING vec0(
                 fact_id TEXT PRIMARY KEY,
-                embedding FLOAT[{EMBEDDING_DIM}] distance_metric=cosine
+                embedding FLOAT[{dimensions}] distance_metric=cosine
             )
         """)
         self.conn.commit()
 
-    # ---------- Writing ----------
+    # ---- Writing ----
 
     def add_fact(
         self,
@@ -175,290 +108,268 @@ class MemoryStore:
         confidence: float = 1.0,
         source_session_id: str | None = None,
     ) -> dict:
-        """
-        Insert a fact using exact-match dedupe/supersede logic on
-        (attribute, value) -- see module docstring for the full rules.
+        """Insert a fact, applying the dedupe/supersede rules in the module docstring.
 
         Returns one of:
-          {"action": "inserted", "fact_id": ...}
-          {"action": "duplicate_skipped", "existing_fact_id": ...}
-          {"action": "superseded", "old_fact_id": ..., "new_fact_id": ...}
+            {"action": "inserted", "fact_id": ...}
+            {"action": "duplicate_skipped", "existing_fact_id": ...}
+            {"action": "superseded", "old_fact_id": ..., "new_fact_id": ...}
         """
         attribute = normalize_attribute(attribute)
+        if not attribute:
+            raise FactStoreError("Fact attribute normalized to an empty string")
         if raw_text is None:
             raw_text = default_raw_text(attribute, value)
 
-        existing_for_attribute = self.get_facts_by_attribute(attribute, only_active=True)
+        existing = self.get_facts_by_attribute(attribute, only_active=True)
 
-        # Look for an exact (case-insensitive) value match first, regardless
-        # of multi_valued -- an identical fact is always a duplicate.
-        for f in existing_for_attribute:
-            if f.value.strip().lower() == value.strip().lower():
-                self._touch_fact(f.id, confidence)
-                return {"action": "duplicate_skipped", "existing_fact_id": f.id}
+        # An identical value is always a duplicate, whatever multi_valued says.
+        for fact in existing:
+            if fact.value.strip().lower() == value.strip().lower():
+                self._touch_fact(fact.id, confidence)
+                return {"action": "duplicate_skipped", "existing_fact_id": fact.id}
 
-        if not multi_valued and existing_for_attribute:
-            # Single-valued slot already has a different active value ->
-            # this is an update, not a new independent fact. Auto-supersede.
-            old = existing_for_attribute[0]
-            new_id = self._insert(attribute, value, multi_valued, raw_text,
-                                   confidence, source_session_id)
+        if not multi_valued and existing:
+            # A single-valued slot holding a different value: this is an update,
+            # not a new independent fact.
+            old = existing[0]
+            new_id = self._insert(
+                attribute, value, multi_valued, raw_text, confidence, source_session_id
+            )
             self._mark_superseded(old.id, new_id)
             return {"action": "superseded", "old_fact_id": old.id, "new_fact_id": new_id}
 
-        # Either multi-valued (append alongside existing values) or no
-        # existing fact for this attribute at all.
-        fact_id = self._insert(attribute, value, multi_valued, raw_text,
-                                confidence, source_session_id)
+        fact_id = self._insert(
+            attribute, value, multi_valued, raw_text, confidence, source_session_id
+        )
         return {"action": "inserted", "fact_id": fact_id}
 
-    def _insert(self, attribute, value, multi_valued, raw_text,
-                confidence, source_session_id) -> str:
+    def _insert(
+        self,
+        attribute: str,
+        value: str,
+        multi_valued: bool,
+        raw_text: str,
+        confidence: float,
+        source_session_id: str | None,
+    ) -> str:
         fact_id = str(uuid.uuid4())
-        now = time.time()
         self.conn.execute(
             "INSERT INTO facts (id, attribute, value, multi_valued, raw_text, "
             "confidence, source_session_id, created_at, active) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
-            (fact_id, attribute, value, int(multi_valued), raw_text,
-             confidence, source_session_id, now),
+            (
+                fact_id,
+                attribute,
+                value,
+                int(multi_valued),
+                raw_text,
+                confidence,
+                source_session_id,
+                time.time(),
+            ),
         )
         self.conn.execute(
             "INSERT INTO fact_embeddings (fact_id, embedding) VALUES (?, ?)",
-            (fact_id, embed(raw_text)),
+            (fact_id, self.embedder.embed(raw_text)),
         )
         self.conn.commit()
         return fact_id
 
-    def _touch_fact(self, fact_id: str, confidence: float):
+    def _touch_fact(self, fact_id: str, confidence: float) -> None:
         self.conn.execute(
             "UPDATE facts SET confidence = MAX(confidence, ?), created_at = ? WHERE id = ?",
             (confidence, time.time(), fact_id),
         )
         self.conn.commit()
 
-    def _mark_superseded(self, old_fact_id: str, new_fact_id: str):
+    def _mark_superseded(self, old_fact_id: str, new_fact_id: str) -> None:
         self.conn.execute(
             "UPDATE facts SET active = 0, superseded_by = ? WHERE id = ?",
             (new_fact_id, old_fact_id),
         )
         self.conn.commit()
 
-    def supersede_fact(self, old_fact_id: str, new_value: str,
-                        raw_text: str | None = None, confidence: float = 1.0,
-                        source_session_id: str | None = None) -> str:
-        """Manual override: force-replace a specific fact with a new value,
-        regardless of multi_valued. Useful if the LLM extraction step (or you)
-        decides an update should happen outside the automatic attribute-match
-        flow above."""
+    def supersede_fact(
+        self,
+        old_fact_id: str,
+        new_value: str,
+        raw_text: str | None = None,
+        confidence: float = 1.0,
+        source_session_id: str | None = None,
+    ) -> str:
+        """Force-replace a specific fact, regardless of multi_valued."""
         row = self.conn.execute(
             "SELECT attribute, multi_valued FROM facts WHERE id = ?", (old_fact_id,)
         ).fetchone()
         if row is None:
-            raise ValueError(f"No fact with id {old_fact_id}")
-        attribute, multi_valued = row[0], bool(row[1])
+            raise FactStoreError(f"No fact with id {old_fact_id}")
 
+        attribute, multi_valued = row[0], bool(row[1])
         if raw_text is None:
             raw_text = default_raw_text(attribute, new_value)
 
-        new_id = self._insert(attribute, new_value, multi_valued, raw_text,
-                               confidence, source_session_id)
+        new_id = self._insert(
+            attribute, new_value, multi_valued, raw_text, confidence, source_session_id
+        )
         self._mark_superseded(old_fact_id, new_id)
         return new_id
 
-    # ---------- Reading ----------
+    def delete_fact(self, fact_id: str) -> None:
+        """Hard-delete a fact and its embedding.
 
-    def get_facts_by_attribute(self, attribute: str, only_active: bool = True) -> list[Fact]:
-        """Exact-match lookup by attribute -- no embeddings involved. This is
-        the primary path for dedupe/supersede logic and for slot-style lookups
-        like 'what's the current timezone?'."""
-        attribute = normalize_attribute(attribute)
-        active_clause = "AND active = 1" if only_active else ""
-        rows = self.conn.execute(
-            f"SELECT id, attribute, value, multi_valued, raw_text, confidence, "
-            f"source_session_id, created_at, active, superseded_by "
-            f"FROM facts WHERE attribute = ? {active_clause} ORDER BY created_at DESC",
-            (attribute,),
-        ).fetchall()
-        return [self._row_to_fact(r) for r in rows]
-
-    def search_facts(self, query: str, top_k: int = 5,
-                      only_active: bool = True) -> list[Fact]:
-        """Fuzzy semantic search over raw_text -- for retrieving facts
-        relevant to a new conversation, not for dedupe (that's exact-match,
-        see get_facts_by_attribute / add_fact)."""
-        query_embedding = embed(query)
-
-        if only_active:
-            sql = """
-                SELECT f.id, f.attribute, f.value, f.multi_valued, f.raw_text,
-                       f.confidence, f.source_session_id, f.created_at,
-                       f.active, f.superseded_by, e.distance
-                FROM fact_embeddings e
-                JOIN facts f ON f.id = e.fact_id
-                WHERE f.active = 1
-                AND e.embedding MATCH ?
-                AND k = ?
-                ORDER BY e.distance
-            """
-        else:
-            sql = """
-                SELECT f.id, f.attribute, f.value, f.multi_valued, f.raw_text,
-                       f.confidence, f.source_session_id, f.created_at,
-                       f.active, f.superseded_by, e.distance
-                FROM fact_embeddings e
-                JOIN facts f ON f.id = e.fact_id
-                WHERE e.embedding MATCH ?
-                AND k = ?
-                ORDER BY e.distance
-            """
-
-        rows = self.conn.execute(sql, (query_embedding, top_k)).fetchall()
-
-        results = []
-        for r in rows:
-            fact = self._row_to_fact(r[:10])
-            fact.similarity = 1 - r[10]
-            results.append(fact)
-        return results
-
-    def get_all_facts(self, only_active: bool = True) -> list[Fact]:
-        active_clause = "WHERE active = 1" if only_active else ""
-        rows = self.conn.execute(
-            f"SELECT id, attribute, value, multi_valued, raw_text, confidence, "
-            f"source_session_id, created_at, active, superseded_by "
-            f"FROM facts {active_clause} ORDER BY created_at DESC",
-        ).fetchall()
-        return [self._row_to_fact(r) for r in rows]
-
-    @staticmethod
-    def _row_to_fact(r) -> Fact:
-        return Fact(
-            id=r[0], attribute=r[1], value=r[2], multi_valued=bool(r[3]),
-            raw_text=r[4], confidence=r[5], source_session_id=r[6],
-            created_at=r[7], active=bool(r[8]), superseded_by=r[9],
-        )
-
-    def get_known_attributes(self, only_active: bool = True) -> list[dict]:
-        """Return every distinct attribute currently in use, with one example
-        value each. Feed this into your extraction LLM's prompt so it can
-        reuse an existing attribute name instead of inventing a near-duplicate
-        (e.g. 'preferred_language' vs 'programming_language') -- this is the
-        cheap, reliable fix; don't try to catch that with embedding similarity
-        on the attribute names themselves, which is unreliable for short
-        labels. See merge_attributes() for a backstop cleanup pass."""
-        active_filter = "AND active = 1" if only_active else ""
-        rows = self.conn.execute(
-            f"""
-            SELECT attribute, value FROM facts f1
-            WHERE f1.created_at = (
-                SELECT MAX(f2.created_at) FROM facts f2
-                WHERE f2.attribute = f1.attribute {active_filter.replace("active", "f2.active")}
-            )
-            {active_filter}
-            ORDER BY attribute
-            """
-        ).fetchall()
-        return [{"attribute": r[0], "example_value": r[1]} for r in rows]
-
-    # NOT USED YET
-    def merge_attributes(self, duplicate_attributes: list[str], canonical_attribute: str) -> dict:
+        Unlike supersede this leaves no history -- use it for pruning bad facts,
+        not for recording that a value changed.
         """
-        Backstop for near-duplicate attribute names that slipped past the
-        known-attributes prompt (e.g. an LLM consolidation pass decides
-        'programming_language' and 'preferred_language' are the same concept
-        and canonical_attribute should be 'preferred_language').
- 
-        Reassigns every fact under any name in duplicate_attributes to
-        canonical_attribute, then re-runs the normal add_fact() dedupe/
-        supersede rules against what's already under the canonical name --
-        so if merging creates an exact duplicate or a single-valued conflict,
-        it's resolved the same way any other fact would be.
- 
-        Returns a summary dict of what happened per moved fact.
-        """
-        canonical_attribute = normalize_attribute(canonical_attribute)
-        moved = []
-
-        for dup_attr in duplicate_attributes:
-            dup_attr = normalize_attribute(dup_attr)
-            if dup_attr == canonical_attribute:
-                continue
-            facts_to_move = self.get_facts_by_attribute(dup_attr, only_active=True)
-            for f in facts_to_move:
-                # Mark the old row inactive first so add_fact's own lookup
-                # under canonical_attribute doesn't see a stale duplicate.
-                self.conn.execute("UPDATE facts SET active = 0 WHERE id = ?", (f.id,))
-                self.conn.commit()
-                result = self.add_fact(
-                    canonical_attribute, f.value, f.multi_valued,
-                    confidence=f.confidence, source_session_id=f.source_session_id,
-                )
-                # Link the old fact forward for history, same as a normal supersede.
-                new_id = result.get("fact_id") or result.get("new_fact_id") or result.get("existing_fact_id")
-                self.conn.execute(
-                    "UPDATE facts SET superseded_by = ? WHERE id = ?", (new_id, f.id)
-                )
-                self.conn.commit()
-                moved.append({"old_attribute": dup_attr, "old_fact_id": f.id, "result": result})
-
-        return {"canonical_attribute": canonical_attribute, "moved": moved}
-
-    def delete_fact(self, fact_id: str):
-        """Permanently remove a fact and its embedding. Unlike supersede, this
-        is a hard delete -- use it for pruning bad/unwanted facts, not for
-        recording that a value changed (that's add_fact's job)."""
         self.conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
         self.conn.execute("DELETE FROM fact_embeddings WHERE fact_id = ?", (fact_id,))
         self.conn.commit()
 
-    def close(self):
+    # ---- Reading ----
+
+    def get_facts_by_attribute(self, attribute: str, only_active: bool = True) -> list[Fact]:
+        """Exact-match lookup. The primary path for dedupe and slot-style reads."""
+        attribute = normalize_attribute(attribute)
+        active = " AND active = 1" if only_active else ""
+        rows = self.conn.execute(
+            f"SELECT {_SELECT_COLUMNS} FROM facts WHERE attribute = ?{active} "
+            "ORDER BY created_at DESC",
+            (attribute,),
+        ).fetchall()
+        return [self._row_to_fact(row) for row in rows]
+
+    def search_facts(self, query: str, top_k: int = 5, only_active: bool = True) -> list[Fact]:
+        """Fuzzy semantic search over raw_text, for retrieval only (never dedupe)."""
+        active = "f.active = 1 AND " if only_active else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT {_SELECT_COLUMNS_F}, e.distance
+            FROM fact_embeddings e
+            JOIN facts f ON f.id = e.fact_id
+            WHERE {active}e.embedding MATCH ? AND k = ?
+            ORDER BY e.distance
+            """,
+            (self.embedder.embed(query), top_k),
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            fact = self._row_to_fact(row[: len(_COLUMNS)])
+            fact.similarity = 1 - row[len(_COLUMNS)]
+            results.append(fact)
+        return results
+
+    def get_all_facts(self, only_active: bool = True) -> list[Fact]:
+        active = " WHERE active = 1" if only_active else ""
+        rows = self.conn.execute(
+            f"SELECT {_SELECT_COLUMNS} FROM facts{active} ORDER BY created_at DESC"
+        ).fetchall()
+        return [self._row_to_fact(row) for row in rows]
+
+    def get_known_attributes(self, only_active: bool = True) -> list[dict]:
+        """Every distinct attribute in use, with its most recent value as an example.
+
+        Fed to the extraction prompt so the model reuses an existing attribute
+        name instead of inventing a near-duplicate ('preferred_language' vs
+        'programming_language'). That is the cheap, reliable fix; do not try to
+        catch it with embedding similarity on the attribute names themselves,
+        which is unreliable for short labels. See merge_attributes() for the
+        backstop cleanup pass.
+
+        The two branches are spelled out rather than assembled by substituting
+        into a shared fragment. The previous version built the correlated
+        subquery's filter with `active_filter.replace("active", "f2.active")`,
+        which silently depended on the exact wording of the string it patched.
+        """
+        if only_active:
+            sql = f"""
+                SELECT {_SELECT_COLUMNS_F} FROM facts f
+                WHERE f.active = 1
+                  AND f.created_at = (
+                      SELECT MAX(f2.created_at) FROM facts f2
+                      WHERE f2.attribute = f.attribute AND f2.active = 1
+                  )
+                ORDER BY f.attribute
+            """
+        else:
+            sql = f"""
+                SELECT {_SELECT_COLUMNS_F} FROM facts f
+                WHERE f.created_at = (
+                    SELECT MAX(f2.created_at) FROM facts f2
+                    WHERE f2.attribute = f.attribute
+                )
+                ORDER BY f.attribute
+            """
+
+        rows = self.conn.execute(sql).fetchall()
+        return [
+            {"attribute": fact.attribute, "example_value": fact.value}
+            for fact in (self._row_to_fact(row) for row in rows)
+        ]
+
+    def merge_attributes(self, duplicate_attributes: list[str], canonical_attribute: str) -> dict:
+        """Reassign facts from near-duplicate attribute names onto one canonical name.
+
+        Backstop for names that slipped past the known-attributes prompt. Moved
+        facts go back through add_fact(), so a merge that creates a duplicate or
+        a single-valued conflict resolves the same way any other fact would.
+        """
+        canonical_attribute = normalize_attribute(canonical_attribute)
+        moved = []
+
+        for duplicate in duplicate_attributes:
+            duplicate = normalize_attribute(duplicate)
+            if duplicate == canonical_attribute:
+                continue
+
+            for fact in self.get_facts_by_attribute(duplicate, only_active=True):
+                # Deactivate first so add_fact's lookup under the canonical name
+                # does not see a stale duplicate.
+                self.conn.execute("UPDATE facts SET active = 0 WHERE id = ?", (fact.id,))
+                self.conn.commit()
+
+                result = self.add_fact(
+                    canonical_attribute,
+                    fact.value,
+                    fact.multi_valued,
+                    confidence=fact.confidence,
+                    source_session_id=fact.source_session_id,
+                )
+                new_id = (
+                    result.get("fact_id")
+                    or result.get("new_fact_id")
+                    or result.get("existing_fact_id")
+                )
+                # Link the old fact forward, same as a normal supersede.
+                self.conn.execute(
+                    "UPDATE facts SET superseded_by = ? WHERE id = ?", (new_id, fact.id)
+                )
+                self.conn.commit()
+                moved.append(
+                    {"old_attribute": duplicate, "old_fact_id": fact.id, "result": result}
+                )
+
+        return {"canonical_attribute": canonical_attribute, "moved": moved}
+
+    @staticmethod
+    def _row_to_fact(row) -> Fact:
+        return Fact(
+            id=row[0],
+            attribute=row[1],
+            value=row[2],
+            multi_valued=bool(row[3]),
+            raw_text=row[4],
+            confidence=row[5],
+            source_session_id=row[6],
+            created_at=row[7],
+            active=bool(row[8]),
+            superseded_by=row[9],
+        )
+
+    def close(self) -> None:
         self.conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Demo / smoke test
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    store = MemoryStore("memory/semantic_memory.db")
-
-    # print("--- Inserting single-valued facts ---")
-    # print(store.add_fact("timezone", "PST"))
-    # print(store.add_fact("preferred_editor", "VS Code"))
-    # print(store.add_fact("job_title", "Software Engineer"))
-
-    # print("\n--- Inserting an exact duplicate (should be skipped) ---")
-    # print(store.add_fact("timezone", "PST"))
-
-    # print("\n--- Inserting an update to a single-valued attribute (should auto-supersede) ---")
-    # print(store.add_fact("timezone", "EST"))
-
-    # print("\n--- Inserting multi-valued facts (allergies) ---")
-    # print(store.add_fact("allergy", "peanuts", multi_valued=True))
-    # print(store.add_fact("allergy", "shellfish", multi_valued=True))
-    # print("Duplicate allergy (should be skipped):", store.add_fact("allergy", "peanuts", multi_valued=True))
-
-    # print("\n--- Attribute-normalization collapsing variant spellings ---")
-    # print(store.add_fact("Preferred Editor", "Neovim"))  # should collide with preferred_editor and supersede
-
-    # print("\n--- Active facts ---")
-    # for f in store.get_all_facts():
-    #     print(f" - [{f.attribute}={f.value}] multi_valued={f.multi_valued}")
-
-    # print("\n--- All facts including inactive (history) ---")
-    # for f in store.get_all_facts(only_active=False):
-    #     print(f" - active={f.active} attr={f.attribute} value={f.value} superseded_by={f.superseded_by}")
-
-    # print("\n--- get_facts_by_attribute('allergy') ---")
-    # for f in store.get_facts_by_attribute("allergy"):
-    #     print(f" - {f.value}")
-
-    # relevant = store.search_facts("what editor does the user like?", top_k=5)
-    # print("\n--- Relevant facts ---")
-    # for f in relevant:
-    #     print(f" - {f.value} - {f.similarity:.3f}")
-
-    print(store.get_known_attributes())
-    print(store.get_all_facts(only_active=False))
-
-    store.close()
+# Retained: the store was named MemoryStore when it was the only memory
+# component, and scripts and tests still refer to it by that name.
+MemoryStore = SqliteFactStore

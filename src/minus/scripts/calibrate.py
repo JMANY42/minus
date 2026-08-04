@@ -40,7 +40,11 @@ for the most accurate calibration -- the ones below are just a starting point.
 import statistics
 import struct
 
-from minus.memory.facts.store import default_raw_text, embed
+from minus.memory.facts.embeddings import SentenceTransformerEmbedder
+from minus.memory.facts.models import default_raw_text
+
+_embedder = SentenceTransformerEmbedder()
+embed = _embedder.embed
 
 
 def cosine_similarity_from_embeddings(a: bytes, b: bytes) -> float:
@@ -128,7 +132,8 @@ def score_group(triples, label):
     return scores
 
 
-if __name__ == "__main__":
+def run_calibration() -> None:
+    """Print similarity distributions and a suggested relevance threshold."""
     direct_scores = score_group(direct_match, "Direct match (query clearly asks about this attribute)")
     related_scores = score_group(related_topic, "Related topic, different attribute (highest false-positive risk)")
     unrelated_scores = score_group(unrelated, "Unrelated")

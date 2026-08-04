@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
+from minus.core.prompts import SYSTEM_PROMPT
 from minus.services.json import write_json
 
 logger = logging.getLogger(__name__)
@@ -25,19 +26,22 @@ def _filter_condensable_messages(messages):
     return filtered
 
 
-def _build_condensable_conversation(messages):
-    # Lazy import avoids pulling in the LLM client module just to read the system prompt.
-    from minus.core.prompts import SYSTEM_PROMPT
-
-    return [{"role": "system", "content": SYSTEM_PROMPT}, *_filter_condensable_messages(messages)]
+def _build_condensable_conversation(messages, system_prompt):
+    return [{"role": "system", "content": system_prompt}, *_filter_condensable_messages(messages)]
 
 
-def condense_conversation(messages, conversation_id, source_conversation_file, condensed_base_dir):
+def condense_conversation(
+    messages,
+    conversation_id,
+    source_conversation_file,
+    condensed_base_dir,
+    system_prompt=SYSTEM_PROMPT,
+):
     if not messages:
         logger.info("Skipping post-conversation condensation because no messages were recorded.")
         return None
 
-    condensed_conversation = _build_condensable_conversation(messages)
+    condensed_conversation = _build_condensable_conversation(messages, system_prompt)
     if len(condensed_conversation) <= 1:
         logger.info("Skipping post-conversation condensation because no user/assistant turns were recorded.")
         return None

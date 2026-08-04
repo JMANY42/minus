@@ -1,14 +1,7 @@
-"""
-manage_memory.py
+"""Interactive terminal tool for pruning the semantic memory store.
 
-Interactive terminal tool for pruning the semantic memory store. Arrow
-through every stored fact, mark the ones you want gone with space, then
-confirm to delete them all at once.
-
-Usage:
-    python3 src/scripts/manage_memory.py
-    python3 src/scripts/manage_memory.py --include-inactive
-    python3 src/scripts/manage_memory.py --db path/to/other.db
+Arrow through every stored fact, mark the ones you want gone with space, then
+confirm to delete them all at once. Invoked as `minus memory`.
 
 Keys:
     up/down or j/k   move cursor
@@ -19,11 +12,10 @@ Keys:
     q / esc          quit without deleting
 """
 
-import argparse
 import curses
 
-from minus.memory.facts.store import Fact, MemoryStore
-from minus.memory.service import DEFAULT_SEMANTIC_MEMORY_DB
+from minus.memory.facts.models import Fact
+from minus.memory.facts.store import MemoryStore
 
 
 def format_fact(fact: Fact) -> str:
@@ -111,35 +103,27 @@ def confirm(stdscr, count: int) -> bool:
             return False
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Interactively delete facts from the semantic memory store.")
-    parser.add_argument("--db", default=str(DEFAULT_SEMANTIC_MEMORY_DB), help="Path to the semantic memory sqlite db.")
-    parser.add_argument("--include-inactive", action="store_true", help="Also show superseded/inactive facts.")
-    args = parser.parse_args()
-
-    store = MemoryStore(args.db)
+def run_memory_tui(db_path: str, include_inactive: bool = False) -> int:
+    """Interactively prune the semantic memory store. Returns the delete count."""
+    store = MemoryStore(db_path)
     try:
-        facts = store.get_all_facts(only_active=not args.include_inactive)
+        facts = store.get_all_facts(only_active=not include_inactive)
         if not facts:
             print("No facts found in the memory store.")
-            return
+            return 0
 
         to_delete = curses.wrapper(run, facts)
-
         if not to_delete:
             print("No facts deleted.")
-            return
+            return 0
 
-        deleted_lookup = {f.id: f for f in facts}
+        lookup = {f.id: f for f in facts}
         for fact_id in to_delete:
             store.delete_fact(fact_id)
 
         print(f"Deleted {len(to_delete)} fact(s):")
         for fact_id in to_delete:
-            print(f"  - {format_fact(deleted_lookup[fact_id])}")
+            print(f"  - {format_fact(lookup[fact_id])}")
+        return len(to_delete)
     finally:
         store.close()
-
-
-if __name__ == "__main__":
-    main()
