@@ -14,6 +14,7 @@ Currently, Minus is essentially just a custom harness around an LLM (via OpenRou
 
 ## What's New?
 
+### Semantic Memory
 I just gave Minus semantic memory. Minus now can remember facts and preferences between conversation sessions. It works as follows.
 
 - Every user message is appended with potentially relevent facts ranked by comparing the embedding of the user message vs the fact
@@ -26,6 +27,8 @@ Improvements:
 - Sometimes the model makes a ton of unnecessary tool calls. Tweak system prompt or try a different OpenRouter model.
 - Seperate script to look at all current facts and manually go through and modify/delete them. More of a QOL feature. Could be incorporated into future dashboard.
 
+### OpenRouter
+Replaced the groq dependency with OpenRouter so that future expansion into different tiers of thinking is easier
 
 ## Run
 
