@@ -18,7 +18,6 @@ and passed in.
 from __future__ import annotations
 
 import logging
-import re
 import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +27,7 @@ from typing import Any
 import sounddevice as sd
 from kokoro_onnx import Kokoro
 
+from minus.audio.chunking import split_text_into_chunks
 from minus.audio.interrupt import InterruptBus
 from minus.paths import models_dir
 
@@ -82,54 +82,6 @@ def call_with_timeout(func, timeout: float, description: str) -> bool:
     if "error" in result:
         raise result["error"]
     return True
-
-
-def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
-    """Split text for synthesis, preferring sentence then word boundaries."""
-    cleaned = " ".join((text or "").split())
-    if not cleaned:
-        return []
-    if len(cleaned) <= max_chars:
-        return [cleaned]
-
-    chunks: list[str] = []
-    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
-
-    for sentence in sentences:
-        if not sentence:
-            continue
-
-        if len(sentence) <= max_chars:
-            if chunks and len(chunks[-1]) + 1 + len(sentence) <= max_chars:
-                chunks[-1] = f"{chunks[-1]} {sentence}"
-            else:
-                chunks.append(sentence)
-            continue
-
-        current = ""
-        for word in sentence.split():
-            if len(word) > max_chars:
-                if current:
-                    chunks.append(current)
-                    current = ""
-                for start in range(0, len(word), max_chars):
-                    chunks.append(word[start : start + max_chars])
-                continue
-
-            candidate = f"{current} {word}".strip()
-            if len(candidate) <= max_chars:
-                current = candidate
-            else:
-                chunks.append(current)
-                current = word
-
-        if current:
-            if chunks and len(chunks[-1]) + 1 + len(current) <= max_chars:
-                chunks[-1] = f"{chunks[-1]} {current}"
-            else:
-                chunks.append(current)
-
-    return chunks
 
 
 class KokoroSpeaker:

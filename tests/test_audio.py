@@ -6,8 +6,8 @@ the CLI path no longer made, the other mocked sd.play/wait/stop after playback
 had moved to sd.OutputStream. Neither failure was noticed because the suite was
 already red.
 
-These import minus.audio.interrupt and minus.audio.stt, neither of which pulls
-in sounddevice or kokoro-onnx -- so they run without the `audio` extra.
+These import minus.audio.{interrupt,stt,chunking}, none of which pull in
+sounddevice or kokoro-onnx -- so the whole file runs without the `audio` extra.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from minus.audio.chunking import split_text_into_chunks
 from minus.audio.interrupt import InterruptBus
 from minus.audio.stt import CliTranscriptSource, is_exit_phrase
 
@@ -143,40 +144,23 @@ class TestCliTranscriptSource:
 
 
 class TestChunking:
-    """split_text_into_chunks lives in tts.py, which needs the audio extra."""
-
-    @pytest.fixture(autouse=True)
-    def _require_audio(self):
-        pytest.importorskip("sounddevice", reason="needs the 'audio' extra")
-        pytest.importorskip("kokoro_onnx", reason="needs the 'audio' extra")
-
     def test_short_text_is_one_chunk(self):
-        from minus.audio.tts import split_text_into_chunks
-
         assert split_text_into_chunks("hello there", max_chars=40) == ["hello there"]
 
     def test_empty_text_produces_no_chunks(self):
-        from minus.audio.tts import split_text_into_chunks
-
         assert split_text_into_chunks("", max_chars=40) == []
         assert split_text_into_chunks("   ", max_chars=40) == []
 
     def test_sentence_boundaries_are_preferred(self):
-        from minus.audio.tts import split_text_into_chunks
-
         chunks = split_text_into_chunks("One two three. Four five six. Seven.", max_chars=20)
         assert all(len(chunk) <= 20 for chunk in chunks)
         assert "".join(chunks).replace(" ", "") == "Onetwothree.Fourfivesix.Seven."
 
     def test_a_word_longer_than_the_limit_is_split(self):
-        from minus.audio.tts import split_text_into_chunks
-
         chunks = split_text_into_chunks("x" * 100, max_chars=40)
         assert all(len(chunk) <= 40 for chunk in chunks)
         assert "".join(chunks) == "x" * 100
 
     def test_every_chunk_respects_the_limit(self):
-        from minus.audio.tts import split_text_into_chunks
-
         text = " ".join(f"word{i}" for i in range(200))
         assert all(len(chunk) <= 40 for chunk in split_text_into_chunks(text, max_chars=40))
