@@ -3,10 +3,10 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from services.json import parse_json, read_json, serialize_json
+from minus.paths import project_root
+from minus.services.json import parse_json, read_json, serialize_json
 
-
-WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+WORKSPACE_ROOT = project_root()
 
 
 class ToolHandler:

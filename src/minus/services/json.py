@@ -2,7 +2,6 @@ import json as stdjson
 import os
 from pathlib import Path
 
-
 JSONDecodeError = stdjson.JSONDecodeError
 
 

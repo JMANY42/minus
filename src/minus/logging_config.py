@@ -1,17 +1,15 @@
 import logging
 import os
 from datetime import datetime
-from pathlib import Path
 
-
-WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
-LOGS_DIR = WORKSPACE_ROOT / "logs"
+from minus.paths import logs_dir
 
 
 def setup_logging(level=logging.DEBUG):
-    log_file = LOGS_DIR / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{os.getpid()}.log"
+    directory = logs_dir()
+    log_file = directory / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{os.getpid()}.log"
 
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()

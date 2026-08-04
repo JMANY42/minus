@@ -52,12 +52,11 @@ left to tune.
 
 import re
 import sqlite3
-import sqlite_vec
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
 
+import sqlite_vec
 from sentence_transformers import SentenceTransformer
 
 EMBEDDING_DIM = 384  # matches all-MiniLM-L6-v2
@@ -119,11 +118,11 @@ class Fact:
     multi_valued: bool
     raw_text: str
     confidence: float
-    source_session_id: Optional[str]
+    source_session_id: str | None
     created_at: float
     active: bool
-    superseded_by: Optional[str]
-    similarity: Optional[float] = None  # populated on search results only
+    superseded_by: str | None
+    similarity: float | None = None  # populated on search results only
 
 
 class MemoryStore:
@@ -172,9 +171,9 @@ class MemoryStore:
         attribute: str,
         value: str,
         multi_valued: bool = False,
-        raw_text: Optional[str] = None,
+        raw_text: str | None = None,
         confidence: float = 1.0,
-        source_session_id: Optional[str] = None,
+        source_session_id: str | None = None,
     ) -> dict:
         """
         Insert a fact using exact-match dedupe/supersede logic on
@@ -246,8 +245,8 @@ class MemoryStore:
         self.conn.commit()
 
     def supersede_fact(self, old_fact_id: str, new_value: str,
-                        raw_text: Optional[str] = None, confidence: float = 1.0,
-                        source_session_id: Optional[str] = None) -> str:
+                        raw_text: str | None = None, confidence: float = 1.0,
+                        source_session_id: str | None = None) -> str:
         """Manual override: force-replace a specific fact with a new value,
         regardless of multi_valued. Useful if the LLM extraction step (or you)
         decides an update should happen outside the automatic attribute-match
@@ -380,7 +379,7 @@ class MemoryStore:
         """
         canonical_attribute = normalize_attribute(canonical_attribute)
         moved = []
- 
+
         for dup_attr in duplicate_attributes:
             dup_attr = normalize_attribute(dup_attr)
             if dup_attr == canonical_attribute:
@@ -402,7 +401,7 @@ class MemoryStore:
                 )
                 self.conn.commit()
                 moved.append({"old_attribute": dup_attr, "old_fact_id": f.id, "result": result})
- 
+
         return {"canonical_attribute": canonical_attribute, "moved": moved}
 
     def delete_fact(self, fact_id: str):

@@ -1,9 +1,8 @@
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from services.json import write_json
-
+from minus.services.json import write_json
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ def _filter_condensable_messages(messages):
 
 def _build_condensable_conversation(messages):
     # Lazy import avoids pulling in the LLM client module just to read the system prompt.
-    from response import SYSTEM_PROMPT
+    from minus.core.prompts import SYSTEM_PROMPT
 
     return [{"role": "system", "content": SYSTEM_PROMPT}, *_filter_condensable_messages(messages)]
 
@@ -51,7 +50,7 @@ def condense_conversation(messages, conversation_id, source_conversation_file, c
     condensed_payload = {
         "conversation_id": conversation_id,
         "source_conversation_file": str(source_conversation_file),
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "condensed_conversation": condensed_conversation,
     }
     condensed_path = Path(condensed_base_dir) / f"{conversation_id}.json"

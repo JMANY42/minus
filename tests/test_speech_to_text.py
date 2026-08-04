@@ -2,10 +2,7 @@ import builtins
 import sys
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 fake_kokoro = types.ModuleType("kokoro_onnx")
 
@@ -24,7 +21,7 @@ fake_sounddevice.stop = lambda *args, **kwargs: None
 sys.modules["kokoro_onnx"] = fake_kokoro
 sys.modules["sounddevice"] = fake_sounddevice
 
-import speech_to_text as speech_to_text_module
+import minus.audio.stt as speech_to_text_module
 
 
 class CliTranscriptTests(unittest.TestCase):

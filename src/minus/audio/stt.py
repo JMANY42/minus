@@ -1,7 +1,6 @@
 import logging
 
-from text_to_speech import request_interrupt
-
+from minus.audio.tts import request_interrupt
 
 logger = logging.getLogger(__name__)
 logger.disabled = True

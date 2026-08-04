@@ -1,12 +1,15 @@
 .venv
 .env
 __pycache__/
-logs/
 *.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Ignore memory files
-# This is different for every version of Minus
-memory/
-
-# Keep the src/memory source code folder
-!src/memory
+# Runtime data and logs. Anchored to the repo root with a leading slash so
+# these patterns cannot swallow source directories that happen to share a
+# name -- src/minus/memory/ is code, /memory/ is this machine's data. The
+# old unanchored "memory/" needed a "!src/memory" negation to stay tracked,
+# which would have silently broken when the package moved one level deeper.
+/logs/
+/memory/

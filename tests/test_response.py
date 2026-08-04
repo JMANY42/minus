@@ -1,9 +1,6 @@
 import sys
 import types
 import unittest
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 fake_dotenv = types.ModuleType("dotenv")
 fake_dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -29,12 +26,12 @@ fake_openai.BadRequestError = FakeBadRequestError
 
 sys.modules["dotenv"] = fake_dotenv
 sys.modules["openai"] = fake_openai
-sys.modules.pop("response", None)
-sys.modules.pop("services.llm", None)
-sys.modules.pop("services", None)
+sys.modules.pop("minus.core.prompts", None)
+sys.modules.pop("minus.llm.client", None)
+sys.modules.pop("minus.llm", None)
 
-import response as response_module
-import services.llm as llm_module
+import minus.core.prompts as response_module
+import minus.llm.client as llm_module
 
 
 class FakeMessage:

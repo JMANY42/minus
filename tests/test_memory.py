@@ -1,15 +1,11 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from services.json import parse_json
-
-import memory.memory_manager as memory_module
-import memory.condense_conversation as condense_module
-from response import SYSTEM_PROMPT
+import minus.memory.condense as condense_module
+import minus.memory.service as memory_module
+from minus.core.prompts import SYSTEM_PROMPT
+from minus.services.json import parse_json
 
 
 class ConversationMemoryTests(unittest.TestCase):

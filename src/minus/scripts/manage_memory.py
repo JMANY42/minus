@@ -21,13 +21,9 @@ Keys:
 
 import argparse
 import curses
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from memory.memory_manager import DEFAULT_SEMANTIC_MEMORY_DB
-from memory.memory_store import MemoryStore, Fact
+from minus.memory.facts.store import Fact, MemoryStore
+from minus.memory.service import DEFAULT_SEMANTIC_MEMORY_DB
 
 
 def format_fact(fact: Fact) -> str:

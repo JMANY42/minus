@@ -1,7 +1,6 @@
 import logging
 
-from services.llm import DEFAULT_MODEL, generate_completion
-
+from minus.llm.client import DEFAULT_MODEL, generate_completion
 
 logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = (

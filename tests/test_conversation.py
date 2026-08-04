@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 fake_dotenv = types.ModuleType("dotenv")
 fake_dotenv.load_dotenv = lambda *args, **kwargs: None
 
@@ -30,11 +28,11 @@ fake_openai.BadRequestError = FakeBadRequestError
 
 sys.modules["dotenv"] = fake_dotenv
 sys.modules["openai"] = fake_openai
-sys.modules.pop("response", None)
-sys.modules.pop("services.llm", None)
-sys.modules.pop("services", None)
+sys.modules.pop("minus.core.prompts", None)
+sys.modules.pop("minus.llm.client", None)
+sys.modules.pop("minus.llm", None)
 
-import conversation as conversation_module
+import minus.core.agent as conversation_module
 
 
 @dataclass

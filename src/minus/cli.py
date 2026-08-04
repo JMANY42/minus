@@ -3,14 +3,12 @@ import faulthandler
 import logging
 import signal
 
-from memory.memory_manager import MemoryManager
-from speech_to_text import create_recorder, iter_cli_transcripts, iter_transcripts
-from conversation import Conversation
-from logging_utils import setup_logging
-from text_to_speech import speak
-
-from services.json import pretty_json
-
+from minus.audio.stt import create_recorder, iter_cli_transcripts, iter_transcripts
+from minus.audio.tts import speak
+from minus.core.agent import Conversation
+from minus.logging_config import setup_logging
+from minus.memory.service import MemoryManager
+from minus.services.json import pretty_json
 
 logger = logging.getLogger(__name__)
 

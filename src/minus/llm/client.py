@@ -3,8 +3,7 @@ import os
 import time
 
 from dotenv import load_dotenv
-from openai import BadRequestError, OpenAI
-
+from openai import OpenAI
 
 load_dotenv()
 

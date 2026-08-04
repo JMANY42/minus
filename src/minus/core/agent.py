@@ -1,11 +1,10 @@
 import logging
 from dataclasses import asdict, is_dataclass
 
-from response import generate_response
-from memory import MemoryManager
-from services.json import pretty_json
-from tool_handler import ToolHandler
-
+from minus.core.prompts import generate_response
+from minus.memory.service import MemoryManager
+from minus.services.json import pretty_json
+from minus.tools.registry import ToolHandler
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +152,7 @@ class Conversation:
         relevent_facts = [f.raw_text.strip() for f in self.memory.search_facts(current_user_message["content"], 5)]
         if relevent_facts:
             current_user_message["content"] += "\n\nRELEVANT FACTS:\n" + pretty_json(relevent_facts)
-        
+
         logger.debug("current_user_message: %s", current_user_message)
         append_message(self.messages, current_user_message, memory=self.memory)
         # append_message(self.messages, create_fact_message(relevent_facts), memory=self.memory)

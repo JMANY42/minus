@@ -30,11 +30,9 @@ Usage:
 import argparse
 import json
 import logging
-import os
-import sys
 import re
+import sys
 import time
-
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +117,7 @@ def validate_facts(facts):
 
 def _generate_completion(**kwargs):
     # Lazy import keeps this script usable in contexts that do not need the LLM client.
-    from services.llm import generate_completion
+    from minus.llm.client import generate_completion
 
     return generate_completion(**kwargs)
 
@@ -156,7 +154,7 @@ def extract_facts_from_conversation(conversation, known_attributes, model=None):
 
 
 def main():
-    from services.llm import DEFAULT_MODEL
+    from minus.llm.client import DEFAULT_MODEL
 
     parser = argparse.ArgumentParser(description="Extract durable facts from a conversation transcript.")
     parser.add_argument(
@@ -178,7 +176,7 @@ def main():
     if args.input == "-":
         raw = sys.stdin.read()
     else:
-        with open(args.input, "r", encoding="utf-8") as f:
+        with open(args.input, encoding="utf-8") as f:
             raw = f.read()
 
     data = json.loads(raw)

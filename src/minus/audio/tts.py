@@ -1,20 +1,19 @@
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 import logging
-import os
 import re
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
-from kokoro_onnx import Kokoro
 import sounddevice as sd
+from kokoro_onnx import Kokoro
 
+from minus.paths import models_dir
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
-MODEL_PATH = os.path.join(BASE_DIR, "kokoro-v1.0.onnx")
-VOICE_PATH = os.path.join(BASE_DIR, "voices-v1.0.bin")
+MODEL_PATH = models_dir() / "kokoro-v1.0.onnx"
+VOICE_PATH = models_dir() / "voices-v1.0.bin"
 
 
 _interrupt_lock = threading.Lock()
@@ -36,7 +35,7 @@ CHUNK_MAX_CHARS = 40
 
 @lru_cache(maxsize=1)
 def get_kokoro():
-    return Kokoro(MODEL_PATH, VOICE_PATH)
+    return Kokoro(str(MODEL_PATH), str(VOICE_PATH))
 
 
 def _call_with_timeout(func, timeout, description):

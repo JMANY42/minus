@@ -2,10 +2,7 @@ import signal
 import sys
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 fake_kokoro = types.ModuleType("kokoro_onnx")
 
@@ -24,7 +21,7 @@ fake_sounddevice.stop = lambda *args, **kwargs: None
 sys.modules["kokoro_onnx"] = fake_kokoro
 sys.modules["sounddevice"] = fake_sounddevice
 
-import text_to_speech as text_to_speech_module
+import minus.audio.tts as text_to_speech_module
 
 
 class SpeakInterruptTests(unittest.TestCase):
