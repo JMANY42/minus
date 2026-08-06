@@ -52,3 +52,12 @@ def condensed_conversations_dir() -> Path:
 
 def semantic_memory_db() -> Path:
     return memory_dir() / "semantic_memory.db"
+
+
+def deep_notes_dir() -> Path:
+    """Where the deep tier's full written answers land.
+
+    The spoken summary goes to the speaker; this is the other half, kept as
+    text so a dashboard can render it without going through TTS.
+    """
+    return memory_dir() / "deep_notes"

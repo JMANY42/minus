@@ -71,6 +71,7 @@ class OpenRouterClient:
         tool_choice: str = "auto",
         max_retries: int | None = None,
         retry_note: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Any:
         """Call the model and return a validated completion.
 
@@ -78,6 +79,11 @@ class OpenRouterClient:
         malformed tool calls lives in one place. When `retry_note` is given, an
         error diagnosed as a bad tool-call generation is retried up to
         `max_retries` times with a corrective system message appended.
+
+        `reasoning_effort` is sent only when a caller asks for it. The deep
+        tier's model reasons on demand rather than by being large, so this is
+        the parameter that actually makes escalation worth its latency; the
+        conversational tier omits it and is unaffected.
         """
         model = model or self._settings.chat_model
         retries = self._settings.max_retries if max_retries is None else max_retries
@@ -88,6 +94,8 @@ class OpenRouterClient:
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = tool_choice
+            if reasoning_effort:
+                payload["reasoning_effort"] = reasoning_effort
             return payload
 
         payload = build_payload(messages)

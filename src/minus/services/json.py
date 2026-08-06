@@ -1,8 +1,38 @@
 import json as stdjson
 import os
+import re
 from pathlib import Path
 
 JSONDecodeError = stdjson.JSONDecodeError
+
+_FENCE_OPEN = re.compile(r"^```(?:json)?\s*")
+_FENCE_CLOSE = re.compile(r"\s*```$")
+
+
+def extract_json_object(text):
+    """Best-effort extraction of a JSON object from a model response.
+
+    The object counterpart of `extract_json_array` in memory/extraction.py, and
+    it exists for the same reason: models routinely wrap structured output in
+    code fences or introduce it with a sentence of prose, and a response that is
+    otherwise correct should not be discarded over a stray "Here you go:".
+
+    Raises ValueError if no object can be recovered, so callers can decide
+    whether to degrade or fail.
+    """
+    text = _FENCE_CLOSE.sub("", _FENCE_OPEN.sub("", text.strip())).strip()
+
+    try:
+        return stdjson.loads(text)
+    except stdjson.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return stdjson.loads(text[start : end + 1])
+
+    raise ValueError(f"Could not parse a JSON object from model output:\n{text}")
 
 
 def read_json(path, encoding="utf-8"):

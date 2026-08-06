@@ -52,6 +52,7 @@ class FakeChatModel:
         tool_choice: str = "auto",
         max_retries: int | None = None,
         retry_note: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Any:
         self.calls.append(
             {
@@ -60,6 +61,7 @@ class FakeChatModel:
                 "system_prompt": system_prompt,
                 "tools": tools,
                 "retry_note": retry_note,
+                "reasoning_effort": reasoning_effort,
             }
         )
         if not self.responses:
@@ -110,6 +112,70 @@ class FakeMemory:
 
     def all_facts(self, only_active: bool = True) -> list[FakeFact]:
         return list(self.facts)
+
+
+@dataclass
+class FakeDetailSink:
+    """A DetailSink that keeps published notes in memory."""
+
+    published: list[tuple[str, str]] = field(default_factory=list)
+
+    def publish(self, title: str, detail: str) -> None:
+        self.published.append((title, detail))
+
+
+class InlineExecutor:
+    """An executor that runs work on the calling thread, immediately.
+
+    Escalation is only interesting because it is asynchronous, but asserting on
+    it is only tractable when it is not. Substituting this makes `escalate()`
+    run its job to completion before returning, so a test can assert on the
+    queue without sleeping or polling.
+    """
+
+    def __init__(self) -> None:
+        self.submitted = 0
+
+    def submit(self, fn, *args, **kwargs):
+        self.submitted += 1
+        future: Any = _InlineFuture()
+        try:
+            future._result = fn(*args, **kwargs)
+        except BaseException as exc:  # pragma: no cover - fn is meant not to raise
+            future._exception = exc
+        return future
+
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        return None
+
+
+class _InlineFuture:
+    _result: Any = None
+    _exception: BaseException | None = None
+
+    def done(self) -> bool:
+        return True
+
+    def result(self, timeout: float | None = None) -> Any:
+        if self._exception is not None:
+            raise self._exception
+        return self._result
+
+
+class FakeSpeaker:
+    """Records what was spoken and with which interrupt token."""
+
+    def __init__(self, token_value: int = 0) -> None:
+        self.token_value = token_value
+        self.spoken: list[tuple[str, int | None]] = []
+        self.tokens_taken = 0
+
+    def token(self) -> int:
+        self.tokens_taken += 1
+        return self.token_value
+
+    def speak(self, text: str, *, token: int | None = None) -> None:
+        self.spoken.append((text, token))
 
 
 class FakeEmbedder:

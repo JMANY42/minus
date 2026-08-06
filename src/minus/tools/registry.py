@@ -25,7 +25,7 @@ from __future__ import annotations
 import inspect
 import logging
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,6 +117,23 @@ class ToolRegistry:
     def schemas(self) -> list[dict]:
         """Every tool's schema, in the array shape the chat API expects."""
         return [self._tools[name].schema for name in self.names()]
+
+    def subset(self, names: Iterable[str]) -> ToolRegistry:
+        """A new registry holding only `names`, sharing this one's Tools.
+
+        Which tier may call which tool is a composition-root decision, not a
+        property of the tool itself: the same `read_workspace_file` is offered
+        to both the conversational model and the deep tier. Expressing the
+        split here keeps `Tool` free of tier flags that would have to be kept
+        in sync with the wiring.
+
+        Raises UnknownToolError for a name that is not registered, so a typo in
+        the wiring fails at startup rather than silently shrinking a tier.
+        """
+        scoped = ToolRegistry()
+        for name in names:
+            scoped._tools[name] = self.get(name)
+        return scoped
 
     # ---- Dispatch ----
 

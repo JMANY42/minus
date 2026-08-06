@@ -185,3 +185,65 @@ class TestWorkspaceGuard:
         # be used to step out of the workspace.
         with pytest.raises(WorkspacePathError, match="escapes"):
             resolve_workspace_path("link.txt", root=tmp_path)
+
+
+class TestSubset:
+    """Scoping the registry is how the two model tiers get different tools."""
+
+    def _two_tools(self) -> ToolRegistry:
+        registry = ToolRegistry()
+
+        @registry.tool
+        def alpha() -> str:
+            """Alpha tool."""
+            return "a"
+
+        @registry.tool
+        def beta() -> str:
+            """Beta tool."""
+            return "b"
+
+        return registry
+
+    def test_keeps_only_the_named_tools(self):
+        scoped = self._two_tools().subset(["alpha"])
+
+        assert scoped.names() == ["alpha"]
+        assert "beta" not in scoped
+
+    def test_the_original_registry_is_untouched(self):
+        registry = self._two_tools()
+        registry.subset(["alpha"])
+
+        assert registry.names() == ["alpha", "beta"]
+
+    def test_a_scoped_tool_still_dispatches(self):
+        scoped = self._two_tools().subset(["alpha"])
+
+        assert "a" in scoped.dispatch("alpha")
+
+    def test_an_unknown_name_fails_loudly(self):
+        # A typo in the tier wiring should break at startup rather than
+        # silently handing a model a smaller toolset than intended.
+        with pytest.raises(UnknownToolError):
+            self._two_tools().subset(["alpah"])
+
+    def test_a_bound_method_registers_with_a_derived_schema(self):
+        # This is how the stateful `escalate` tool reaches the fast tier: it
+        # carries a thinker with it, and `self` must not leak into the schema.
+        class Thinker:
+            def escalate(self, question: str) -> dict:
+                """Hand a question to a slower model.
+
+                Args:
+                    question: The full question to think about.
+                """
+                return {"question": question}
+
+        scoped = self._two_tools().subset([])
+        scoped.tool(Thinker().escalate)
+
+        schema = scoped.schemas()[0]["function"]
+        assert schema["name"] == "escalate"
+        assert "self" not in schema["parameters"]["properties"]
+        assert schema["parameters"]["required"] == ["question"]

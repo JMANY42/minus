@@ -16,15 +16,32 @@ import argparse
 import faulthandler
 import logging
 import signal
+import threading
+from dataclasses import dataclass
+from queue import Queue
 
 from minus.config import Settings, load_settings
 from minus.core.agent import Conversation
+from minus.core.escalation import DeepThinker
+from minus.core.messages import Message
 from minus.core.prompts import build_system_prompt
+from minus.core.protocols import DetailSink
 from minus.llm.client import OpenRouterClient
 from minus.logging_config import setup_logging
 from minus.memory.service import MemoryService
 from minus.paths import semantic_memory_db
+from minus.services.detail import FileDetailSink
 from minus.services.json import pretty_json
+
+# What the deep tier is allowed to touch from its background thread. An
+# explicit allowlist rather than "everything the fast model has": the fast
+# tier's tools are chosen for a user who is present and listening, and a
+# background job should not inherit that by default.
+DEEP_TOOL_NAMES = ("list_workspace_files", "read_workspace_file")
+
+# Ends the courier thread. A sentinel rather than a flag because the courier
+# is blocked in Queue.get() and needs something to arrive to wake it.
+_STOP = object()
 
 logger = logging.getLogger(__name__)
 
@@ -66,28 +83,78 @@ def _install_stack_dumper() -> None:
         faulthandler.register(signal.SIGUSR1)
 
 
-def conversation_loop(transcripts, conversation, speaker) -> None:
+def deliver_deep_result(assistant, speaker, floor, result) -> None:
+    """Publish one escalated answer's two channels."""
+    # Detail first, and outside the lock: it is file I/O with nothing to
+    # serialize against, and the spoken line may refer to the write-up.
+    assistant.details.publish(result.question, result.detail)
+
+    with floor:
+        # Captured here rather than when the escalation started. The user has
+        # almost certainly spoken during the seconds the deep tier was running,
+        # which would make an escalation-time token stale and silently drop
+        # every single deep answer.
+        token = speaker.token()
+        assistant.conversation.transcript.append(Message(role="assistant", content=result.spoken))
+        logger.info("Deep answer:\n%s", pretty_json(result.spoken))
+        speaker.speak(result.spoken, token=token)
+
+
+def deep_result_courier(assistant, speaker, floor) -> None:
+    """Deliver escalated answers as they land, until told to stop."""
+    while True:
+        result = assistant.results.get()
+        if result is _STOP:
+            return
+        try:
+            deliver_deep_result(assistant, speaker, floor, result)
+        except Exception:
+            # This thread is the only thing delivering deep answers; letting it
+            # die over one bad result would silently disable escalation for the
+            # rest of the session.
+            logger.exception("Failed to deliver a deep answer")
+
+
+def conversation_loop(transcripts, assistant, speaker) -> None:
     """Drive one conversation to completion.
 
     The post-conversation work runs in a `finally` so that quitting with Ctrl-C
     still condenses the transcript and extracts durable facts. It previously sat
     after the loop, so an interrupt discarded everything the session had learned.
+
+    Two producers share one speaker: this loop, and the courier thread carrying
+    escalated answers. `floor` is what stops a deep answer from being spoken
+    over a live reply, and stops both from appending to the transcript at once.
     """
+    conversation = assistant.conversation
+    floor = threading.Lock()
+    courier = threading.Thread(
+        target=deep_result_courier,
+        args=(assistant, speaker, floor),
+        name="deep-courier",
+        daemon=True,
+    )
+    courier.start()
+
     try:
         for transcript in transcripts:
             logger.info("Transcript received:\n%s", pretty_json(transcript))
 
-            # Captured before generation starts: if the user begins talking
-            # while the model is still thinking, this token goes stale and the
-            # reply is dropped rather than spoken over them.
-            token = speaker.token()
+            with floor:
+                # Captured before generation starts: if the user begins talking
+                # while the model is still thinking, this token goes stale and
+                # the reply is dropped rather than spoken over them.
+                token = speaker.token()
 
-            response = conversation.reply(transcript)
-            logger.info("Assistant response:\n%s", pretty_json(response))
-            speaker.speak(response, token=token)
+                response = conversation.reply(transcript)
+                logger.info("Assistant response:\n%s", pretty_json(response))
+                speaker.speak(response, token=token)
     except KeyboardInterrupt:
         logger.info("Interrupted; wrapping up the conversation.")
     finally:
+        assistant.results.put(_STOP)
+        courier.join(timeout=2.0)
+
         conversation.post_conversation()
         facts = conversation.memory.all_facts()
         if facts:
@@ -96,24 +163,82 @@ def conversation_loop(transcripts, conversation, speaker) -> None:
             logger.info("No semantic memory stored.")
 
 
-def build_conversation(settings: Settings) -> tuple[Conversation, MemoryService]:
-    """Construct the model, memory and agent graph."""
+@dataclass
+class Assistant:
+    """The wired object graph one conversation runs on."""
+
+    conversation: Conversation
+    memory: MemoryService
+    thinker: DeepThinker
+    results: Queue
+    details: DetailSink
+
+
+def build_deep_tools():
+    """The deliberate allowlist the deep tier may call from its thread."""
+    from minus.tools import registry
+
+    return registry.subset(DEEP_TOOL_NAMES)
+
+
+def build_fast_tools(thinker: DeepThinker):
+    """Everything registered, plus `escalate`.
+
+    Deriving the fast tier from the whole registry rather than an allowlist
+    means a newly added built-in reaches the conversational model without a
+    second edit here -- which is the property that made the registry worth
+    having in the first place.
+    """
+    from minus.tools import registry
+
+    fast = registry.subset(registry.names())
+    fast.tool(thinker.escalate)
+    return fast
+
+
+def build_conversation(settings: Settings) -> Assistant:
+    """Construct the model tiers, memory and agent graph."""
     model = OpenRouterClient(settings)
+    system_prompt = build_system_prompt(settings.project_root, can_escalate=True)
+
     memory = MemoryService(
         model=model,
         extraction_model_name=settings.fact_extraction_model,
-        system_prompt=build_system_prompt(settings.project_root),
+        system_prompt=system_prompt,
         relevance_threshold=settings.relevance_threshold,
         fact_search_top_k=settings.fact_search_top_k,
     )
+
+    results: Queue = Queue()
+    thinker = DeepThinker(
+        model=model,
+        deep_model=settings.deep_model,
+        results=results,
+        tools=build_deep_tools(),
+        reasoning_effort=settings.deep_reasoning_effort,
+        max_tool_rounds=settings.deep_max_tool_rounds,
+        timeout_seconds=settings.deep_timeout_seconds,
+    )
+
     conversation = Conversation(
         model=model,
+        tools=build_fast_tools(thinker),
         max_tool_rounds=settings.max_tool_rounds,
         memory=memory,
-        system_prompt=build_system_prompt(settings.project_root),
+        system_prompt=system_prompt,
         fact_top_k=settings.fact_search_top_k,
     )
-    return conversation, memory
+    # Late-bound: the conversation needs the registry holding `escalate`, and
+    # `escalate` needs the conversation to read for context.
+    thinker.bind_snapshot(lambda: conversation.messages)
+
+    return Assistant(
+        conversation=conversation,
+        memory=memory,
+        thinker=thinker,
+        results=results,
+        details=FileDetailSink(),
+    )
 
 
 def run_assistant(settings: Settings, use_mic: bool) -> None:
@@ -131,11 +256,14 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
         else CliTranscriptSource(interrupts)
     )
 
-    conversation, memory = build_conversation(settings)
+    assistant = build_conversation(settings)
     try:
-        conversation_loop(source, conversation, speaker)
+        conversation_loop(source, assistant, speaker)
     finally:
-        memory.close()
+        # Before memory.close(): a deep call still in flight holds no fact-store
+        # handle, but stopping new work first keeps teardown ordered.
+        assistant.thinker.shutdown()
+        assistant.memory.close()
 
 
 def run_memory_tui(args) -> None:
@@ -145,9 +273,13 @@ def run_memory_tui(args) -> None:
 
 
 def run_tools() -> None:
-    from minus.tools import registry
+    # Built through the same tiering the assistant uses, so `escalate` is
+    # listed rather than being invisible until it is called.
+    thinker = DeepThinker(model=None, deep_model="", results=Queue())
+    fast_tools = build_fast_tools(thinker)
+    thinker.shutdown()
 
-    for schema in registry.schemas():
+    for schema in fast_tools.schemas():
         function = schema["function"]
         required = set(function["parameters"].get("required", []))
         params = ", ".join(
