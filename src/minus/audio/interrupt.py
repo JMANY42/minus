@@ -13,11 +13,12 @@ touching either.
 WHAT THIS DOES NOT DO
 ---------------------
 It does not stop playback directly. `request()` only bumps a generation
-counter; the speaker checks that counter between audio chunks. Aborting the
-PortAudio stream mid-chunk was tried and abandoned -- ALSA leaves the PCM
-device in a bad XRUN state afterwards, after which a later write() can block
-for 10+ seconds in native code with no Python-level exception. Short chunks
-plus a between-chunk check bounds barge-in latency to one chunk instead.
+counter; the speaker checks that counter before writing each ~50ms block of
+audio and stops feeding the stream. Aborting the PortAudio stream was tried and
+abandoned -- ALSA leaves the PCM device in a bad XRUN state afterwards, after
+which a later write() can block for 10+ seconds in native code with no
+Python-level exception. Declining to write the rest bounds barge-in latency to
+one block plus whatever PortAudio has already buffered.
 """
 
 from __future__ import annotations

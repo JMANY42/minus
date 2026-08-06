@@ -13,6 +13,15 @@ the model was still generating had already bumped the counter -- so the freshly
 captured value matched, and the assistant talked straight over a user who was
 mid-sentence. The token is now captured by the caller before generation starts
 and passed in.
+
+The other change worth knowing about is that chunking and barge-in latency are
+no longer the same knob. Chunks used to be tiny because an interrupt was only
+noticed between them, and that made replies sound chopped up: a boundary every
+couple of seconds, each one rendered by Kokoro as a phrase ending and separated
+from the next by both clips' silence padding. Clips are now written to the
+stream a block at a time with the interrupt checked before each one, which
+leaves chunking free to cut where a speaker would pause (chunking.py) and the
+seams free to be tightened to the pause that belongs there (seams.py).
 """
 
 from __future__ import annotations
@@ -20,7 +29,8 @@ from __future__ import annotations
 import logging
 import signal
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any
 
@@ -29,6 +39,7 @@ from kokoro_onnx import Kokoro
 
 from minus.audio.chunking import split_text_into_chunks
 from minus.audio.interrupt import InterruptBus
+from minus.audio.seams import join_ready, pause_after
 from minus.paths import models_dir
 
 logger = logging.getLogger(__name__)
@@ -36,17 +47,30 @@ logger = logging.getLogger(__name__)
 MODEL_PATH = models_dir() / "kokoro-v1.0.onnx"
 VOICE_PATH = models_dir() / "voices-v1.0.bin"
 
-# Chunks are kept short so that when an interrupt lands mid-chunk, letting that
-# one chunk finish playing naturally is barely noticeable - a couple of seconds
-# at most, bounded by this constant's worth of speech. This is what makes it
-# safe to NOT call stream.abort() on interrupt: PortAudio's ALSA backend has
-# been observed to leave the PCM device in a bad XRUN state after an abort()
-# call (`alsa_snd_pcm_mmap_begin` failing internally in pa_linux_alsa.c), after
-# which a later write() can block for 10+ seconds with no Python-level
-# exception and no way to interrupt it - worse than just waiting out a short
-# chunk. There's no host API other than ALSA available on this system to route
-# around the bug, so avoiding abort() entirely sidesteps it instead.
-CHUNK_MAX_CHARS = 40
+# Chunk size is a speech-quality knob, not a latency one. Every chunk is a
+# separate synthesis call that Kokoro renders as a complete utterance, so a
+# seam is audible as a phrase ending wherever it falls; chunks are therefore
+# big enough that seams are rare and land where a speaker would pause anyway
+# (chunking.py places them). The first chunk gets a smaller budget because
+# nothing is heard until it is synthesized.
+CHUNK_MAX_CHARS = 300
+FIRST_CHUNK_MAX_CHARS = 60
+
+# What actually bounds barge-in latency: a clip is written to the stream this
+# much at a time, and the interrupt is checked before every block. That is what
+# makes it safe to NOT call stream.abort() on interrupt: PortAudio's ALSA
+# backend has been observed to leave the PCM device in a bad XRUN state after
+# an abort() call (`alsa_snd_pcm_mmap_begin` failing internally in
+# pa_linux_alsa.c), after which a later write() can block for 10+ seconds with
+# no Python-level exception and no way to interrupt it. There's no host API
+# other than ALSA available on this system to route around the bug, so we stop
+# feeding the stream instead and let close() take it down.
+PLAYBACK_BLOCK_SECONDS = 0.05
+
+# How many chunks may be synthesized ahead of the one playing. Bounded
+# rather than "all of them": synthesis competes for CPU with the recogniser
+# listening for the barge-in this whole design exists to honour.
+LOOKAHEAD_CHUNKS = 3
 
 
 @lru_cache(maxsize=1)
@@ -97,6 +121,9 @@ class KokoroSpeaker:
         self.speed = getattr(settings, "tts_speed", 1.0)
         self.lang = getattr(settings, "tts_lang", "en-us")
         self.chunk_max_chars = getattr(settings, "tts_chunk_max_chars", CHUNK_MAX_CHARS)
+        self.first_chunk_max_chars = getattr(
+            settings, "tts_first_chunk_max_chars", FIRST_CHUNK_MAX_CHARS
+        )
 
     def token(self) -> int:
         """Capture the interrupt generation, to be passed back to speak()."""
@@ -112,6 +139,22 @@ class KokoroSpeaker:
             except Exception:
                 logger.exception("stream.close() failed while tearing down playback stream")
 
+    def _drain_stream(self, stream) -> bool:
+        """Let the audio still buffered in PortAudio finish playing.
+
+        write() returns once the samples are handed to PortAudio, not once they
+        are audible, so a reply that has been fully written still has up to the
+        stream's latency left to play. close() discards that, which used to be
+        masked by the trailing silence Kokoro pads onto every clip - now that
+        the pad is trimmed off, closing without draining would clip the last
+        word. stop() plays it out first.
+        """
+        try:
+            return call_with_timeout(stream.stop, 2.0, "stream.stop()")
+        except Exception:
+            logger.exception("stream.stop() failed while draining playback stream")
+            return False
+
     def speak(self, text: str, *, token: int | None = None) -> None:
         """Speak `text`, stopping early if an interrupt lands.
 
@@ -126,7 +169,9 @@ class KokoroSpeaker:
 
         start_generation = self.interrupts.token() if token is None else token
 
-        chunks = split_text_into_chunks(text, max_chars=self.chunk_max_chars)
+        chunks = split_text_into_chunks(
+            text, max_chars=self.chunk_max_chars, first_max_chars=self.first_chunk_max_chars
+        )
         if not chunks:
             return
 
@@ -140,49 +185,85 @@ class KokoroSpeaker:
         # happens to be synthesizing in the background. shutdown(wait=False) in
         # the finally block below lets us return immediately and abandon it.
         executor = ThreadPoolExecutor(max_workers=1)
+        pending: deque[Future] = deque()
+        submitted = 0
         try:
-            next_chunk = executor.submit(self._synthesize, chunks[0])
-
             for index in range(len(chunks)):
+                # Keep the synthesizer working several chunks ahead rather than
+                # exactly one. Synthesis is faster than playback, so with a
+                # single chunk of lookahead the worker idles through most of
+                # every chunk; letting it run ahead banks that time as lead,
+                # which is what absorbs a chunk that turns out slower than the
+                # one playing bought time for.
+                while len(pending) < LOOKAHEAD_CHUNKS and submitted < len(chunks):
+                    pending.append(executor.submit(self._synthesize, chunks[submitted]))
+                    submitted += 1
+
                 if self.interrupts.token() != start_generation:
                     return
 
-                samples, sample_rate = next_chunk.result()
+                samples, sample_rate = pending.popleft().result()
 
-                # Re-check before speculatively synthesizing the next chunk -
-                # an interrupt may have landed while we were blocked above.
+                # Re-check after blocking above - an interrupt may have landed
+                # while we waited for synthesis.
                 if self.interrupts.token() != start_generation:
                     return
-
-                if index + 1 < len(chunks):
-                    next_chunk = executor.submit(self._synthesize, chunks[index + 1])
 
                 if stream is None or stream.samplerate != sample_rate:
-                    if stream is not None:
+                    if stream is not None and self._drain_stream(stream):
+                        # Drained first for the same reason as at the end of a
+                        # reply: whatever is still buffered is speech.
                         self._close_stream(stream)
                     stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32")
                     stream.start()
 
-                data = samples.reshape(-1, 1)
-                # Generous margin over the chunk's natural playback duration -
-                # long enough that a real (non-wedged) write never trips it.
-                # Chunks are short, so this ceiling stays low.
-                write_timeout = len(samples) / float(sample_rate) + 2.0
+                # Kokoro's padding is cut off and replaced with the pause this
+                # particular seam calls for; the reply's own end needs neither.
+                last_chunk = index + 1 == len(chunks)
+                clip = join_ready(
+                    samples,
+                    sample_rate,
+                    tail_pause=0.0 if last_chunk else pause_after(chunks[index]),
+                )
+                if clip.size == 0:
+                    continue
 
-                try:
-                    completed = call_with_timeout(
-                        lambda s=stream, d=data: s.write(d), write_timeout, "stream.write()"
-                    )
-                except sd.PortAudioError:
-                    logger.exception("stream.write() raised a PortAudioError")
-                    return
+                data = clip.reshape(-1, 1)
+                block_frames = max(1, int(PLAYBACK_BLOCK_SECONDS * sample_rate))
 
-                if not completed:
-                    # The write is stuck in native code on a leaked thread with
-                    # no way to cancel it - never touch this stream again,
-                    # including closing it (close() could hang the same way).
-                    stream_wedged = True
-                    return
+                for start in range(0, len(data), block_frames):
+                    # Checked per block rather than per chunk: chunks are now
+                    # sized for natural-sounding speech and can run to several
+                    # seconds, which is far too long to keep talking over
+                    # someone who has started speaking.
+                    if self.interrupts.token() != start_generation:
+                        return
+
+                    block = data[start : start + block_frames]
+                    # Generous margin over the block's playback duration - long
+                    # enough that a real (non-wedged) write never trips it.
+                    write_timeout = len(block) / float(sample_rate) + 2.0
+
+                    try:
+                        completed = call_with_timeout(
+                            lambda s=stream, d=block: s.write(d), write_timeout, "stream.write()"
+                        )
+                    except sd.PortAudioError:
+                        logger.exception("stream.write() raised a PortAudioError")
+                        return
+
+                    if not completed:
+                        # The write is stuck in native code on a leaked thread
+                        # with no way to cancel it - never touch this stream
+                        # again, including closing it (close() could hang the
+                        # same way).
+                        stream_wedged = True
+                        return
+
+            # Only reached when the whole reply was written without an
+            # interrupt: there is buffered audio worth waiting for.
+            if stream is not None and not self._drain_stream(stream):
+                stream_wedged = True
         except KeyboardInterrupt:
             self.interrupts.request()
         finally:
@@ -193,4 +274,4 @@ class KokoroSpeaker:
 
 if __name__ == "__main__":
     kokoro = KokoroSpeaker(InterruptBus())
-    kokoro.speak("""Once upon a time, in a valley that lay between two great mountains, there was a village that everyone called Willowbrook. The village was small, with only a handful of houses made of stone and timber, and a single winding road that led to the market town in the next valley. The people of Willowbrook were simple folk, mostly farmers and woodcutters, who lived in harmony with the land. They had a tradition of telling stories by the fire each night, and the elders would weave tales of heroes, monsters, and the mysteries of the world.\n\nOne crisp autumn evening, as the sun dipped behind the mountains and painted the sky in hues of amber and violet, a young boy named Milo sat by the hearth with his grandmother. Milo was a curious child, always asking questions about the world beyond the valley. His grandmother, a woman with silver hair and eyes that seemed to hold the secrets of the ages, smiled and began to tell him a story that would stay with him for the rest of his life.\n\n"Long ago," she began, "there was a kingdom that stretched from the sea to the mountains, ruled by a wise king named Alaric. King Alaric was known for his fairness and his love for the arts. He had a daughter, Princess Elara, who was as brave as she was beautiful. She had a heart that beat for adventure, and she dreamed of seeing the world beyond the kingdom\'s borders."\n\nMilo listened intently, his eyes wide with wonder. "Did she ever go on an adventure?" he asked.\n\n"Yes," his grandmother replied. "One day, a mysterious traveler arrived at the palace gates. He was a wanderer, with a cloak of midnight blue and a staff that glowed with a faint, otherworldly light. He told the king of a hidden valley, a place where the stars fell to the earth and turned into silver rivers. He said that the valley was guarded by a dragon, but that the dragon was not a beast of fire and terror, but a guardian of knowledge."\n\nMilo\'s imagination ran wild. He pictured a dragon with scales that shimmered like the night sky, breathing not fire but stardust. "Did the princess go to the valley?" he asked.\n\n"She did," his grandmother said. "Princess Elara, with her heart full of courage, set out with a small band of loyal companions: a blacksmith named Roderick, a healer named Liora, and a young scribe named Finn. They journeyed through forests, over rivers, and across mountains. They faced many challenges: a band of thieves, a storm that threatened to drown them, and a riddle that only the wise could solve. But Elara\'s spirit never wavered."\n\nMilo could almost hear the crackle of the fire and feel the wind on his face. "What happened when they reached the valley?" he asked.\n\n"At the edge of the valley," his grandmother said, "they found a gate made of stone, etched with symbols that glowed faintly. The dragon, a magnificent creature with wings that spanned the horizon, emerged from the shadows. Its eyes were like polished amber, and its voice was deep and resonant. \'Who seeks the silver rivers?\' it asked."\n\nElara stepped forward, her voice steady. "I seek the knowledge of the stars, great dragon. I wish to bring it back to my people."\n\nThe dragon considered her words. "Many have come before you, seeking power. But true knowledge is not a treasure to be hoarded. It is a gift to be shared. If you wish to take it, you must prove your worth."\n\nThe dragon presented them with a series of trials. The first was a test of courage: they had to cross a chasm that seemed to stretch into infinity. The second was a test of wisdom: they had to solve a riddle that had baffled scholars for centuries. The third was a test of compassion: they had to heal a wounded creature that had been injured by a hunter.\n\nMilo could almost see the chasm, the riddle, and the wounded creature. He could feel the weight of the trials. "Did they succeed?" he asked.\n\n"Yes," his grandmother said. "Elara and her companions faced each challenge with bravery, intellect, and kindness. They crossed the chasm on a rope made of vines, solved the riddle by listening to the wind, and healed the creature with herbs from the forest. The dragon, impressed by their deeds, allowed them to take a single silver river."\n\nMilo\'s eyes widened. "What did they do with the silver river?" he asked.\n\n"Elara returned to her kingdom with the silver river," his grandmother said. "She used it to irrigate the fields, to heal the sick, and to illuminate the night. The people of the kingdom prospered, and the knowledge of the stars was shared with all. The dragon, seeing the good that came from the silver river, vowed to guard the valley and keep its secrets safe."\n\nMilo smiled. "That\'s a wonderful story," he said. "I want to go on an adventure too."\n\nHis grandmother chuckled. "You can, my dear. The world is full of wonders. All you need is a heart that beats with curiosity and a mind that seeks knowledge."\n\nMilo nodded, his mind buzzing with possibilities. He imagined himself as a brave adventurer, traveling to hidden valleys, meeting dragons, and discovering the secrets of the stars. He dreamed of the day when he would stand at the edge of a valley, looking at a silver river that glowed like the night sky, and feel the thrill of adventure in his chest.\n\nAnd so, as the fire crackled and the night grew deeper, Milo fell asleep with a heart full of wonder, dreaming of the day he would set out on his own grand adventure, just like Princess Elara. The story, like the stars, shone bright in his mind, guiding him toward a future full of possibilities.""")
+    kokoro.speak("""Once upon a time, in a valley that lay between two great mountains, there was a village that everyone called Willowbrook. The village was small, with only a handful of houses made of stone and timber, and a single winding road that led to the market town in the next valley. The people of Willowbrook were simple folk, mostly farmers and woodcutters, who lived in harmony with the land. They had a tradition of telling stories by the fire each night, and the elders would weave tales of heroes, monsters, and the mysteries of the world.\n\nOne crisp autumn evening, as the sun dipped behind the mountains and painted the sky in hues of amber and violet, a young boy named Milo sat by the hearth with his grandmother. Milo was a curious child, always asking questions about the world beyond the valley. His grandmother, a woman with silver hair and eyes that seemed to hold the secrets of the ages, smiled and began to tell him a story that would stay with him for the rest of his life.\n\n"Long ago," she began, "there was a kingdom that stretched from the sea to the mountains, ruled by a wise king named Alaric. King Alaric was known for his fairness and his love for the arts. He had a daughter, Princess Elara, who was as brave as she was beautiful. She had a heart that beat for adventure, and she dreamed of seeing the world beyond the kingdom\'s borders."\n\nMilo listened intently, his eyes wide with wonder. "Did she ever go on an adventure?" he asked.\n\n"Yes," his grandmother replied. "One day, a mysterious traveler arrived at the palace gates. He was a wanderer, with a cloak of midnight blue and a staff that glowed with a faint, otherworldly light. He told the king of a hidden valley, a place where the stars fell to the earth and turned into silver rivers. He said that the valley was guarded by a dragon, but that the dragon was not a beast of fire and terror, but a guardian of knowledge."\n\nMilo\'s imagination ran wild. He pictured a dragon with scales that shimmered like the night sky, breathing not fire but stardust. "Did the princess go to the valley?" he asked.\n\n"She did," his grandmother said. "Princess Elara, with her heart full of courage, set out with a small band of loyal companions: a blacksmith named Roderick, a healer named Liora, and a young scribe named Finn. They journeyed through forests, over rivers, and across mountains. They faced many challenges: a band of thieves, a storm that threatened to drown them, and a riddle that only the wise could solve. But Elara\'s spirit never wavered."\n\nMilo could almost hear the crackle of the fire and feel the wind on his face. "What happened when they reached the valley?" he asked.\n\n"At the edge of the valley," his grandmother said, "they found a gate made of stone, etched with symbols that glowed faintly. The dragon, a magnificent creature with wings that spanned the horizon, emerged from the shadows. Its eyes were like polished amber, and its voice was deep and resonant. \'Who seeks the silver rivers?\' it asked."\n\nElara stepped forward, her voice steady. "I seek the knowledge of the stars, great dragon. I wish to bring it back to my people."\n\nThe dragon considered her words. "Many have come before you, seeking power. But true knowledge is not a treasure to be hoarded. It is a gift to be shared. If you wish to take it, you must prove your worth."\n\nThe dragon presented them with a series of trials. The first was a test of courage: they had to cross a chasm that seemed to stretch into infinity. The second was a test of wisdom: they had to solve a riddle that had baffled scholars for centuries. The third was a test of compassion: they had to heal a wounded creature that had been injured by a hunter.\n\nMilo could almost see the chasm, the riddle, and the wounded creature. He could feel the weight of the trials. "Did they succeed?" he asked.\n\n"Yes," his grandmother said. "Elara and her companions faced each challenge with bravery, intellect, and kindness. They crossed the chasm on a rope made of vines, solved the riddle by listening to the wind, and healed the creature with herbs from the forest. The dragon, impressed by their deeds, allowed them to take a single silver river."\n\nMilo\'s eyes widened. "What did they do with the silver river?" he asked.\n\n"Elara returned to her kingdom with the silver river," his grandmother said. "She used it to irrigate the fields, to heal the sick, and to illuminate the night. The people of the kingdom prospered, and the knowledge of the stars was shared with all. The dragon, seeing the good that came from the silver river, vowed to guard the valley and keep its secrets safe."\n\nMilo smiled. "That\'s a wonderful story," he said. "I want to go on an adventure too."\n\nHis grandmother chuckled. "You can, my dear. The world is full of wonders. All you need is a heart that beats with curiosity and a mind that seeks knowledge."\n\nMilo nodded, his mind buzzing with possibilities. He imagined himself as a brave adventurer, traveling to hidden valleys, meeting dragons, and discovering the secrets of the stars. He dreamed of the day when he would stand at the edge of a valley, looking at a silver river that glowed like the night sky, and feel the thrill of adventure in his chest.\n\nAnd so, as the fire crackled and the night grew deeper, Milo fell asleep with a heart full of wonder, dreaming of the day he would set out on his own grand adventure, just like Princess Elara. The story, like the stars, shone bright in his mind, guiding him toward a future full of possibilities.""")  # noqa: E501

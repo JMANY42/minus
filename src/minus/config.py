@@ -61,10 +61,13 @@ class Settings(BaseSettings):
     tts_voice: str = "am_puck"
     tts_speed: float = 1.0
     tts_lang: str = "en-us"
-    # Deliberately small. An interrupt is only honoured between chunks (the
-    # playback stream is never aborted mid-chunk -- see audio/tts.py), so this
-    # constant is what bounds barge-in latency.
-    tts_chunk_max_chars: int = 40
+    # A speech-quality knob, not a latency one: every chunk is a separate
+    # synthesis call that Kokoro renders as a complete utterance, so seams are
+    # audible and want to be rare and grammatical. Barge-in latency is bounded
+    # by the playback block size instead -- see audio/tts.py. The first chunk
+    # is held shorter because nothing is heard until it is synthesized.
+    tts_chunk_max_chars: int = 300
+    tts_first_chunk_max_chars: int = 60
 
     stt_model: str = "small.en"
     stt_realtime_model: str = "tiny.en"

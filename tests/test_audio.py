@@ -164,3 +164,79 @@ class TestChunking:
     def test_every_chunk_respects_the_limit(self):
         text = " ".join(f"word{i}" for i in range(200))
         assert all(len(chunk) <= 40 for chunk in split_text_into_chunks(text, max_chars=40))
+
+
+class TestChunkBoundariesAreGrammatical:
+    """The chopped-speech bug: chunks are separate utterances, so a boundary
+    mid-phrase is heard as a phrase ending even with no silence at it."""
+
+    def test_a_long_sentence_breaks_at_its_clauses(self):
+        text = (
+            "Once upon a time in a valley that lay between two great mountains, "
+            "there was a village that everyone called Willowbrook, and the people "
+            "who lived there were farmers."
+        )
+        chunks = split_text_into_chunks(text, max_chars=80)
+
+        assert len(chunks) > 1
+        for chunk in chunks[:-1]:
+            assert chunk.endswith((",", ";", ":", ".", "!", "?")), chunk
+
+    def test_short_sentences_are_packed_back_together(self):
+        """Otherwise every full stop would cost a seam of its own."""
+        text = "One two three. Four five six. Seven eight nine."
+        assert split_text_into_chunks(text, max_chars=200) == [text]
+
+    def test_only_a_clause_too_long_to_fit_is_broken_mid_phrase(self):
+        text = " ".join(f"word{i}" for i in range(40))
+        chunks = split_text_into_chunks(text, max_chars=40)
+
+        assert len(chunks) > 1
+        assert " ".join(chunks) == text
+
+    def test_the_first_chunk_is_held_short_for_a_fast_start(self):
+        text = (
+            "Once upon a time in a valley that lay between two great mountains, "
+            "there was a village that everyone called Willowbrook, and the people "
+            "who lived there were farmers."
+        )
+        chunks = split_text_into_chunks(text, max_chars=200, first_max_chars=40)
+
+        assert len(chunks[0]) <= 40
+        assert " ".join(chunks) == text
+
+    def test_the_budget_ramps_up_to_the_full_size(self):
+        """The bug: a short opener followed by a full-size chunk starved the
+        stream, because synthesizing the second took longer than playing the
+        first. Each chunk may only outgrow its predecessor by so much."""
+        text = " ".join(f"word{i}" for i in range(200))
+        chunks = split_text_into_chunks(text, max_chars=300, first_max_chars=40)
+
+        spoken = 0
+        for chunk in chunks:
+            assert len(chunk) <= max(40, min(300, spoken)), chunk
+            spoken += len(chunk)
+        assert max(len(chunk) for chunk in chunks) > 250, "never reaches full size"
+
+    def test_a_forced_cut_lands_in_front_of_a_phrase(self):
+        """ "...that lay | between two great mountains" beats "...there was a |"."""
+        text = (
+            "Once upon a time in a valley that lay between two great mountains there was a village"
+        )
+        chunks = split_text_into_chunks(text, max_chars=200, first_max_chars=60)
+
+        assert chunks[0] == "Once upon a time in a valley that lay"
+        assert " ".join(chunks) == text
+
+    def test_a_determiner_is_only_the_fallback_boundary(self):
+        text = "The runners crossed the finish line together the crowd roared"
+        chunks = split_text_into_chunks(text, max_chars=200, first_max_chars=45)
+
+        assert chunks[0] == "The runners crossed the finish line together"
+        assert " ".join(chunks) == text
+
+    def test_a_word_longer_than_the_first_bound_is_not_cut_mid_syllable(self):
+        chunks = split_text_into_chunks(
+            "Supercalifragilistic and more", max_chars=200, first_max_chars=5
+        )
+        assert chunks[0] == "Supercalifragilistic"
