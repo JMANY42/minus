@@ -13,6 +13,7 @@ PortAudio, and importing kokoro-onnx costs seconds even when it succeeds.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import faulthandler
 import logging
 import signal
@@ -38,7 +39,13 @@ from minus.core.sources import MergedTranscriptSource
 from minus.llm.client import OpenRouterClient
 from minus.logging_config import setup_logging
 from minus.memory.service import MemoryService
-from minus.paths import control_socket, conversations_dir, deep_notes_dir, semantic_memory_db
+from minus.paths import (
+    control_socket,
+    conversations_dir,
+    deep_notes_dir,
+    project_root,
+    semantic_memory_db,
+)
 from minus.services.detail import FileDetailSink
 from minus.services.json import pretty_json, read_json
 
@@ -76,6 +83,18 @@ def build_parser() -> argparse.ArgumentParser:
     status = subcommands.add_parser("status", help="Print what the running assistant is doing")
     status.add_argument("--watch", action="store_true", help="Keep printing as the state changes")
 
+    serve = subcommands.add_parser("serve", help="Run headless, for a service manager")
+    # SUPPRESS so that omitting it here leaves the root-level flag alone rather
+    # than overwriting it with this parser's default.
+    serve.add_argument(
+        "--no-mic",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Take input only from the control socket",
+    )
+
+    subcommands.add_parser("systemd-unit", help="Print a systemd --user unit for this checkout")
+
     memory = subcommands.add_parser("memory", help="Interactively prune stored facts")
     memory.add_argument("--db", default=None, help="Path to the semantic memory database")
     memory.add_argument(
@@ -88,6 +107,31 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("tools", help="List the tools available to the assistant")
 
     return parser
+
+
+@contextlib.contextmanager
+def _end_conversation_on_sigterm(source):
+    """Make `systemctl stop` end the conversation rather than discard it.
+
+    systemd sends SIGTERM, which Python's default handler turns into an
+    immediate exit -- so the work in `conversation_loop`'s `finally`, the
+    condensation and fact extraction that the whole session's learning depends
+    on, never ran. Closing the source instead ends the loop the same way an
+    exit phrase does, and the polling get() in MergedTranscriptSource is what
+    guarantees the flag is noticed promptly.
+
+    Only on the main thread, because CPython permits signal handlers nowhere
+    else, and restored afterwards so this composes with barge_in_on_sigint.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous = signal.signal(signal.SIGTERM, lambda *_: source.close())
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _install_stack_dumper() -> None:
@@ -493,7 +537,7 @@ def run_assistant(
         # through the loop's own teardown, which changes nothing there --
         # nothing is being spoken by then, so Ctrl-C during condensing and
         # fact extraction still raises and still quits.
-        with barge_in_on_sigint(interrupts):
+        with _end_conversation_on_sigterm(source), barge_in_on_sigint(interrupts):
             conversation_loop(source, assistant, speaker, floor, source.mark_activity, state)
     finally:
         # First: the pump thread is parked in the recorder's blocking read and
@@ -583,9 +627,43 @@ def run_status(args) -> int:
         return 0
 
 
+def run_serve(settings: Settings, use_mic: bool) -> None:
+    """Run with no terminal, for a service manager to supervise.
+
+    Differs from the interactive path only in what it does *not* do: no stderr
+    handler, because journald already receives the file log's contents once and
+    does not need them twice, and no CLI transcript source, because there is no
+    stdin worth reading.
+    """
+    log_file = setup_logging(
+        level=settings.log_level,
+        retention=settings.log_retention,
+        console=False,
+    )
+    logger.info("Serving; logging to %s", log_file)
+
+    _install_stack_dumper()
+    run_assistant(settings, use_mic=use_mic, control=True, interactive=False)
+
+
+def run_systemd_unit() -> None:
+    import sys
+
+    from minus.control.systemd import render_unit
+
+    # sys.executable is the interpreter; the console script beside it is what
+    # has the entry point.
+    console_script = Path(sys.executable).with_name("minus")
+    print(render_unit(console_script, project_root()), end="")
+
+
 def main() -> None:
     args = build_parser().parse_args()
     settings = load_settings()
+
+    if args.command == "systemd-unit":
+        run_systemd_unit()
+        return
 
     if args.command == "say":
         raise SystemExit(run_say(args))
@@ -605,6 +683,10 @@ def main() -> None:
 
     if args.command == "tools":
         run_tools()
+        return
+
+    if args.command == "serve":
+        run_serve(settings, use_mic=not args.no_mic)
         return
 
     log_file = setup_logging(

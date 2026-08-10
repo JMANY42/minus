@@ -35,6 +35,42 @@ minus memory           # interactively prune stored facts
 minus calibrate        # recompute the fact-relevance threshold
 ```
 
+Against an assistant that is already running:
+
+```bash
+minus say "what time is it"   # inject a line, as though it had been spoken
+minus status                  # what it is doing right now
+minus status --watch          # ...and keep printing as that changes
+```
+
+## Running as a service
+
+```bash
+minus systemd-unit > ~/.config/systemd/user/minus.service
+systemctl --user daemon-reload
+systemctl --user enable --now minus
+loginctl enable-linger "$USER"     # or it is killed at logout
+```
+
+`minus serve` is the headless mode the unit runs: no console logging, and
+`--no-mic` there means "take input only from the control socket" rather than
+"read stdin", since a service has no stdin worth reading.
+
+The unit is generated rather than tracked, because it has to name this
+checkout and this interpreter. It is a `--user` unit: the assistant's audio
+comes from the login session's PipeWire, which a system service cannot reach.
+
+Stopping is graceful. `systemctl --user stop minus` sends SIGTERM, which ends
+the conversation properly -- condensing it and extracting facts -- rather than
+discarding what the session learned.
+
+### The control socket
+
+A running assistant listens on `$XDG_RUNTIME_DIR/minus/control.sock`
+(newline-delimited JSON; see `src/minus/control/protocol.py`). It doubles as a
+single-instance lock: a second `minus` refuses to start rather than fight the
+first one for the microphone. Pass `--no-control` to run one alongside anyway.
+
 ## Architecture
 
 ```
@@ -104,6 +140,11 @@ Minus remembers facts and preferences between sessions:
   comparing the embedding of the message against each fact.
 - When a conversation ends it is condensed, and the LLM extracts durable facts
   from the transcript.
+- A conversation ends after 30 seconds of silence, not when the process does.
+  That timer measures the quiet since MINUS *stopped talking*, so a deep answer
+  that lands two minutes after the question still leaves a full silence to
+  reply into. `MINUS_IDLE_CONVERSATION_SECONDS=0` disables it and goes back to
+  one conversation per run.
 - Facts are structured `(attribute, value)` slots. Dedupe and supersede are
   exact matches on the normalized attribute, not similarity thresholds.
 - Single-valued attributes supersede; multi-valued ones accumulate.
