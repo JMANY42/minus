@@ -9,6 +9,7 @@ edge that `from text_to_speech import request_interrupt` created.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -58,6 +59,27 @@ class MicrophoneTranscriptSource:
     def __init__(self, interrupts: InterruptBus, settings: Any | None = None) -> None:
         self.interrupts = interrupts
         self.settings = settings
+        self._recorder: Any | None = None
+        self._recorder_lock = threading.Lock()
+
+    def stop(self) -> None:
+        """Shut the recorder down. Idempotent, and safe from any thread.
+
+        `__iter__`'s own `finally` only runs when the generator is closed or
+        collected, which stops being reliable the moment something else drives
+        the iteration from a background thread -- that thread is parked inside
+        `recorder.text()` and never reaches the `finally` on its own. Since
+        RealtimeSTT's workers are non-daemon (see below), skipping the shutdown
+        hangs the interpreter at exit, so whoever owns the source needs a way
+        to reach in and stop it.
+
+        The swap-under-lock is what makes a concurrent stop() and a generator
+        teardown safe: exactly one of them gets the recorder.
+        """
+        with self._recorder_lock:
+            recorder, self._recorder = self._recorder, None
+        if recorder is not None:
+            recorder.shutdown()
 
     # These fire on RealtimeSTT's own threads.
     def _on_voice_activity(self, *args: Any, **kwargs: Any) -> None:
@@ -100,7 +122,9 @@ class MicrophoneTranscriptSource:
         # the real `daemon` flag False), so without an explicit shutdown() call
         # they keep running after this generator ends and the interpreter hangs
         # at exit waiting for them to finish.
-        recorder = self.create_recorder()
+        with self._recorder_lock:
+            self._recorder = self.create_recorder()
+            recorder = self._recorder
         try:
             while True:
                 text = recorder.text()
@@ -112,4 +136,4 @@ class MicrophoneTranscriptSource:
                     return
                 yield text
         finally:
-            recorder.shutdown()
+            self.stop()

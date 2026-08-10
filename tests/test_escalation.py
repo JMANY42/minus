@@ -9,6 +9,7 @@ what "already thinking" needs in order to be observable.
 
 from __future__ import annotations
 
+import threading
 import types
 from queue import Queue
 
@@ -117,6 +118,49 @@ class TestEscalateTool:
         contents = [message["content"] for message in model.calls[0]["messages"]]
         assert "I am refactoring the audio package." in contents
         assert "Where should chunking live?" in contents
+
+
+class TestStatus:
+    """What anything waiting on the deep tier is allowed to see."""
+
+    def test_reports_idle_before_anything_is_asked(self):
+        thinker, _, _ = build_thinker([answer()])
+
+        assert thinker.status() == {
+            "in_flight": False,
+            "question": None,
+            "elapsed_seconds": None,
+        }
+
+    def test_reports_the_question_while_in_flight(self):
+        thinker, _, _ = build_thinker([answer()], executor=StalledExecutor())
+
+        thinker.escalate("How should the dashboard read status?")
+        status = thinker.status()
+
+        assert status["in_flight"] is True
+        assert status["question"] == "How should the dashboard read status?"
+
+    def test_elapsed_is_a_duration_not_a_timestamp(self):
+        """`_started_at` is monotonic, so it means nothing outside this process."""
+        thinker, _, _ = build_thinker([answer()], executor=StalledExecutor())
+
+        thinker.escalate("Why is this slow?")
+        elapsed = thinker.status()["elapsed_seconds"]
+
+        assert elapsed is not None
+        # A monotonic reading is uptime-sized; a duration measured just now is
+        # not. Anything under a second can only be the latter.
+        assert 0 <= elapsed < 1
+
+    def test_reports_idle_once_the_answer_has_landed(self):
+        thinker, _, results = build_thinker([answer()])
+
+        thinker.escalate("Anything at all")
+        results.get_nowait()
+
+        assert thinker.status()["in_flight"] is False
+        assert thinker.status()["elapsed_seconds"] is None
 
 
 class TestConversationContext:
@@ -465,7 +509,12 @@ class TestFullLoop:
         )
         speaker = FakeSpeaker(token_value=3)
 
-        conversation_loop(["think hard about how memory should be split"], assistant, speaker)
+        conversation_loop(
+            ["think hard about how memory should be split"],
+            assistant,
+            speaker,
+            threading.Lock(),
+        )
 
         spoken = [text for text, _ in speaker.spoken]
         # The quick acknowledgement is spoken first, the deep answer afterwards.
@@ -498,7 +547,7 @@ class TestFullLoop:
         )
         speaker = FakeSpeaker()
 
-        conversation_loop(["what time is it"], assistant, speaker)
+        conversation_loop(["what time is it"], assistant, speaker, threading.Lock())
 
         assert [text for text, _ in speaker.spoken] == ["Just after four."]
         # One call, on the fast tier. This is the property the whole design

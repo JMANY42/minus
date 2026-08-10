@@ -187,3 +187,15 @@ class Conversation:
         """Condense the finished conversation and extract durable facts."""
         condensed = self.memory.condense_conversation(self.messages)
         return self.memory.extract_and_store_semantic_memory(condensed)
+
+    def start_new_conversation(self) -> str:
+        """Begin a fresh conversation, leaving the finished one on disk.
+
+        Call after post_conversation(): this drops the transcript, so anything
+        not condensed and extracted by then is gone from memory's point of
+        view. The fact store is untouched -- what the last conversation taught
+        is exactly what survives into this one.
+        """
+        conversation_id = self.memory.start_new_conversation()
+        self.transcript = Transcript(memory=self.memory)
+        return conversation_id

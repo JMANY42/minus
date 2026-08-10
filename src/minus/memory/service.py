@@ -62,6 +62,12 @@ class MemoryService:
     def __post_init__(self) -> None:
         self.base_dir = Path(self.base_dir)
         self.condensed_base_dir = Path(self.condensed_base_dir)
+        self._open_transcript()
+        self._store = (
+            self.store if self.store is not None else SqliteFactStore(DEFAULT_SEMANTIC_MEMORY_DB)
+        )
+
+    def _open_transcript(self) -> None:
         self.started_at = datetime.now(UTC)
         self._transcript = TranscriptFile(
             directory=self.base_dir,
@@ -69,9 +75,17 @@ class MemoryService:
             started_at=self.started_at,
             system_prompt=self.system_prompt,
         )
-        self._store = (
-            self.store if self.store is not None else SqliteFactStore(DEFAULT_SEMANTIC_MEMORY_DB)
-        )
+
+    def start_new_conversation(self) -> str:
+        """Roll over to a fresh conversation id, file and start time.
+
+        The finished conversation stays on disk untouched; this only stops
+        writing to it. Callers are expected to have condensed and extracted
+        from it first -- see Conversation.start_new_conversation.
+        """
+        self.conversation_id = new_conversation_id()
+        self._open_transcript()
+        return self.conversation_id
 
     @property
     def file_path(self) -> Path:

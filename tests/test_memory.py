@@ -44,6 +44,43 @@ class ConversationMemoryTests(unittest.TestCase):
                 payload["started_at"], conversation_memory.started_at.isoformat(timespec="seconds")
             )
 
+    def test_start_new_conversation_leaves_the_finished_one_on_disk(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir)
+            conversation_memory = memory_module.MemoryManager(base_dir=base_dir)
+
+            first_id = conversation_memory.conversation_id
+            first_path = conversation_memory.file_path
+            conversation_memory.save([{"role": "user", "content": "before the silence"}])
+
+            second_id = conversation_memory.start_new_conversation()
+
+            self.assertNotEqual(second_id, first_id)
+            self.assertEqual(conversation_memory.conversation_id, second_id)
+            self.assertNotEqual(conversation_memory.file_path, first_path)
+
+            # The finished conversation is still there, still complete.
+            payload = parse_json(first_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["messages"],
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": "before the silence"},
+                ],
+            )
+
+            # And writes now land in the new one without touching the old.
+            conversation_memory.save([{"role": "user", "content": "after the silence"}])
+            payload = parse_json(conversation_memory.file_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["conversation_id"], second_id)
+            self.assertEqual(
+                payload["messages"],
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": "after the silence"},
+                ],
+            )
+
     def test_condenses_conversation_by_filtering_out_tool_calls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             base_dir = Path(temp_dir) / "conversations"

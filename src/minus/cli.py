@@ -26,6 +26,7 @@ from minus.core.escalation import DeepThinker
 from minus.core.messages import Message
 from minus.core.prompts import build_system_prompt
 from minus.core.protocols import DetailSink
+from minus.core.sources import MergedTranscriptSource
 from minus.llm.client import OpenRouterClient
 from minus.logging_config import setup_logging
 from minus.memory.service import MemoryService
@@ -115,19 +116,52 @@ def deep_result_courier(assistant, speaker, floor) -> None:
             logger.exception("Failed to deliver a deep answer")
 
 
-def conversation_loop(transcripts, assistant, speaker) -> None:
+def end_conversation_when_idle(assistant: Assistant, floor: threading.Lock) -> bool:
+    """End the current conversation after a silence and open a fresh one.
+
+    Returns False to decline, which leaves the idle timer armed for another
+    interval; True means "done, do not ask again until the user says
+    something".
+    """
+    conversation = assistant.conversation
+
+    with floor:
+        if not conversation.transcript:
+            # Nothing was said. Condensing would write an empty file, and would
+            # do it again on every timeout for as long as the silence lasted.
+            return True
+
+        if assistant.thinker.status()["in_flight"]:
+            # An escalation outlives a half-minute silence easily --
+            # deep_timeout_seconds defaults to 120. Rolling over now would
+            # condense a conversation that is missing its own answer, and then
+            # deliver that answer into a fresh, unrelated one.
+            logger.debug("Idle, but a deep answer is still coming; leaving the conversation open.")
+            return False
+
+        facts = conversation.post_conversation()
+        conversation_id = conversation.start_new_conversation()
+
+    logger.info("Idle; conversation ended. Now recording to %s", conversation_id)
+    if facts:
+        logger.info("Facts extracted from the finished conversation:\n%s", pretty_json(facts))
+    return True
+
+
+def conversation_loop(transcripts, assistant, speaker, floor) -> None:
     """Drive one conversation to completion.
 
     The post-conversation work runs in a `finally` so that quitting with Ctrl-C
     still condenses the transcript and extracts durable facts. It previously sat
     after the loop, so an interrupt discarded everything the session had learned.
 
-    Two producers share one speaker: this loop, and the courier thread carrying
-    escalated answers. `floor` is what stops a deep answer from being spoken
-    over a live reply, and stops both from appending to the transcript at once.
+    Three producers share one speaker and one transcript: this loop, the courier
+    thread carrying escalated answers, and the idle rollover. `floor` is what
+    stops a deep answer from being spoken over a live reply, and stops any two
+    of them from touching the transcript at once. It is built by the caller,
+    since all three need the same one.
     """
     conversation = assistant.conversation
-    floor = threading.Lock()
     courier = threading.Thread(
         target=deep_result_courier,
         args=(assistant, speaker, floor),
@@ -250,13 +284,24 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
     # the speaker consumes it. Neither knows the other exists.
     interrupts = InterruptBus()
     speaker = KokoroSpeaker(interrupts, settings)
-    source = (
+    primary = (
         MicrophoneTranscriptSource(interrupts, settings)
         if use_mic
         else CliTranscriptSource(interrupts)
     )
 
     assistant = build_conversation(settings)
+
+    # One lock for everything that may touch the transcript or the speaker:
+    # the loop, the deep courier, and the idle rollover. Built here rather than
+    # inside the loop now that a third collaborator needs the same one.
+    floor = threading.Lock()
+    source = MergedTranscriptSource(
+        primary,
+        idle_timeout=settings.idle_conversation_seconds,
+        on_idle=lambda: end_conversation_when_idle(assistant, floor),
+    )
+
     try:
         # Installed here, on the main thread, rather than inside playback: a
         # deep answer is spoken from the courier thread, where signal handlers
@@ -265,8 +310,12 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
         # nothing is being spoken by then, so Ctrl-C during condensing and
         # fact extraction still raises and still quits.
         with barge_in_on_sigint(interrupts):
-            conversation_loop(source, assistant, speaker)
+            conversation_loop(source, assistant, speaker, floor)
     finally:
+        # First: the pump thread is parked in the recorder's blocking read and
+        # will not end on its own, and RealtimeSTT's workers are non-daemon --
+        # leaving them running hangs the interpreter at exit.
+        source.close()
         # Before memory.close(): a deep call still in flight holds no fact-store
         # handle, but stopping new work first keeps teardown ordered.
         assistant.thinker.shutdown()

@@ -172,6 +172,23 @@ class DeepThinker:
         self._recent: list[DeepResult] = []
         self._snapshot: Callable[[], list[dict]] = list
 
+    # ---- Introspection ----
+
+    def status(self) -> dict:
+        """What the deep tier is doing, for anything that needs to wait on it.
+
+        Reports `elapsed_seconds` rather than the start time on purpose:
+        `_started_at` is a `time.monotonic()` reading, which is meaningful only
+        inside this process and would be nonsense to a dashboard reading it
+        over a socket.
+        """
+        with self._lock:
+            return {
+                "in_flight": self._busy,
+                "question": self._question,
+                "elapsed_seconds": (time.monotonic() - self._started_at if self._busy else None),
+            }
+
     # ---- Wiring ----
 
     def bind_snapshot(self, provider: Callable[[], list[dict]]) -> None:

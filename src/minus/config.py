@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     max_retries: int = 3
     max_tool_rounds: int = 7
 
+    # ---- Conversation lifetime ----
+    # How long a silence ends the conversation. On the timeout MINUS condenses
+    # the transcript and extracts durable facts, then starts a fresh
+    # conversation. Without it, that work happens only when the process exits,
+    # so an assistant left running would never learn anything -- and the longer
+    # it ran, the more of one conversation it would try to condense at once.
+    # Set to 0 to disable the rollover and go back to per-process conversations.
+    idle_conversation_seconds: float = 30.0
+
     # ---- Semantic memory ----
     # Calibrated by `minus calibrate`: the midpoint between the direct-match
     # and related-topic similarity distributions. See scripts/calibrate.py for
