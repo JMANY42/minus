@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # from the model name. Dropping the effort parameter would make this tier
     # barely deeper than the fast one. anthropic/claude-opus-5 is the step up
     # if this proves too weak.
-    deep_model: str = "deepseek/deepseek-v4-flash-0731"
+    deep_model: str = "deepseek/deepseek-v4-flash-0731:nitro"
     deep_reasoning_effort: str = "high"
     # Deliberately lower than max_tool_rounds: the deep tier reads a few files
     # to ground an answer, it does not go exploring unattended.
