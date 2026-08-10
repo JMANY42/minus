@@ -194,9 +194,12 @@ class DeepThinker:
         several files and holding them together. Also use it whenever the user
         asks you to think hard or be thorough.
 
-        Returns immediately. The answer is delivered to the user on its own a
-        little later, so after calling this say one short line to let them know
-        you are on it and then stop. Do not attempt the analysis yourself.
+        Returns immediately, and ends your turn. The answer is delivered to the
+        user on its own a little later, so all you do after calling this is say
+        one short line letting them know you are on it, and stop. Do not attempt
+        the analysis yourself, and do not call any tool after this one -- no
+        listing, no reading, no second escalate. The deep model has its own
+        tools and can see this conversation.
 
         Args:
             question: The full question to think about, written to stand on its
@@ -215,7 +218,9 @@ class DeepThinker:
                     "current_question": self._question,
                     "note": (
                         "You are already thinking about something else. Tell the user "
-                        "that, and do not call escalate again until it has landed."
+                        "that in one plain-text line and stop -- do not call escalate "
+                        "again until it has landed, and do not reach for other tools "
+                        "to work on it in the meantime."
                     ),
                 }
 
@@ -244,8 +249,10 @@ class DeepThinker:
         return {
             "status": "thinking",
             "note": (
-                "Started. Say one short, natural line telling the user you are on it, "
-                "then stop -- do not answer the question yourself."
+                "Started. Your turn is over except for one short, natural line telling "
+                "the user you are on it. Reply with that line as plain text now -- no "
+                "further tool calls, no listing, no reading, no second escalate -- and "
+                "do not answer the question yourself. The answer arrives on its own."
             ),
         }
 
