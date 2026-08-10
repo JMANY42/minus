@@ -17,10 +17,18 @@ import faulthandler
 import logging
 import signal
 import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from queue import Queue
+from typing import Any
 
+from minus import __version__
 from minus.config import Settings, load_settings
+from minus.control.instrument import ObservedSpeaker
+from minus.control.protocol import BAD_PARAMS, PROTOCOL_VERSION, ProtocolError
+from minus.control.server import ControlServer
+from minus.control.state import HEARING, LISTENING, THINKING, RuntimeState
 from minus.core.agent import Conversation
 from minus.core.escalation import DeepThinker
 from minus.core.messages import Message
@@ -30,9 +38,9 @@ from minus.core.sources import MergedTranscriptSource
 from minus.llm.client import OpenRouterClient
 from minus.logging_config import setup_logging
 from minus.memory.service import MemoryService
-from minus.paths import semantic_memory_db
+from minus.paths import control_socket, conversations_dir, deep_notes_dir, semantic_memory_db
 from minus.services.detail import FileDetailSink
-from minus.services.json import pretty_json
+from minus.services.json import pretty_json, read_json
 
 # What the deep tier is allowed to touch from its background thread. An
 # explicit allowlist rather than "everything the fast model has": the fast
@@ -54,8 +62,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use terminal input instead of microphone speech recognition",
     )
+    parser.add_argument(
+        "--no-control",
+        action="store_true",
+        help="Do not listen on the control socket (lets a second MINUS run alongside one)",
+    )
 
     subcommands = parser.add_subparsers(dest="command")
+
+    say = subcommands.add_parser("say", help="Send a line to the running assistant")
+    say.add_argument("text", nargs="+", help="What to say")
+
+    status = subcommands.add_parser("status", help="Print what the running assistant is doing")
+    status.add_argument("--watch", action="store_true", help="Keep printing as the state changes")
 
     memory = subcommands.add_parser("memory", help="Interactively prune stored facts")
     memory.add_argument("--db", default=None, help="Path to the semantic memory database")
@@ -163,7 +182,9 @@ def end_conversation_when_idle(assistant: Assistant, floor: threading.Lock, sour
     return True
 
 
-def conversation_loop(transcripts, assistant, speaker, floor, mark_activity=None) -> None:
+def conversation_loop(
+    transcripts, assistant, speaker, floor, mark_activity=None, state=None
+) -> None:
     """Drive one conversation to completion.
 
     The post-conversation work runs in a `finally` so that quitting with Ctrl-C
@@ -177,6 +198,7 @@ def conversation_loop(transcripts, assistant, speaker, floor, mark_activity=None
     since all three need the same one.
     """
     conversation = assistant.conversation
+    state = state if state is not None else RuntimeState()
     courier = threading.Thread(
         target=deep_result_courier,
         args=(assistant, speaker, floor, mark_activity),
@@ -186,8 +208,10 @@ def conversation_loop(transcripts, assistant, speaker, floor, mark_activity=None
     courier.start()
 
     try:
+        state.set_phase(LISTENING)
         for transcript in transcripts:
             logger.info("Transcript received:\n%s", pretty_json(transcript))
+            state.set_phase(THINKING)
 
             with floor:
                 # Captured before generation starts: if the user begins talking
@@ -197,7 +221,12 @@ def conversation_loop(transcripts, assistant, speaker, floor, mark_activity=None
 
                 response = conversation.reply(transcript)
                 logger.info("Assistant response:\n%s", pretty_json(response))
+                # Speaking and idle are reported by ObservedSpeaker, which
+                # wraps this one -- the courier speaks too, and instrumenting
+                # the speaker covers both without a second copy here.
                 speaker.speak(response, token=token)
+
+            state.set_phase(LISTENING)
     except KeyboardInterrupt:
         logger.info("Interrupted; wrapping up the conversation.")
     finally:
@@ -245,7 +274,16 @@ def build_fast_tools(thinker: DeepThinker):
     return fast
 
 
-def build_conversation(settings: Settings) -> Assistant:
+def _conversation_section(assistant: Assistant) -> dict:
+    """The live conversation, for the status snapshot."""
+    return {
+        "id": assistant.memory.conversation_id,
+        "path": str(assistant.memory.file_path),
+        "message_count": len(assistant.conversation.transcript),
+    }
+
+
+def build_conversation(settings: Settings, state=None) -> Assistant:
     """Construct the model tiers, memory and agent graph."""
     model = OpenRouterClient(settings)
     system_prompt = build_system_prompt(settings.project_root, can_escalate=True)
@@ -267,7 +305,12 @@ def build_conversation(settings: Settings) -> Assistant:
         reasoning_effort=settings.deep_reasoning_effort,
         max_tool_rounds=settings.deep_max_tool_rounds,
         timeout_seconds=settings.deep_timeout_seconds,
+        # Pushes a status event on both edges, so a watcher learns that the
+        # deep tier started without polling for it.
+        on_change=state.touch if state is not None else None,
     )
+    if state is not None:
+        state.provide("deep", thinker.status)
 
     conversation = Conversation(
         model=model,
@@ -290,7 +333,107 @@ def build_conversation(settings: Settings) -> Assistant:
     )
 
 
-def run_assistant(settings: Settings, use_mic: bool) -> None:
+def _fact_summary(fact) -> dict:
+    return {
+        "attribute": fact.attribute,
+        "value": fact.value,
+        "active": fact.active,
+        "created_at": fact.created_at,
+    }
+
+
+def _note_summary(path: Path) -> dict:
+    payload = read_json(path) or {}
+    return {
+        "path": str(path),
+        "title": payload.get("title", path.stem),
+        "created_at": payload.get("created_at"),
+    }
+
+
+def _newest(directory: Path, limit: int) -> list[Path]:
+    """The most recent files, by name.
+
+    Both directories are named with a UTC timestamp prefix, so lexicographic
+    order is chronological order and this needs no stat() per file.
+    """
+    return sorted(directory.glob("*.json"), reverse=True)[:limit]
+
+
+def build_control_handlers(assistant: Assistant, source, interrupts, state) -> dict:
+    """What the control socket is allowed to ask of a running assistant.
+
+    Built here because this is the module that knows the object graph. The
+    server itself takes a table of callables and has no idea what any of them
+    mean, which is what keeps it testable with a handful of lambdas.
+    """
+
+    def say(params: dict) -> dict:
+        text = params.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ProtocolError("text must be a non-empty string", BAD_PARAMS)
+
+        # Barge in first, exactly as typing at the CLI prompt does
+        # (audio/stt.py:51). Injected speech should be indistinguishable from
+        # the real thing, including cutting off a reply already in progress.
+        interrupts.request()
+        source.submit(text.strip())
+        return {"accepted": True}
+
+    def limit_of(params: dict, default: int = 20) -> int:
+        value = params.get("limit", default)
+        return max(1, min(int(value), 500))
+
+    return {
+        "hello": lambda params: {
+            "server_version": __version__,
+            "protocol": PROTOCOL_VERSION,
+            "pid": state.pid,
+            "started_at": state.started_at,
+        },
+        "ping": lambda params: {"pong": True},
+        "get_status": lambda params: state.snapshot(),
+        "say": say,
+        "interrupt": lambda params: {"generation": interrupts.request()},
+        "list_tools": lambda params: [
+            {
+                "name": schema["function"]["name"],
+                "description": schema["function"]["description"],
+            }
+            for schema in assistant.conversation.tools.schemas()
+        ],
+        "list_facts": lambda params: [
+            _fact_summary(fact) for fact in assistant.memory.all_facts()[: limit_of(params)]
+        ],
+        "list_deep_notes": lambda params: [
+            _note_summary(path) for path in _newest(deep_notes_dir(), limit_of(params))
+        ],
+        "list_conversations": lambda params: [
+            {"id": path.stem, "path": str(path)}
+            for path in _newest(conversations_dir(), limit_of(params))
+        ],
+        # Frozen now, empty until there is something behind them. Settling the
+        # shape early means the dashboard panel does not change when the
+        # feature arrives -- only where the data comes from.
+        "list_agents": lambda params: [],
+        "list_programs": lambda params: [],
+        "shutdown": lambda params: _shutdown(source),
+    }
+
+
+def _shutdown(source) -> dict:
+    """End the conversation loop cleanly, as Ctrl-C would."""
+    source.close()
+    return {"stopping": True}
+
+
+def run_assistant(
+    settings: Settings,
+    use_mic: bool,
+    *,
+    control: bool = True,
+    interactive: bool = True,
+) -> None:
     from minus.audio.interrupt import InterruptBus, barge_in_on_sigint
     from minus.audio.stt import CliTranscriptSource, MicrophoneTranscriptSource
     from minus.audio.tts import KokoroSpeaker
@@ -298,14 +441,27 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
     # One bus shared by input and output: the recognizer publishes barge-in,
     # the speaker consumes it. Neither knows the other exists.
     interrupts = InterruptBus()
-    speaker = KokoroSpeaker(interrupts, settings)
-    primary = (
-        MicrophoneTranscriptSource(interrupts, settings)
-        if use_mic
-        else CliTranscriptSource(interrupts)
-    )
+    state = RuntimeState()
 
-    assistant = build_conversation(settings)
+    # Wrapped once rather than at each `speak()` call site: the courier speaks
+    # too, and one decorator covers both callers and any future third.
+    speaker = ObservedSpeaker(KokoroSpeaker(interrupts, settings), state)
+
+    # Free, and the best available use of the existing bus: the microphone
+    # already calls interrupts.request() from on_vad_start, so this is a real
+    # "the user is talking right now" indicator with no change to stt.py.
+    interrupts.subscribe(lambda: state.set_phase(HEARING))
+
+    primary: Any = None
+    if use_mic:
+        primary = MicrophoneTranscriptSource(interrupts, settings)
+    elif interactive:
+        primary = CliTranscriptSource(interrupts)
+    # Otherwise the socket is the only way in. A CLI source on a dead stdin
+    # would EOF immediately and end the session before it began, which is not
+    # what "headless" should mean.
+
+    assistant = build_conversation(settings, state=state)
 
     # One lock for everything that may touch the transcript or the speaker:
     # the loop, the deep courier, and the idle rollover. Built here rather than
@@ -319,6 +475,16 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
         idle_timeout=settings.idle_conversation_seconds,
         on_idle=lambda: end_conversation_when_idle(assistant, floor, source),
     )
+    state.provide("conversation", lambda: _conversation_section(assistant))
+
+    server = None
+    if control:
+        server = ControlServer(
+            control_socket(),
+            build_control_handlers(assistant, source, interrupts, state),
+            state=state,
+        )
+        server.start()
 
     try:
         # Installed here, on the main thread, rather than inside playback: a
@@ -328,12 +494,14 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
         # nothing is being spoken by then, so Ctrl-C during condensing and
         # fact extraction still raises and still quits.
         with barge_in_on_sigint(interrupts):
-            conversation_loop(source, assistant, speaker, floor, source.mark_activity)
+            conversation_loop(source, assistant, speaker, floor, source.mark_activity, state)
     finally:
         # First: the pump thread is parked in the recorder's blocking read and
         # will not end on its own, and RealtimeSTT's workers are non-daemon --
         # leaving them running hangs the interpreter at exit.
         source.close()
+        if server is not None:
+            server.close()
         # Before memory.close(): a deep call still in flight holds no fact-store
         # handle, but stopping new work first keeps teardown ordered.
         assistant.thinker.shutdown()
@@ -363,9 +531,67 @@ def run_tools() -> None:
         print(f"{function['name']}({params})\n    {function['description']}")
 
 
+def _describe(snapshot: dict) -> str:
+    """One line of status, for a terminal rather than a dashboard."""
+    deep = snapshot.get("deep") or {}
+    conversation = snapshot.get("conversation") or {}
+
+    line = f"{snapshot.get('phase', '?'):<10}"
+    if conversation.get("id"):
+        line += f"  conversation {conversation['id']} ({conversation.get('message_count', 0)} msgs)"
+    if deep.get("in_flight"):
+        line += f"  [deep: {deep.get('elapsed_seconds', 0):.0f}s -- {deep.get('question')}]"
+    return line
+
+
+def run_say(args) -> int:
+    """Hand a line to the running assistant, as though it had been spoken."""
+    from minus.control.client import ControlClient, NotRunning
+
+    try:
+        with ControlClient(control_socket()) as client:
+            client.request("say", text=" ".join(args.text))
+    except NotRunning as exc:
+        print(exc)
+        return 1
+    return 0
+
+
+def run_status(args) -> int:
+    """Print what the assistant is doing, once or until interrupted."""
+    from minus.control.client import ControlClient, NotRunning
+
+    try:
+        if not args.watch:
+            with ControlClient(control_socket()) as client:
+                print(_describe(client.request("get_status")))
+            return 0
+
+        with ControlClient(
+            control_socket(),
+            on_event=lambda frame: print(_describe(frame.get("data") or {})),
+        ) as client:
+            client.subscribe()
+            # Nothing to do but wait: the event handler does the printing, and
+            # the reader thread does the reading.
+            while True:
+                time.sleep(0.5)
+    except NotRunning as exc:
+        print(exc)
+        return 1
+    except KeyboardInterrupt:
+        return 0
+
+
 def main() -> None:
     args = build_parser().parse_args()
     settings = load_settings()
+
+    if args.command == "say":
+        raise SystemExit(run_say(args))
+
+    if args.command == "status":
+        raise SystemExit(run_status(args))
 
     if args.command == "memory":
         run_memory_tui(args)
@@ -389,7 +615,7 @@ def main() -> None:
     logger.info("Logging to %s", log_file)
 
     _install_stack_dumper()
-    run_assistant(settings, use_mic=not args.no_mic)
+    run_assistant(settings, use_mic=not args.no_mic, control=not args.no_control)
 
 
 if __name__ == "__main__":

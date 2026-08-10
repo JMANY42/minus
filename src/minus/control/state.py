@@ -81,6 +81,21 @@ class RuntimeState:
 
         self._notify(subscribers)
 
+    def touch(self) -> None:
+        """Announce that something changed which is not the phase.
+
+        The deep tier is the case this exists for: it starts and finishes on
+        its own thread while the phase stays exactly where it was, and
+        `set_phase` deliberately says nothing when the phase has not moved. A
+        watcher still needs to hear about it, because the snapshot it would
+        now read is different.
+        """
+        with self._lock:
+            self._seq += 1
+            subscribers = list(self._subscribers)
+
+        self._notify(subscribers)
+
     def _notify(self, subscribers: list[Callable[[], None]]) -> None:
         for subscriber in subscribers:
             try:
