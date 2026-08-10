@@ -19,13 +19,31 @@ abandoned -- ALSA leaves the PCM device in a bad XRUN state afterwards, after
 which a later write() can block for 10+ seconds in native code with no
 Python-level exception. Declining to write the rest bounds barge-in latency to
 one block plus whatever PortAudio has already buffered.
+
+CTRL-C
+------
+Ctrl-C is barge-in from the keyboard, and routing it lives here rather than in
+the speaker for a reason worth recording. The speaker used to install its own
+SIGINT handler for the duration of playback, which CPython only permits on the
+main thread -- so an escalated answer, spoken from the courier thread, ran with
+no handler at all. The signal went to the main thread sitting in the transcript
+source, raised KeyboardInterrupt there, and the conversation loop dutifully
+wrapped up the session: Ctrl-C during a deep answer quit MINUS instead of
+shutting it up.
+
+The handler is therefore installed once, on the main thread, for the whole
+conversation, and decides what Ctrl-C means from `is_active()` -- barge-in
+while anything is being spoken, whoever is speaking it, and the usual
+KeyboardInterrupt when nothing is.
 """
 
 from __future__ import annotations
 
 import logging
+import signal
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +58,12 @@ class InterruptBus:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # Reentrant because the SIGINT handler runs on whatever thread the
+        # signal interrupts, and calls straight back in here. A plain Lock
+        # deadlocks outright if the interrupted thread was itself mid-token().
+        self._lock = threading.RLock()
         self._generation = 0
+        self._active = 0
         self._subscribers: list[Callable[[], None]] = []
 
     def token(self) -> int:
@@ -78,3 +100,60 @@ class InterruptBus:
     def subscribe(self, callback: Callable[[], None]) -> None:
         with self._lock:
             self._subscribers.append(callback)
+
+    # ---- Is there anything worth interrupting? ----
+
+    def is_active(self) -> bool:
+        """True while some interruptible stretch of work is running."""
+        with self._lock:
+            return self._active > 0
+
+    @contextmanager
+    def interruptible(self) -> Iterator[None]:
+        """Mark work that a barge-in can usefully cut short.
+
+        Counted rather than a flag: the conversation loop and the deep-answer
+        courier both speak, and while the floor lock in cli.py keeps them from
+        overlapping today, a nested or concurrent speaker must not clear the
+        marker out from under the one still going.
+        """
+        with self._lock:
+            self._active += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
+@contextmanager
+def barge_in_on_sigint(bus: InterruptBus) -> Iterator[None]:
+    """Route Ctrl-C to barge-in while speech is in flight, quit otherwise.
+
+    Must be entered on the main thread -- signal.signal() is a main-thread
+    privilege -- and is a no-op anywhere else, so a test or an embedding
+    caller running this off-thread degrades to the default handler rather
+    than raising.
+
+    A second Ctrl-C quits, and needs no special case to do so: the first one
+    stops playback within a block or two, `is_active()` goes false as speak()
+    returns, and the next signal raises KeyboardInterrupt normally.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        logger.debug("Not on the main thread; leaving SIGINT handling alone.")
+        yield
+        return
+
+    def handler(signum, frame) -> None:
+        if bus.is_active():
+            logger.info("Ctrl-C during playback; treating it as barge-in.")
+            bus.request()
+            return
+        raise KeyboardInterrupt
+
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)

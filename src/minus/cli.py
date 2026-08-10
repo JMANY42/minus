@@ -242,7 +242,7 @@ def build_conversation(settings: Settings) -> Assistant:
 
 
 def run_assistant(settings: Settings, use_mic: bool) -> None:
-    from minus.audio.interrupt import InterruptBus
+    from minus.audio.interrupt import InterruptBus, barge_in_on_sigint
     from minus.audio.stt import CliTranscriptSource, MicrophoneTranscriptSource
     from minus.audio.tts import KokoroSpeaker
 
@@ -258,7 +258,14 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
 
     assistant = build_conversation(settings)
     try:
-        conversation_loop(source, assistant, speaker)
+        # Installed here, on the main thread, rather than inside playback: a
+        # deep answer is spoken from the courier thread, where signal handlers
+        # cannot be installed at all. See interrupt.py. It stays installed
+        # through the loop's own teardown, which changes nothing there --
+        # nothing is being spoken by then, so Ctrl-C during condensing and
+        # fact extraction still raises and still quits.
+        with barge_in_on_sigint(interrupts):
+            conversation_loop(source, assistant, speaker)
     finally:
         # Before memory.close(): a deep call still in flight holds no fact-store
         # handle, but stopping new work first keeps teardown ordered.

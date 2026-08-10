@@ -61,9 +61,12 @@ class SpeechSynthesizer(Protocol):
     a reply whose user has already started talking again is dropped instead of
     spoken over them. Implementations must treat an absent token as "speak".
 
-    Note: the Kokoro implementation installs a SIGINT handler for the duration
-    of playback, which CPython only permits on the main thread. A synthesizer
-    called from a worker thread must not do that.
+    Implementations are called from worker threads as well as the conversation
+    thread -- escalated answers are spoken by the courier in cli.py -- so they
+    must not install signal handlers, which CPython only permits on the main
+    thread. Ctrl-C is routed by `barge_in_on_sigint`, installed once for the
+    whole conversation; a synthesizer's part in that is to run playback inside
+    `InterruptBus.interruptible()`.
     """
 
     def speak(self, text: str, *, token: int | None = None) -> None: ...

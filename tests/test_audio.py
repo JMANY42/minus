@@ -13,12 +13,14 @@ sounddevice or kokoro-onnx -- so the whole file runs without the `audio` extra.
 from __future__ import annotations
 
 import builtins
+import signal
+import threading
 from unittest.mock import patch
 
 import pytest
 
 from minus.audio.chunking import split_text_into_chunks
-from minus.audio.interrupt import InterruptBus
+from minus.audio.interrupt import InterruptBus, barge_in_on_sigint
 from minus.audio.stt import CliTranscriptSource, is_exit_phrase
 
 
@@ -96,6 +98,128 @@ class TestSwallowedInterruptRegression:
 
         stale_by_old_rule = bus.is_stale(bus.token())  # captured too late
         assert stale_by_old_rule is False
+
+
+class TestInterruptibleWork:
+    def test_a_fresh_bus_has_nothing_to_interrupt(self):
+        assert not InterruptBus().is_active()
+
+    def test_it_is_active_only_inside_the_block(self):
+        bus = InterruptBus()
+
+        with bus.interruptible():
+            assert bus.is_active()
+
+        assert not bus.is_active()
+
+    def test_it_is_cleared_even_when_the_work_raises(self):
+        bus = InterruptBus()
+
+        with pytest.raises(RuntimeError), bus.interruptible():
+            raise RuntimeError("playback fell over")
+
+        assert not bus.is_active()
+
+    def test_nesting_stays_active_until_the_outermost_exits(self):
+        """Counted, not a flag: two speakers must not clear each other."""
+        bus = InterruptBus()
+
+        with bus.interruptible():
+            with bus.interruptible():
+                assert bus.is_active()
+            assert bus.is_active()
+
+        assert not bus.is_active()
+
+
+class TestCtrlCDuringSpeech:
+    """The bug: Ctrl-C while a deep answer was being spoken quit MINUS.
+
+    The speaker installed its own SIGINT handler for the duration of playback,
+    and signal.signal() is a main-thread privilege. Escalated answers are
+    spoken from the courier thread, so no handler was installed at all -- the
+    signal went to the main thread waiting in the transcript source, raised
+    KeyboardInterrupt there, and the conversation loop ended the session.
+
+    These raise a real SIGINT rather than calling the handler directly, so
+    what is being checked is what the process actually does with Ctrl-C.
+    """
+
+    def _speak_on_another_thread(self, bus):
+        """Hold the bus active from a worker, as the courier's speak() does."""
+        speaking = threading.Event()
+        release = threading.Event()
+
+        def courier():
+            with bus.interruptible():
+                speaking.set()
+                release.wait(timeout=5.0)
+
+        thread = threading.Thread(target=courier, daemon=True)
+        thread.start()
+        speaking.wait(timeout=5.0)
+        return thread, release
+
+    def test_ctrl_c_while_a_worker_thread_speaks_does_not_kill_the_program(self):
+        bus = InterruptBus()
+        thread, release = self._speak_on_another_thread(bus)
+        token = bus.token()
+
+        try:
+            with barge_in_on_sigint(bus):
+                # No pytest.raises: the whole point is that this does not
+                # raise on the main thread the way it used to.
+                signal.raise_signal(signal.SIGINT)
+        finally:
+            release.set()
+            thread.join(timeout=5.0)
+
+        assert bus.is_stale(token), "Ctrl-C should have registered as a barge-in"
+
+    def test_ctrl_c_with_nothing_being_spoken_still_quits(self):
+        bus = InterruptBus()
+
+        with pytest.raises(KeyboardInterrupt), barge_in_on_sigint(bus):
+            signal.raise_signal(signal.SIGINT)
+
+    def test_a_second_ctrl_c_quits_once_playback_has_stopped(self):
+        bus = InterruptBus()
+        thread, release = self._speak_on_another_thread(bus)
+
+        with barge_in_on_sigint(bus):
+            signal.raise_signal(signal.SIGINT)  # barge-in
+            release.set()
+            thread.join(timeout=5.0)
+
+            with pytest.raises(KeyboardInterrupt):
+                signal.raise_signal(signal.SIGINT)
+
+    def test_the_previous_handler_is_restored(self):
+        bus = InterruptBus()
+        before = signal.getsignal(signal.SIGINT)
+
+        with barge_in_on_sigint(bus):
+            assert signal.getsignal(signal.SIGINT) is not before
+
+        assert signal.getsignal(signal.SIGINT) is before
+
+    def test_off_the_main_thread_it_leaves_signals_alone(self):
+        """The courier must be able to enter it without CPython refusing."""
+        bus = InterruptBus()
+        outcome: list[str] = []
+
+        def worker():
+            try:
+                with barge_in_on_sigint(bus):
+                    outcome.append("entered")
+            except Exception as exc:  # pragma: no cover - the failure we guard
+                outcome.append(f"raised {type(exc).__name__}")
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=5.0)
+
+        assert outcome == ["entered"]
 
 
 class TestExitPhrases:

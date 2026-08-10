@@ -10,6 +10,9 @@ rather than at the end of a chunk.
 
 from __future__ import annotations
 
+import signal
+import threading
+
 import pytest
 
 np = pytest.importorskip("numpy")
@@ -132,3 +135,62 @@ class TestPlayback:
         speaker.speak(TEXT, token=token)
 
         assert streams == []
+
+
+class TestCtrlCIsHeardWhoeverIsSpeaking:
+    """Playback's half of the Ctrl-C fix.
+
+    The speaker no longer installs a SIGINT handler -- it could not, on the
+    courier thread that speaks escalated answers, which is how Ctrl-C during a
+    deep answer came to quit MINUS. All it does now is mark playback
+    interruptible, which is what the main thread's handler reads.
+    """
+
+    def test_the_bus_is_active_while_audio_is_being_written(self, speaker_with_stream):
+        active_during_write: list[bool] = []
+        holder: list[InterruptBus] = []
+
+        speaker, bus, _ = speaker_with_stream(
+            on_write=lambda stream: active_during_write.append(holder[0].is_active())
+        )
+        holder.append(bus)
+
+        assert not bus.is_active()
+        speaker.speak(TEXT)
+
+        assert active_during_write and all(active_during_write)
+        assert not bus.is_active()
+
+    def test_it_is_cleared_after_a_barge_in_cuts_playback_short(self, speaker_with_stream):
+        holder: list[InterruptBus] = []
+
+        speaker, bus, _ = speaker_with_stream(
+            on_write=lambda stream: holder[0].request() if stream.blocks == 2 else None
+        )
+        holder.append(bus)
+
+        speaker.speak(TEXT)
+
+        # Otherwise the next Ctrl-C would be swallowed as a second barge-in
+        # instead of quitting.
+        assert not bus.is_active()
+
+    def test_speaking_from_a_worker_thread_installs_no_handler(self, speaker_with_stream):
+        """The courier's thread: signal.signal() there would raise ValueError."""
+        speaker, _, streams = speaker_with_stream()
+        before = signal.getsignal(signal.SIGINT)
+        failures: list[BaseException] = []
+
+        def courier():
+            try:
+                speaker.speak(TEXT)
+            except BaseException as exc:  # pragma: no cover - the failure we guard
+                failures.append(exc)
+
+        thread = threading.Thread(target=courier)
+        thread.start()
+        thread.join(timeout=10.0)
+
+        assert not failures
+        assert streams and streams[0].frames_written > 0
+        assert signal.getsignal(signal.SIGINT) is before

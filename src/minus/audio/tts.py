@@ -27,7 +27,6 @@ seams free to be tightened to the pause that belongs there (seams.py).
 from __future__ import annotations
 
 import logging
-import signal
 import threading
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -111,12 +110,13 @@ def call_with_timeout(func, timeout: float, description: str) -> bool:
 class KokoroSpeaker:
     """A SpeechSynthesizer backed by Kokoro ONNX and PortAudio.
 
-    Safe to call from a worker thread. Playback prefers to install a SIGINT
-    handler so that Ctrl-C during speech is heard as barge-in rather than
-    killing the process, but CPython only permits signal.signal() on the main
-    thread, and escalated answers are spoken from a delivery thread. Off the
-    main thread the handler is simply skipped: the signal is delivered to the
-    main thread regardless, where the conversation loop already handles it.
+    Safe to call from a worker thread, and thread-agnostic about Ctrl-C:
+    playback runs inside `InterruptBus.interruptible()`, and the handler that
+    reads that lives on the main thread for the whole conversation
+    (`barge_in_on_sigint`). Installing it per-playback here is what used to
+    make Ctrl-C during an escalated answer -- spoken from the courier thread,
+    where signal.signal() is not allowed -- quit the process instead of
+    stopping the speech.
     """
 
     def __init__(self, interrupts: InterruptBus, settings: Any | None = None) -> None:
@@ -179,13 +179,15 @@ class KokoroSpeaker:
         if not chunks:
             return
 
-        # See the class docstring: signal.signal() is a main-thread privilege,
-        # and deep-tier answers are spoken from a delivery thread.
-        on_main_thread = threading.current_thread() is threading.main_thread()
-        previous_handler = signal.getsignal(signal.SIGINT) if on_main_thread else None
-        if on_main_thread:
-            signal.signal(signal.SIGINT, lambda signum, frame: self.interrupts.request())
+        # Everything from here until the stream is torn down is something a
+        # barge-in can usefully cut short, which is what tells the main
+        # thread's SIGINT handler that Ctrl-C means "stop talking" rather than
+        # "quit" -- whichever thread this playback is running on.
+        with self.interrupts.interruptible():
+            self._play(chunks, start_generation)
 
+    def _play(self, chunks: list[str], start_generation: int) -> None:
+        """Synthesize and write `chunks`, stopping at the first interrupt."""
         stream = None
         stream_wedged = False
         # Not a `with` block: ThreadPoolExecutor.__exit__ always shuts down with
@@ -273,10 +275,12 @@ class KokoroSpeaker:
             if stream is not None and not self._drain_stream(stream):
                 stream_wedged = True
         except KeyboardInterrupt:
+            # Only reachable when no barge-in handler is installed -- the
+            # module's own __main__ demo, or an embedding caller that never
+            # entered barge_in_on_sigint. Still treated as barge-in rather
+            # than propagating out of a reply that is half spoken.
             self.interrupts.request()
         finally:
-            if on_main_thread:
-                signal.signal(signal.SIGINT, previous_handler)
             executor.shutdown(wait=False, cancel_futures=True)
             if stream is not None and not stream_wedged:
                 self._close_stream(stream)
