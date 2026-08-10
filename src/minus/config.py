@@ -25,13 +25,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from minus import paths
 
+# Resolved once, at import, rather than left relative. `.env` alone is relative
+# to the working directory, which is fine when you launch from the repo and
+# silently wrong under a systemd unit or from a subdirectory: the API key
+# vanishes and every call comes back 401. The CWD file is kept second so that
+# it still wins where one exists, which preserves today's behaviour.
+_PROJECT_ENV_FILE = paths.project_root() / ".env"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MINUS_",
-        env_file=".env",
+        env_file=(_PROJECT_ENV_FILE, ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
+        # So the dashboard can change a value on a live object and have it
+        # rejected at the setter rather than three seconds later inside a
+        # provider call. No field has a custom validator, so this costs
+        # nothing today and makes `settings.chat_model = 12` an error.
+        validate_assignment=True,
     )
 
     # ---- LLM ----
