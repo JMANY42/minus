@@ -14,3 +14,6 @@ __pycache__/
 # which would have silently broken when the package moved one level deeper.
 /logs/
 /memory/
+
+# claude worktrees
+.claude/worktrees

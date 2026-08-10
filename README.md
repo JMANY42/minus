@@ -42,10 +42,11 @@ src/minus/
 ├── cli.py          composition root — the only place that picks implementations
 ├── config.py       every tunable value, env-overridable
 ├── paths.py        the single definition of where data lives
-├── core/           protocols, typed messages, prompts, the agent loop
+├── core/           protocols, typed messages, prompts, agent loop, deep tier
 ├── llm/            OpenRouter client + malformed-tool-call retry
 ├── tools/          @tool registry, schema derivation, built-in tools
 ├── memory/         transcripts, condensation, fact extraction, fact store
+├── services/       json helpers, the deep-answer detail sink
 └── audio/          interrupt bus, speech-to-text, text-to-speech
 ```
 
@@ -75,6 +76,25 @@ def set_light(room: str, brightness: int = 100) -> dict:
 ```
 
 Import it in `src/minus/tools/__init__.py` and it is live.
+
+### Two model tiers
+
+A model fast enough to feel spoken is not a model that reasons well. Minus runs
+both rather than compromising:
+
+- `chat_model` carries every conversation and the everyday tools.
+- When it meets something beyond it — designing, planning, weighing tradeoffs,
+  reading several files at once — it calls the `escalate` tool, and
+  `deep_model` answers on a background thread. The conversation stays live the
+  whole time; the fast model just says it is on it.
+- The deep tier answers in two channels. The short one is spoken. The full
+  write-up goes to a `DetailSink` (today, a file under `memory/deep_notes/`)
+  and is never read aloud.
+- Depth comes from `deep_reasoning_effort`, not model size — the default deep
+  model reasons on demand, so dropping that parameter would make the tier
+  pointless.
+
+Set `MINUS_DEEP_MODEL` to change tiers without touching code.
 
 ### Semantic Memory
 

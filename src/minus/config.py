@@ -39,11 +39,28 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     app_title: str = "Minus"
 
-    # gpt-oss-120b:nitro is far more expensive but fast enough to chain several
-    # tool calls without failing. The roadmap's multi-tier routing will pick
-    # between these per request; until then this is the single default.
-    chat_model: str = "openai/gpt-oss-20b:free"
-    fact_extraction_model: str = "openai/gpt-oss-20b:free"
+    # Two tiers. `chat_model` is chosen for latency: it carries the whole
+    # conversation and must answer "what time is it?" fast enough to feel
+    # spoken. It is not good at sustained reasoning and is not asked to be --
+    # when it hits something beyond it, it calls the `escalate` tool and the
+    # deep tier answers on a background thread. See core/escalation.py.
+    chat_model: str = "openai/gpt-oss-20b:nitro"
+    fact_extraction_model: str = "openai/gpt-oss-20b:nitro"
+
+    # DeepSeek V4 Flash is a sparse MoE that reasons on demand rather than by
+    # being large, so its depth comes from `deep_reasoning_effort` below, not
+    # from the model name. Dropping the effort parameter would make this tier
+    # barely deeper than the fast one. anthropic/claude-opus-5 is the step up
+    # if this proves too weak.
+    deep_model: str = "deepseek/deepseek-v4-flash-0731"
+    deep_reasoning_effort: str = "high"
+    # Deliberately lower than max_tool_rounds: the deep tier reads a few files
+    # to ground an answer, it does not go exploring unattended.
+    deep_max_tool_rounds: int = 4
+    # A worker thread cannot be killed, so this does not abort a wedged deep
+    # call. It bounds how long one blocks the *next* escalation before the
+    # thinker gives up waiting on it and accepts new work.
+    deep_timeout_seconds: float = 120.0
 
     max_retries: int = 3
     max_tool_rounds: int = 7

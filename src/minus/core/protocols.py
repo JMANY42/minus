@@ -30,8 +30,15 @@ class ChatModel(Protocol):
         tool_choice: str = "auto",
         max_retries: int | None = None,
         retry_note: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Any:
-        """Return a validated completion, retrying malformed tool calls."""
+        """Return a validated completion, retrying malformed tool calls.
+
+        `reasoning_effort` is how the deep tier buys depth: the escalation
+        model reasons on demand rather than by being large, so omitting this
+        would make it no better than the conversational model. Providers that
+        do not understand the parameter simply never receive it.
+        """
         ...
 
 
@@ -60,6 +67,19 @@ class SpeechSynthesizer(Protocol):
     """
 
     def speak(self, text: str, *, token: int | None = None) -> None: ...
+
+
+@runtime_checkable
+class DetailSink(Protocol):
+    """Where long-form output goes when speaking it aloud would be wrong.
+
+    The deep tier answers in two channels: a short summary that is spoken
+    verbatim, and the full analysis, which can run to pages and cite file
+    paths. Only the first belongs in a voice stream. Implementations decide
+    where the second is rendered -- a file today, a dashboard later.
+    """
+
+    def publish(self, title: str, detail: str) -> None: ...
 
 
 @runtime_checkable
