@@ -31,6 +31,7 @@ what each one does.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -56,6 +57,38 @@ GARBLED_SPOKEN = (
 # Spoken when the tier failed outright. Saying nothing would be worse: the user
 # asked a question and is entitled to know it went nowhere.
 FAILED_SPOKEN = "I tried to think that one through and it fell over. Sorry about that."
+
+# The two channels arrive as marked sections rather than JSON fields.
+#
+# JSON was the obvious first choice and it does not survive contact with this
+# tier. The detail channel is a long markdown document that is *supposed* to
+# contain quotes, apostrophes, newlines, backticks and fenced code -- exactly
+# the characters a JSON string has to escape -- and models emit it raw. A real
+# response failed on both counts at once: a literal newline after the first
+# heading (which strict json.loads rejects as a control character) and an
+# unescaped pair of quotes around a phrase further down (which no amount of
+# lenient parsing can recover, because the string simply ends there).
+#
+# Marked sections have no escaping rules to get wrong. Anchored to whole lines
+# so that prose mentioning a marker cannot be mistaken for one, and matched
+# first-occurrence-wins so a detail section discussing this format -- which the
+# tier does, when asked to summarise this very file -- still splits correctly.
+_SPOKEN_MARKER = re.compile(r"^[ \t]*<{2,3}\s*SPOKEN\s*>{2,3}[ \t]*$\n?", re.IGNORECASE | re.M)
+_DETAIL_MARKER = re.compile(r"^[ \t]*<{2,3}\s*DETAIL\s*>{2,3}[ \t]*$\n?", re.IGNORECASE | re.M)
+
+
+def split_channels(raw: str) -> tuple[str, str] | None:
+    """Split a marked deep response into (spoken, detail).
+
+    Returns None if the detail marker is absent, which is the caller's signal to
+    try the JSON fallback before giving up.
+    """
+    match = _DETAIL_MARKER.search(raw)
+    if match is None:
+        return None
+
+    spoken = _SPOKEN_MARKER.sub("", raw[: match.start()], count=1)
+    return spoken.strip(), raw[match.end() :].strip()
 
 
 @dataclass(frozen=True)
@@ -318,6 +351,21 @@ class DeepThinker:
 
     # ---- Result handling ----
 
+    @staticmethod
+    def _parse_json(raw: str) -> tuple[str, str] | None:
+        """Read the superseded JSON shape, for a tier that emits it anyway.
+
+        Kept because a model ignoring the marker instructions and reaching for
+        JSON is the single most likely way this contract gets missed, and a
+        response that is otherwise perfect should not be thrown away over its
+        envelope.
+        """
+        try:
+            payload = extract_json_object(raw)
+            return str(payload["spoken"]).strip(), str(payload.get("detail") or "").strip()
+        except (ValueError, KeyError, TypeError):
+            return None
+
     def _parse(self, question: str, raw: str) -> DeepResult:
         """Split a raw response into its spoken and written channels.
 
@@ -325,14 +373,12 @@ class DeepThinker:
         malformed response: an answer that arrived in the wrong shape is still
         worth showing, and the user is owed something spoken either way.
         """
-        try:
-            payload = extract_json_object(raw)
-            spoken = str(payload["spoken"]).strip()
-            detail = str(payload.get("detail") or "").strip()
-        except (ValueError, KeyError, TypeError):
+        channels = split_channels(raw) or self._parse_json(raw)
+        if channels is None:
             logger.warning("Deep tier response was not the agreed shape; publishing it raw.")
             return DeepResult(question=question, spoken=GARBLED_SPOKEN, detail=raw)
 
+        spoken, detail = channels
         if not spoken:
             return DeepResult(question=question, spoken=GARBLED_SPOKEN, detail=detail or raw)
 

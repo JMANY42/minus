@@ -55,7 +55,7 @@ class StalledExecutor:
 def answer(
     spoken: str = "Short spoken line.", detail: str = "The long write-up."
 ) -> FakeCompletion:
-    return FakeCompletion(FakeMessage(content=f'{{"spoken": "{spoken}", "detail": "{detail}"}}'))
+    return FakeCompletion(FakeMessage(content=f"<<<SPOKEN>>>\n{spoken}\n<<<DETAIL>>>\n{detail}"))
 
 
 def build_thinker(responses, *, tools=None, executor=None, **kwargs):
@@ -254,6 +254,53 @@ class TestResponseParsing:
         assert result.spoken == GARBLED_SPOKEN
         assert result.detail == "I have thoughts but no JSON."
 
+    def test_a_detail_full_of_quotes_and_newlines_survives(self):
+        # The shape that broke the original JSON contract: a markdown write-up
+        # containing literal newlines and unescaped double quotes. Neither is
+        # escapable by a model writing prose, and both are legal here.
+        detail = '# Summary\n\nIt is a "think harder" service.\n\n```py\nx = {"a": 1}\n```'
+        thinker, _, results = build_thinker([answer(spoken="Done.", detail=detail)])
+
+        thinker.escalate("summarise the escalation module")
+
+        result = results.get_nowait()
+        assert result.spoken == "Done."
+        assert result.detail == detail
+
+    def test_a_detail_that_discusses_the_markers_still_splits_correctly(self):
+        # The tier summarising this very module writes the marker names into
+        # its own detail. First match wins, so the split is still the real one.
+        detail = "The format uses two lines:\n\n<<<DETAIL>>>\n\nand that is all."
+        thinker, _, results = build_thinker([answer(spoken="Read it.", detail=detail)])
+
+        thinker.escalate("how does the deep tier format its answer?")
+
+        result = results.get_nowait()
+        assert result.spoken == "Read it."
+        assert result.detail == detail
+
+    def test_markers_are_matched_leniently(self):
+        thinker, _, results = build_thinker(
+            [FakeCompletion(FakeMessage(content="  <<spoken>>\nSaid.\n  <<< Detail >>>  \nBody."))]
+        )
+
+        thinker.escalate("anything")
+
+        result = results.get_nowait()
+        assert result.spoken == "Said."
+        assert result.detail == "Body."
+
+    def test_prose_mentioning_a_marker_inline_is_not_a_split(self):
+        thinker, _, results = build_thinker(
+            [FakeCompletion(FakeMessage(content="I would write <<<DETAIL>>> here."))]
+        )
+
+        thinker.escalate("anything")
+
+        # No marker on its own line and no JSON, so this degrades rather than
+        # silently truncating the answer at a word in the middle of a sentence.
+        assert results.get_nowait().spoken == GARBLED_SPOKEN
+
     def test_json_wrapped_in_prose_and_fences_is_recovered(self):
         thinker, _, results = build_thinker(
             [
@@ -271,7 +318,7 @@ class TestResponseParsing:
 
     def test_a_blank_spoken_channel_falls_back_rather_than_speaking_nothing(self):
         thinker, _, results = build_thinker(
-            [FakeCompletion(FakeMessage(content='{"spoken": "  ", "detail": "Body."}'))]
+            [FakeCompletion(FakeMessage(content="<<<SPOKEN>>>\n  \n<<<DETAIL>>>\nBody."))]
         )
 
         thinker.escalate("anything")
@@ -279,6 +326,19 @@ class TestResponseParsing:
         result = results.get_nowait()
         assert result.spoken == GARBLED_SPOKEN
         assert result.detail == "Body."
+
+    def test_the_json_fallback_tolerates_unescaped_newlines(self):
+        # strict=True rejects a literal newline inside a string value, which is
+        # how every multi-line detail arrived before the markers existed.
+        thinker, _, results = build_thinker(
+            [FakeCompletion(FakeMessage(content='{"spoken": "Said.", "detail": "a\nb"}'))]
+        )
+
+        thinker.escalate("anything")
+
+        result = results.get_nowait()
+        assert result.spoken == "Said."
+        assert result.detail == "a\nb"
 
     def test_a_crash_still_tells_the_user_something(self):
         thinker, _, results = build_thinker([RuntimeError("provider exploded")])
