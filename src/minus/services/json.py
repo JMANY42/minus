@@ -17,20 +17,25 @@ def extract_json_object(text):
     code fences or introduce it with a sentence of prose, and a response that is
     otherwise correct should not be discarded over a stray "Here you go:".
 
+    Parsed with strict=False, which allows literal newlines and tabs inside
+    string values. Models write multi-line prose into a string field constantly
+    and almost never escape it, and strict mode rejects the whole document over
+    a control character it could simply have kept.
+
     Raises ValueError if no object can be recovered, so callers can decide
     whether to degrade or fail.
     """
     text = _FENCE_CLOSE.sub("", _FENCE_OPEN.sub("", text.strip())).strip()
 
     try:
-        return stdjson.loads(text)
+        return stdjson.loads(text, strict=False)
     except stdjson.JSONDecodeError:
         pass
 
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
-        return stdjson.loads(text[start : end + 1])
+        return stdjson.loads(text[start : end + 1], strict=False)
 
     raise ValueError(f"Could not parse a JSON object from model output:\n{text}")
 
