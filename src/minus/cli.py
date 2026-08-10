@@ -19,6 +19,7 @@ import logging
 import signal
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
@@ -26,6 +27,7 @@ from typing import Any
 
 from minus import __version__
 from minus.config import Settings, load_settings
+from minus.control.config_control import ConfigController, LiveField
 from minus.control.instrument import ObservedSpeaker
 from minus.control.protocol import BAD_PARAMS, PROTOCOL_VERSION, ProtocolError
 from minus.control.server import ControlServer
@@ -404,7 +406,95 @@ def _newest(directory: Path, limit: int) -> list[Path]:
     return sorted(directory.glob("*.json"), reverse=True)[:limit]
 
 
-def build_control_handlers(assistant: Assistant, source, interrupts, state) -> dict:
+def build_config_controller(
+    assistant: Assistant, speaker, source, settings: Settings
+) -> ConfigController:
+    """Which settings apply live, and what each one actually writes.
+
+    An explicit table rather than anything clever. A field is live only if it
+    is here, so this never claims a change took effect when the object holding
+    that value read it once at construction and will not look again.
+
+    `speaker` must be the real KokoroSpeaker, not the ObservedSpeaker wrapping
+    it -- the wrapper forwards attribute *reads* and would otherwise quietly
+    absorb the writes.
+    """
+    conversation = assistant.conversation
+    memory = assistant.memory
+    thinker = assistant.thinker
+
+    def both(*applies: Callable[[Any], None]) -> Callable[[Any], None]:
+        def apply(value: Any) -> None:
+            for one in applies:
+                one(value)
+
+        return apply
+
+    def on_settings(name: str) -> Callable[[Any], None]:
+        return lambda value: setattr(settings, name, value)
+
+    def on(target: Any, attribute: str) -> Callable[[Any], None]:
+        return lambda value: setattr(target, attribute, value)
+
+    def set_log_level(value: Any) -> None:
+        logging.getLogger().setLevel(value)
+        settings.log_level = value
+
+    table: dict[str, Callable[[Any], None]] = {
+        # Read per call from the Settings object the client holds.
+        "chat_model": on_settings("chat_model"),
+        "max_retries": on_settings("max_retries"),
+        # Held as attributes on collaborators, and re-read on each use.
+        "deep_model": both(on(thinker, "deep_model"), on_settings("deep_model")),
+        "deep_reasoning_effort": both(
+            on(thinker, "reasoning_effort"), on_settings("deep_reasoning_effort")
+        ),
+        "deep_max_tool_rounds": both(
+            on(thinker, "max_tool_rounds"), on_settings("deep_max_tool_rounds")
+        ),
+        "deep_timeout_seconds": both(
+            on(thinker, "timeout_seconds"), on_settings("deep_timeout_seconds")
+        ),
+        "max_tool_rounds": both(
+            on(conversation, "max_tool_rounds"), on_settings("max_tool_rounds")
+        ),
+        "relevance_threshold": both(
+            on(memory, "relevance_threshold"), on_settings("relevance_threshold")
+        ),
+        "fact_extraction_model": both(
+            on(memory, "extraction_model_name"), on_settings("fact_extraction_model")
+        ),
+        # Two copies of one value: MemoryService takes it, and Conversation
+        # keeps its own from the same field. Both, or a change is half-applied.
+        "fact_search_top_k": both(
+            on(memory, "fact_search_top_k"),
+            on(conversation, "fact_top_k"),
+            on_settings("fact_search_top_k"),
+        ),
+        # Read per chunk, so these land on the next thing spoken.
+        "tts_voice": both(on(speaker, "voice"), on_settings("tts_voice")),
+        "tts_speed": both(on(speaker, "speed"), on_settings("tts_speed")),
+        "tts_lang": both(on(speaker, "lang"), on_settings("tts_lang")),
+        "tts_chunk_max_chars": both(
+            on(speaker, "chunk_max_chars"), on_settings("tts_chunk_max_chars")
+        ),
+        "tts_first_chunk_max_chars": both(
+            on(speaker, "first_chunk_max_chars"), on_settings("tts_first_chunk_max_chars")
+        ),
+        "idle_conversation_seconds": both(
+            on(source, "idle_timeout"), on_settings("idle_conversation_seconds")
+        ),
+        "log_level": set_log_level,
+    }
+
+    return ConfigController(
+        settings,
+        {name: LiveField(name, apply) for name, apply in table.items()},
+        env_path=project_root() / ".env",
+    )
+
+
+def build_control_handlers(assistant: Assistant, source, interrupts, state, config=None) -> dict:
     """What the control socket is allowed to ask of a running assistant.
 
     Built here because this is the module that knows the object graph. The
@@ -428,7 +518,22 @@ def build_control_handlers(assistant: Assistant, source, interrupts, state) -> d
         value = params.get("limit", default)
         return max(1, min(int(value), 500))
 
+    def get_config(params: dict) -> dict:
+        if config is None:
+            raise ProtocolError("Configuration is not available", BAD_PARAMS)
+        return config.describe()
+
+    def set_config(params: dict) -> dict:
+        if config is None:
+            raise ProtocolError("Configuration is not available", BAD_PARAMS)
+        values = params.get("values")
+        if not isinstance(values, dict) or not values:
+            raise ProtocolError("values must be a non-empty object", BAD_PARAMS)
+        return config.apply(values, persist=bool(params.get("persist", True)))
+
     return {
+        "get_config": get_config,
+        "set_config": set_config,
         "hello": lambda params: {
             "server_version": __version__,
             "protocol": PROTOCOL_VERSION,
@@ -487,9 +592,12 @@ def run_assistant(
     interrupts = InterruptBus()
     state = RuntimeState()
 
+    # The inner one is kept: live TTS config writes to it directly, because
+    # ObservedSpeaker forwards attribute reads and would swallow the writes.
+    voice = KokoroSpeaker(interrupts, settings)
     # Wrapped once rather than at each `speak()` call site: the courier speaks
     # too, and one decorator covers both callers and any future third.
-    speaker = ObservedSpeaker(KokoroSpeaker(interrupts, settings), state)
+    speaker = ObservedSpeaker(voice, state)
 
     # Free, and the best available use of the existing bus: the microphone
     # already calls interrupts.request() from on_vad_start, so this is a real
@@ -525,7 +633,13 @@ def run_assistant(
     if control:
         server = ControlServer(
             control_socket(),
-            build_control_handlers(assistant, source, interrupts, state),
+            build_control_handlers(
+                assistant,
+                source,
+                interrupts,
+                state,
+                build_config_controller(assistant, voice, source, settings),
+            ),
             state=state,
         )
         server.start()
