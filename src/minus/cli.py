@@ -84,7 +84,7 @@ def _install_stack_dumper() -> None:
         faulthandler.register(signal.SIGUSR1)
 
 
-def deliver_deep_result(assistant, speaker, floor, result) -> None:
+def deliver_deep_result(assistant, speaker, floor, result, mark_activity=None) -> None:
     """Publish one escalated answer's two channels."""
     # Detail first, and outside the lock: it is file I/O with nothing to
     # serialize against, and the spoken line may refer to the write-up.
@@ -100,15 +100,24 @@ def deliver_deep_result(assistant, speaker, floor, result) -> None:
         logger.info("Deep answer:\n%s", pretty_json(result.spoken))
         speaker.speak(result.spoken, token=token)
 
+        # After speaking, and still holding the floor. A deep answer arrives
+        # long after the question, so by now the idle clock has been running
+        # through the whole wait -- and the user has just been handed something
+        # to respond to. Restarting it here gives them the full silence to
+        # answer in, and an idle rollover already queued behind this lock sees
+        # the fresh clock rather than condensing on top of the answer.
+        if mark_activity is not None:
+            mark_activity()
 
-def deep_result_courier(assistant, speaker, floor) -> None:
+
+def deep_result_courier(assistant, speaker, floor, mark_activity=None) -> None:
     """Deliver escalated answers as they land, until told to stop."""
     while True:
         result = assistant.results.get()
         if result is _STOP:
             return
         try:
-            deliver_deep_result(assistant, speaker, floor, result)
+            deliver_deep_result(assistant, speaker, floor, result, mark_activity)
         except Exception:
             # This thread is the only thing delivering deep answers; letting it
             # die over one bad result would silently disable escalation for the
@@ -116,7 +125,7 @@ def deep_result_courier(assistant, speaker, floor) -> None:
             logger.exception("Failed to deliver a deep answer")
 
 
-def end_conversation_when_idle(assistant: Assistant, floor: threading.Lock) -> bool:
+def end_conversation_when_idle(assistant: Assistant, floor: threading.Lock, source=None) -> bool:
     """End the current conversation after a silence and open a fresh one.
 
     Returns False to decline, which leaves the idle timer armed for another
@@ -126,6 +135,12 @@ def end_conversation_when_idle(assistant: Assistant, floor: threading.Lock) -> b
     conversation = assistant.conversation
 
     with floor:
+        # Re-checked under the lock, because acquiring it may have meant
+        # waiting for the courier to finish speaking a deep answer. The
+        # decision to roll over was made before that answer existed.
+        if source is not None and source.seconds_since_activity() < source.idle_timeout:
+            return False
+
         if not conversation.transcript:
             # Nothing was said. Condensing would write an empty file, and would
             # do it again on every timeout for as long as the silence lasted.
@@ -148,7 +163,7 @@ def end_conversation_when_idle(assistant: Assistant, floor: threading.Lock) -> b
     return True
 
 
-def conversation_loop(transcripts, assistant, speaker, floor) -> None:
+def conversation_loop(transcripts, assistant, speaker, floor, mark_activity=None) -> None:
     """Drive one conversation to completion.
 
     The post-conversation work runs in a `finally` so that quitting with Ctrl-C
@@ -164,7 +179,7 @@ def conversation_loop(transcripts, assistant, speaker, floor) -> None:
     conversation = assistant.conversation
     courier = threading.Thread(
         target=deep_result_courier,
-        args=(assistant, speaker, floor),
+        args=(assistant, speaker, floor, mark_activity),
         name="deep-courier",
         daemon=True,
     )
@@ -296,10 +311,13 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
     # the loop, the deep courier, and the idle rollover. Built here rather than
     # inside the loop now that a third collaborator needs the same one.
     floor = threading.Lock()
+    # `source` is referenced by the handler it is being constructed with. That
+    # resolves at call time, not now, which is what lets the rollover re-check
+    # the idle clock it was triggered by.
     source = MergedTranscriptSource(
         primary,
         idle_timeout=settings.idle_conversation_seconds,
-        on_idle=lambda: end_conversation_when_idle(assistant, floor),
+        on_idle=lambda: end_conversation_when_idle(assistant, floor, source),
     )
 
     try:
@@ -310,7 +328,7 @@ def run_assistant(settings: Settings, use_mic: bool) -> None:
         # nothing is being spoken by then, so Ctrl-C during condensing and
         # fact extraction still raises and still quits.
         with barge_in_on_sigint(interrupts):
-            conversation_loop(source, assistant, speaker, floor)
+            conversation_loop(source, assistant, speaker, floor, source.mark_activity)
     finally:
         # First: the pump thread is parked in the recorder's blocking read and
         # will not end on its own, and RealtimeSTT's workers are non-daemon --

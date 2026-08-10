@@ -232,6 +232,50 @@ def test_a_raising_handler_neither_repeats_nor_stops_the_stream():
     assert received == ["after the failure"]
 
 
+def test_marking_activity_restarts_the_clock():
+    """A deep answer is spoken from another thread and must count as a turn."""
+    fired: list[int] = []
+    source = build(BlockingSource(), on_idle=lambda: fired.append(1))
+    _, thread = drain(source)
+
+    # Keep the clock alive from outside, the way the courier does.
+    for _ in range(6):
+        time.sleep(TICK / 2)
+        source.mark_activity()
+
+    assert fired == []
+
+    time.sleep(TICK * 3)
+    source.close()
+    thread.join(2)
+
+    assert len(fired) == 1  # and it fires normally once the marking stops
+
+
+def test_marking_activity_rearms_a_handler_that_already_fired():
+    fired: list[int] = []
+    source = build(BlockingSource(), on_idle=lambda: fired.append(1))
+    _, thread = drain(source)
+
+    time.sleep(TICK * 4)
+    source.mark_activity()
+    time.sleep(TICK * 4)
+    source.close()
+    thread.join(2)
+
+    assert len(fired) == 2
+
+
+def test_seconds_since_activity_tracks_the_clock():
+    source = build(BlockingSource(), idle_timeout=10.0)
+
+    time.sleep(TICK)
+    assert source.seconds_since_activity() >= TICK
+
+    source.mark_activity()
+    assert source.seconds_since_activity() < TICK
+
+
 def test_a_zero_timeout_disables_the_rollover():
     fired: list[int] = []
     source = build(BlockingSource(), on_idle=lambda: fired.append(1), idle_timeout=0)

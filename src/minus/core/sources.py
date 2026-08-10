@@ -73,6 +73,33 @@ class MergedTranscriptSource:
         self._queue: Queue[Any] = Queue()
         self._closed = threading.Event()
 
+        # The idle clock. Instance state rather than locals in __iter__ because
+        # the other thing that talks to the user -- the deep tier's courier --
+        # runs on its own thread and has to be able to restart it.
+        self._clock = threading.Lock()
+        self._quiet_since = time.monotonic()
+        self._fired = False
+
+    # ---- The idle clock ----
+
+    def mark_activity(self) -> None:
+        """Restart the idle clock, and re-arm the handler.
+
+        For turns that do not arrive through the queue. A deep answer is the
+        case that matters: it is spoken minutes after the question that asked
+        for it, from the courier thread, and without this the silence that
+        preceded it counts against the reply to it -- so the conversation ends
+        moments after the user has been given something to respond to.
+        """
+        with self._clock:
+            self._quiet_since = time.monotonic()
+            self._fired = False
+
+    def seconds_since_activity(self) -> float:
+        """How long since anything was said, in either direction."""
+        with self._clock:
+            return time.monotonic() - self._quiet_since
+
     # ---- Input ----
 
     def submit(self, text: str) -> None:
@@ -137,8 +164,7 @@ class MergedTranscriptSource:
                 daemon=True,
             ).start()
 
-        quiet_since = time.monotonic()
-        fired = False
+        self.mark_activity()
 
         while True:
             try:
@@ -146,15 +172,21 @@ class MergedTranscriptSource:
             except Empty:
                 if self._closed.is_set():
                     return
-                if fired or not self._idle_enabled():
-                    continue
-                if time.monotonic() - quiet_since < self.idle_timeout:
-                    continue
 
+                with self._clock:
+                    if self._fired or not self._idle_enabled():
+                        continue
+                    if time.monotonic() - self._quiet_since < self.idle_timeout:
+                        continue
+
+                # Fired outside the lock: the handler condenses a conversation
+                # and may take seconds, during which mark_activity() must still
+                # be able to run.
                 if self._fire_idle():
-                    fired = True
+                    with self._clock:
+                        self._fired = True
                 else:
-                    quiet_since = time.monotonic()
+                    self.mark_activity()
                 continue
 
             if item is _END:
@@ -166,5 +198,4 @@ class MergedTranscriptSource:
             # that takes twenty seconds to speak is not twenty seconds of
             # silence, and counting it as such would end conversations while
             # the user was still listening to one.
-            quiet_since = time.monotonic()
-            fired = False
+            self.mark_activity()

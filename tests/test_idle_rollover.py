@@ -10,8 +10,9 @@ import threading
 import time
 from queue import Queue
 
-from minus.cli import Assistant, end_conversation_when_idle
+from minus.cli import Assistant, deliver_deep_result, end_conversation_when_idle
 from minus.core.agent import Conversation
+from minus.core.escalation import DeepResult
 from minus.core.messages import Message, Transcript
 from minus.core.sources import MergedTranscriptSource
 from minus.memory.facts.store import SqliteFactStore
@@ -44,6 +45,14 @@ class FakeConversation:
         conversation_id = f"conv-{len(self.started) + 1}"
         self.started.append(conversation_id)
         return conversation_id
+
+
+def drain(source) -> tuple[list[str], threading.Thread]:
+    """Iterate `source` on its own thread, so the idle clock actually runs."""
+    received: list[str] = []
+    thread = threading.Thread(target=lambda: received.extend(source), daemon=True)
+    thread.start()
+    return received, thread
 
 
 def build(*, said: bool = True, in_flight: bool = False, facts=None):
@@ -103,6 +112,127 @@ def test_rolls_over_once_the_deep_answer_has_landed():
 
     assert end_conversation_when_idle(assistant, floor) is True
     assert conversation.condensed == 1
+
+
+class RecentlySpoke:
+    """A source that reports the user was just spoken to."""
+
+    idle_timeout = 30.0
+
+    def seconds_since_activity(self) -> float:
+        return 0.5
+
+
+class LongSilent:
+    idle_timeout = 30.0
+
+    def seconds_since_activity(self) -> float:
+        return 45.0
+
+
+def test_declines_when_something_was_said_while_waiting_for_the_floor():
+    """The rollover decision predates the deep answer it queued up behind."""
+    assistant, conversation = build()
+
+    handled = end_conversation_when_idle(assistant, threading.Lock(), RecentlySpoke())
+
+    assert handled is False
+    assert conversation.condensed == 0
+
+
+def test_proceeds_when_the_silence_really_did_last():
+    assistant, conversation = build()
+
+    handled = end_conversation_when_idle(assistant, threading.Lock(), LongSilent())
+
+    assert handled is True
+    assert conversation.condensed == 1
+
+
+class RecordingSpeaker:
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.events = events
+
+    def token(self) -> int:
+        return 1
+
+    def speak(self, text: str, *, token: int | None = None) -> None:
+        if self.events is not None:
+            self.events.append(f"spoke:{text}")
+
+
+class RecordingSink:
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.events = events
+
+    def publish(self, title: str, detail: str) -> None:
+        if self.events is not None:
+            self.events.append("published")
+
+
+def test_a_deep_answer_restarts_the_idle_clock_after_it_is_spoken():
+    """Order matters: the clock restarts once the answer has been delivered."""
+    events: list[str] = []
+    assistant, conversation = build()
+    assistant.details = RecordingSink(events)
+
+    deliver_deep_result(
+        assistant,
+        RecordingSpeaker(events),
+        threading.Lock(),
+        DeepResult(question="q", spoken="Here is the answer.", detail="long form"),
+        lambda: events.append("marked"),
+    )
+
+    assert events == ["published", "spoke:Here is the answer.", "marked"]
+    # The answer is in the transcript, so a later rollover still condenses it.
+    assert [message.content for message in conversation.transcript] == [
+        "something worth remembering",
+        "Here is the answer.",
+    ]
+
+
+def test_a_late_deep_answer_buys_a_full_silence_to_reply_in():
+    """The point of the reset: reply time starts when MINUS stops talking.
+
+    Without it, the wait for the deep model is counted as silence, and the
+    conversation ends moments after the answer the user wanted to respond to.
+    """
+    timeout = 0.3
+    assistant, conversation = build()
+    assistant.details = RecordingSink()
+    floor = threading.Lock()
+
+    source = MergedTranscriptSource(
+        None,
+        idle_timeout=timeout,
+        poll=0.01,
+        on_idle=lambda: end_conversation_when_idle(assistant, floor, source),
+    )
+    _, thread = drain(source)
+
+    # Most of the way through the silence, the answer lands and is spoken.
+    time.sleep(timeout * 0.7)
+    assert conversation.condensed == 0
+    deliver_deep_result(
+        assistant,
+        RecordingSpeaker(),
+        floor,
+        DeepResult(question="q", spoken="Here is the answer.", detail="long form"),
+        source.mark_activity,
+    )
+
+    # Past where the original silence would have expired: still going, because
+    # being spoken to restarted the clock.
+    time.sleep(timeout * 0.7)
+    assert conversation.condensed == 0
+
+    # And it still ends once the *new* silence has actually run its course.
+    time.sleep(timeout)
+    assert conversation.condensed == 1
+
+    source.close()
+    thread.join(2)
 
 
 def test_a_silence_ends_the_conversation_on_disk(tmp_path):
