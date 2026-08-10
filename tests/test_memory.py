@@ -1,15 +1,11 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from services.json import parse_json
-
-import memory.memory_manager as memory_module
-import memory.condense_conversation as condense_module
-from response import SYSTEM_PROMPT
+import minus.memory.condense as condense_module
+import minus.memory.service as memory_module
+from minus.core.prompts import SYSTEM_PROMPT
+from minus.services.json import parse_json
 
 
 class ConversationMemoryTests(unittest.TestCase):
@@ -19,14 +15,18 @@ class ConversationMemoryTests(unittest.TestCase):
             conversation_memory = memory_module.MemoryManager(base_dir=base_dir)
 
             self.assertTrue(conversation_memory.file_path.exists())
-            self.assertEqual(conversation_memory.file_path.name, f"{conversation_memory.conversation_id}.json")
+            self.assertEqual(
+                conversation_memory.file_path.name, f"{conversation_memory.conversation_id}.json"
+            )
 
             first_messages = [{"role": "user", "content": "hello"}]
             conversation_memory.save(first_messages)
 
             payload = parse_json(conversation_memory.file_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["conversation_id"], conversation_memory.conversation_id)
-            self.assertEqual(payload["messages"], [{"role": "system", "content": SYSTEM_PROMPT}, *first_messages])
+            self.assertEqual(
+                payload["messages"], [{"role": "system", "content": SYSTEM_PROMPT}, *first_messages]
+            )
             self.assertIn("updated_at", payload)
 
             second_messages = [
@@ -36,8 +36,13 @@ class ConversationMemoryTests(unittest.TestCase):
             conversation_memory.save(second_messages)
 
             payload = parse_json(conversation_memory.file_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["messages"], [{"role": "system", "content": SYSTEM_PROMPT}, *second_messages])
-            self.assertEqual(payload["started_at"], conversation_memory.started_at.isoformat(timespec="seconds"))
+            self.assertEqual(
+                payload["messages"],
+                [{"role": "system", "content": SYSTEM_PROMPT}, *second_messages],
+            )
+            self.assertEqual(
+                payload["started_at"], conversation_memory.started_at.isoformat(timespec="seconds")
+            )
 
     def test_condenses_conversation_by_filtering_out_tool_calls(self):
         with tempfile.TemporaryDirectory() as temp_dir:

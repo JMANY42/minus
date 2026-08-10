@@ -1,0 +1,118 @@
+[project]
+name = "minus"
+version = "0.1.0"
+description = "MINUS - a personal voice assistant with persistent semantic memory"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "JMANY42" }]
+
+# Core dependencies only. Anything that drags in torch or a native audio stack
+# lives in an extra, so `uv sync` (and CI) stays fast and GPU-free.
+dependencies = [
+    "openai>=2.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "sqlite-vec>=0.1.9",
+]
+
+[project.optional-dependencies]
+# Microphone input and speech output. Needs a working PortAudio/ALSA stack.
+#
+# RealtimeSTT 1.0 made its transcription engine and VAD optional extras, so a
+# bare "RealtimeSTT" installs a recorder that cannot actually transcribe. The
+# two named here reproduce the previously working setup: faster-whisper is the
+# engine stt.py configures via model=/realtime_model_type=, and silero-vad
+# backs the silero_sensitivity= and on_vad_start= barge-in path.
+audio = [
+    "kokoro-onnx>=0.5.0",
+    "sounddevice>=0.5",
+    "RealtimeSTT[faster-whisper,silero-vad]>=1.0",
+    # faster-whisper runs on ctranslate2, which links against the CUDA 12
+    # runtime (libcublas.so.12, libcudnn.so.9) and declares no nvidia
+    # dependencies of its own -- supplying them is the caller's job. torch
+    # brings CUDA *13* libraries, so without these the GPU path dies at the
+    # first encode() with "Library libcublas.so.12 is not found". The two
+    # generations install to separate paths (nvidia/cu13/lib vs
+    # nvidia/cublas/lib) and coexist, which is how this worked before.
+    "nvidia-cublas-cu12>=12.9; sys_platform == 'linux'",
+    "nvidia-cudnn-cu12>=9.22; sys_platform == 'linux'",
+    "nvidia-cuda-nvrtc-cu12>=12.9; sys_platform == 'linux'",
+    "nvidia-cuda-runtime-cu12>=12.9; sys_platform == 'linux'",
+]
+# Semantic fact embeddings. Pulls in torch, so it is deliberately opt-in:
+# the fact store takes an injected embedder and tests supply a fake one.
+embeddings = [
+    "sentence-transformers>=5.0",
+]
+
+# Tooling, not a feature of the package. A dependency group rather than an
+# extra: extras describe optional capabilities a consumer can ask for
+# (`minus[audio]`), whereas groups are for working on the project itself and
+# are never published. uv installs the `dev` group by default, so `uv run
+# pytest` needs no flags.
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+minus = "minus.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minus"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "B008",  # function call in default argument - fine for our DI defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+# Prompt text is wire content: rewrapping it changes what the model receives.
+"src/minus/core/prompts.py" = ["E501"]
+# Console output copy, wrapped for the terminal rather than the source file.
+"src/minus/scripts/calibrate.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["minus"]
+mypy_path = "src"
+# Non-strict: this is a refactor, not a typing crusade. Tighten over time.
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
