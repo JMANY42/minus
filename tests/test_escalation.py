@@ -163,6 +163,56 @@ class TestStatus:
         assert thinker.status()["elapsed_seconds"] is None
 
 
+class TestChangeNotifications:
+    """The push half of the deep tier's state, for anything watching."""
+
+    def test_reports_both_edges(self):
+        seen: list[bool] = []
+        thinker, _, results = build_thinker(
+            [answer()], on_change=lambda: seen.append(thinker.status()["in_flight"])
+        )
+
+        thinker.escalate("Something hard")
+        results.get_nowait()
+
+        assert seen == [True, False]
+
+    def test_the_start_is_announced_before_the_finish(self):
+        """An inline executor finishes during submit(); the order must survive."""
+        seen: list[str] = []
+        thinker, _, results = build_thinker(
+            [answer()],
+            on_change=lambda: seen.append("busy" if thinker.status()["in_flight"] else "free"),
+        )
+
+        thinker.escalate("Something hard")
+        results.get_nowait()
+
+        assert seen == ["busy", "free"]
+
+    def test_a_raising_subscriber_does_not_break_escalation(self):
+        def broken() -> None:
+            raise RuntimeError("the dashboard died mid-thought")
+
+        thinker, _, results = build_thinker([answer()], on_change=broken)
+
+        thinker.escalate("Something hard")
+
+        assert results.get_nowait().spoken == "Short spoken line."
+        assert thinker.status()["in_flight"] is False
+
+    def test_nothing_is_announced_when_a_second_question_is_refused(self):
+        seen: list[int] = []
+        thinker, _, _ = build_thinker(
+            [answer()], executor=StalledExecutor(), on_change=lambda: seen.append(1)
+        )
+
+        thinker.escalate("First")
+        thinker.escalate("Second")
+
+        assert len(seen) == 1
+
+
 class TestConversationContext:
     def test_drops_the_dangling_tool_call_that_escalate_itself_creates(self):
         # The agent appends the assistant's tool-call turn before dispatching,

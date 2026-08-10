@@ -144,6 +144,7 @@ class DeepThinker:
         timeout_seconds: float = 120.0,
         executor: Any | None = None,
         recent_limit: int = 2,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         self.model = model
         self.deep_model = deep_model
@@ -154,6 +155,9 @@ class DeepThinker:
         self.max_tool_rounds = max_tool_rounds
         self.timeout_seconds = timeout_seconds
         self.recent_limit = recent_limit
+        # Fired on both edges of `_busy`, so a dashboard learns that thinking
+        # started without polling. Optional, and never called under the lock.
+        self.on_change = on_change
 
         # Not a `with` block, for the same reason as the TTS chunk executor:
         # __exit__ always waits, and shutdown must be able to abandon a deep
@@ -173,6 +177,21 @@ class DeepThinker:
         self._snapshot: Callable[[], list[dict]] = list
 
     # ---- Introspection ----
+
+    def _changed(self) -> None:
+        """Tell whoever is watching that `_busy` flipped.
+
+        Always called outside `self._lock`: the subscriber will most likely
+        ask for `status()`, which takes that same lock. Exceptions are
+        contained for the same reason InterruptBus contains them -- a broken
+        dashboard must not be able to disable escalation.
+        """
+        if self.on_change is None:
+            return
+        try:
+            self.on_change()
+        except Exception:
+            logger.exception("Deep tier state subscriber raised")
 
     def status(self) -> dict:
         """What the deep tier is doing, for anything that needs to wait on it.
@@ -252,6 +271,12 @@ class DeepThinker:
             self._question = question
             self._started_at = time.monotonic()
 
+        # Announced before submit(), not after: an inline executor runs the
+        # job on this thread, so a notification after the call would arrive
+        # once the work had already finished and report the two edges in the
+        # wrong order.
+        self._changed()
+
         # Submitted outside the lock. The worker takes the same lock to record
         # its result, so holding it across submit() deadlocks the moment the
         # executor runs work on the calling thread instead of a pool thread.
@@ -260,6 +285,7 @@ class DeepThinker:
         except Exception:
             with self._lock:
                 self._busy = False
+            self._changed()
             raise
 
         logger.info("Escalated to %s: %s", self.deep_model, question)
@@ -283,6 +309,7 @@ class DeepThinker:
         finally:
             with self._lock:
                 self._busy = False
+            self._changed()
 
         logger.info("Deep tier finished in %.2fs", time.monotonic() - started)
         self._remember(result)
