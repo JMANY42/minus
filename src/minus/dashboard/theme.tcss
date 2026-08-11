@@ -1,0 +1,115 @@
+/* Built for a Linux virtual terminal, not an emulator.
+ *
+ * Only ansi_* colour names appear here. They map to the terminal's own
+ * sixteen, which is all a VT has -- a hex value, a $primary derivation or an
+ * `auto` contrast would each make rich compute a truecolor value and hand the
+ * console something it cannot render faithfully.
+ *
+ * Borders are `ascii` for the same reason. The default console font maps the
+ * light box-drawing set through ACS but generally not the rounded corners
+ * Textual reaches for by default, so `round` would come out as blanks or
+ * garbage on the machine this is actually for. --unicode switches it back.
+ */
+
+Screen {
+    layout: vertical;
+    background: $background;
+}
+
+#statusbar {
+    height: 1;
+    background: ansi_blue;
+    color: ansi_bright_white;
+}
+
+#hints {
+    height: 1;
+    background: ansi_blue;
+    color: ansi_bright_white;
+}
+
+#body {
+    height: 1fr;
+}
+
+/* 1fr against 1fr rather than 50%: Textual divides the remainder itself, so
+ * an odd terminal width cannot leave a one-column gap between the halves. */
+#left {
+    width: 1fr;
+}
+
+#right {
+    width: 1fr;
+}
+
+/* The requested split: viewer two thirds, input one third. */
+#viewer {
+    height: 2fr;
+    border: ascii ansi_bright_black;
+    border-title-color: ansi_bright_white;
+}
+
+#prompt {
+    height: 1fr;
+    border: ascii ansi_bright_black;
+    border-title-color: ansi_bright_white;
+}
+
+#viewer-tabs {
+    height: 1;
+    background: ansi_black;
+    color: ansi_bright_black;
+}
+
+#viewer-body {
+    height: 1fr;
+}
+
+#prompt-echo {
+    height: 1fr;
+}
+
+#prompt-input {
+    height: 3;
+    border: ascii ansi_bright_black;
+    background: ansi_black;
+}
+
+Panel {
+    height: 1fr;
+    border: ascii ansi_bright_black;
+    border-title-color: ansi_bright_white;
+}
+
+/* Expansion is two class toggles and no screen stack: the chosen panel keeps
+ * its 1fr and the others stop being laid out at all. */
+Panel.-expanded {
+    height: 1fr;
+    border: ascii ansi_yellow;
+}
+
+Panel.-hidden {
+    display: none;
+}
+
+Panel #options {
+    display: none;
+    color: ansi_bright_black;
+}
+
+Panel.-expanded #options {
+    display: block;
+}
+
+#summary {
+    height: auto;
+}
+
+*:focus {
+    border: ascii ansi_yellow;
+}
+
+.disconnected {
+    background: ansi_red;
+    color: ansi_bright_white;
+}

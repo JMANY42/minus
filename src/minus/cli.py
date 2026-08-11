@@ -97,6 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     subcommands.add_parser("systemd-unit", help="Print a systemd --user unit for this checkout")
 
+    dash = subcommands.add_parser("dash", help="Open the management dashboard")
+    dash.add_argument(
+        "--unicode",
+        action="store_true",
+        help="Use box-drawing borders (for a terminal emulator rather than a VT)",
+    )
+
     memory = subcommands.add_parser("memory", help="Interactively prune stored facts")
     memory.add_argument("--db", default=None, help="Path to the semantic memory database")
     memory.add_argument(
@@ -760,6 +767,28 @@ def run_serve(settings: Settings, use_mic: bool) -> None:
     run_assistant(settings, use_mic=use_mic, control=True, interactive=False)
 
 
+def run_dashboard(args) -> None:
+    """Open the TUI.
+
+    Imported here rather than at module scope, matching what this module
+    already does for audio: `minus serve` must never pay for textual, and a
+    machine without the extra installed must still be able to run everything
+    else.
+    """
+    try:
+        from minus.dashboard.app import run_dashboard as open_dashboard
+    except ImportError as exc:
+        raise SystemExit(
+            f"The dashboard needs its extra: uv sync --extra dashboard  ({exc})"
+        ) from exc
+
+    # console=False, or a stray warning paints over the screen. The `dash`
+    # prefix keeps this file out of the dashboard's own log viewer, which
+    # follows the newest run-*.log, and out of the run logs' retention count.
+    setup_logging(console=False, prefix="dash")
+    open_dashboard(control_socket(), unicode_borders=args.unicode)
+
+
 def run_systemd_unit() -> None:
     import sys
 
@@ -777,6 +806,10 @@ def main() -> None:
 
     if args.command == "systemd-unit":
         run_systemd_unit()
+        return
+
+    if args.command == "dash":
+        run_dashboard(args)
         return
 
     if args.command == "say":

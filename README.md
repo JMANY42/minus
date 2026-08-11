@@ -38,10 +38,49 @@ minus calibrate        # recompute the fact-relevance threshold
 Against an assistant that is already running:
 
 ```bash
+minus dash                    # the management dashboard
 minus say "what time is it"   # inject a line, as though it had been spoken
 minus status                  # what it is doing right now
 minus status --watch          # ...and keep printing as that changes
 ```
+
+## Dashboard
+
+```bash
+uv sync --extra dashboard
+minus dash            # add --unicode for a terminal emulator rather than a VT
+```
+
+```
+┌───────────────────────────────┬───────────────────────────────┐
+│                               │  MEMORY                   [m] │
+│   viewer            (2/3)     ├───────────────────────────────┤
+│   ← conversation │ log │      │  HARDWARE                 [h] │
+│     deep think →              ├───────────────────────────────┤
+│                               │  TOOLS                    [t] │
+├───────────────────────────────┤───────────────────────────────┤
+│   input             (1/3)     │  EXTERNAL PROGRAMS        [p] │
+│   > _                         ├───────────────────────────────┤
+│                               │  AGENTS                   [a] │
+└───────────────────────────────┴───────────────────────────────┘
+```
+
+`←`/`→` switches the viewer, `m h t p a` expands a panel, `i` focuses the
+input, `escape` steps back out, `c` interrupts, `R` restarts the service, and
+`q` quits **the dashboard, not MINUS**. `ctrl+←`/`ctrl+→` switch the view
+without leaving the input box, which owns the bare arrow keys for its cursor.
+
+Built for the console on the machine itself: sixteen ANSI colours, ASCII
+borders and character meters, because the VT font has no block-drawing glyphs.
+`--unicode` relaxes that over SSH.
+
+It is a separate process and a separate dependency. `minus serve` never
+imports textual. Reads come from the files MINUS already writes, so the log,
+the conversation and the deep-think notes still render with the assistant
+stopped -- only the input box needs the socket.
+
+The expanded panels are scaffolding: each one says "nothing here yet", and
+filling one in means returning a list from its `options()`.
 
 ## Running as a service
 
@@ -82,7 +121,10 @@ src/minus/
 ├── llm/            OpenRouter client + malformed-tool-call retry
 ├── tools/          @tool registry, schema derivation, built-in tools
 ├── memory/         transcripts, condensation, fact extraction, fact store
-├── services/       json helpers, the deep-answer detail sink
+├── services/       json helpers, the deep-answer detail sink, the .env writer
+├── control/        the socket protocol, server, client, live config, systemd
+├── system/         /proc and /sys readers for the hardware panel
+├── dashboard/      the TUI (the only package allowed to import textual)
 └── audio/          interrupt bus, speech-to-text, text-to-speech
 ```
 
@@ -167,7 +209,7 @@ uv run mypy src
 
 - [ ] Play music
 - [ ] Control lights
-- [ ] Build a dedicated MINUS dashboard screen
+- [x] Build a dedicated MINUS dashboard screen
 
 ### General Assistance
 
