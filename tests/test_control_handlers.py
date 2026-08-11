@@ -166,6 +166,56 @@ class TestIntrospection:
         assert interrupts.generation == 1
 
 
+class TestFactsOverTheSocket:
+    """The whole path, with a real fact store rather than a fake one.
+
+    The handler runs on the server's reader thread while the store was opened
+    on this one -- which is the arrangement that made a live dashboard fail
+    with "SQLite objects created in a thread can only be used in that same
+    thread". A fake memory cannot express that.
+    """
+
+    def test_list_facts_answers_from_a_real_store(self, short_socket_path, tmp_path):
+        from minus.memory.facts.store import SqliteFactStore
+
+        from .fakes import FakeEmbedder
+
+        store = SqliteFactStore(tmp_path / "facts.db", embedder=FakeEmbedder())
+        store.add_fact("favorite_band", "queen")
+
+        class RealBackedMemory:
+            conversation_id = "c1"
+            file_path = str(tmp_path / "c1.json")
+
+            def all_facts(self):
+                return store.get_all_facts()
+
+        state = RuntimeState()
+        assistant = Assistant(
+            conversation=FakeConversation(),
+            memory=RealBackedMemory(),
+            thinker=FakeThinker(),
+            results=Queue(),
+            details=None,
+        )
+        server = ControlServer(
+            short_socket_path,
+            build_control_handlers(
+                assistant, MergedTranscriptSource(None, idle_timeout=0), FakeInterrupts(), state
+            ),
+            state=state,
+        )
+        server.start()
+        try:
+            with ControlClient(short_socket_path) as client:
+                facts = client.request("list_facts")
+        finally:
+            server.close()
+            store.close()
+
+        assert [fact["value"] for fact in facts] == ["queen"]
+
+
 class TestShutdown:
     def test_ends_the_transcript_source(self, wired):
         client, source, _, _ = wired
