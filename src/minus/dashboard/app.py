@@ -12,6 +12,7 @@ a log is most worth reading.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any, ClassVar
@@ -21,6 +22,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Input, RichLog, Static
 
 from minus.control.client import ControlClient, NotRunning
@@ -47,6 +49,11 @@ from minus.paths import conversations_dir, deep_notes_dir, logs_dir
 from minus.system.metrics import SystemMetrics
 
 logger = logging.getLogger(__name__)
+
+# How often to look for an assistant that was not there a moment ago. A fixed
+# interval rather than a backoff: connecting to a unix socket that is absent
+# fails immediately and costs nothing, so there is no pressure to back off.
+RECONNECT_SECONDS = 3.0
 
 
 class MinusDashboard(App):
@@ -133,6 +140,7 @@ class MinusDashboard(App):
         self.set_interval(2.0, self.poll_notes)
         self.set_interval(2.0, self.poll_metrics)
         self.set_interval(1.0, self.redraw_status)
+        self.set_interval(RECONNECT_SECONDS, self.reconnect)
 
         self.query_one("#prompt-input", Input).focus()
 
@@ -197,12 +205,27 @@ class MinusDashboard(App):
             f"   ({self.note_index + 1}/{len(notes)}, ↑/↓ to move)\n\n{note.detail}"
         )
 
+    def _fill(self, panel_type: type, data: Any) -> None:
+        """Put data into a panel, from the UI thread.
+
+        Always called through call_from_thread, and always doing its own query
+        here rather than in the worker that produced the data: a worker can
+        outlive the widget tree it was started against, and resolving the node
+        over there raises NoMatches as the app tears down.
+        """
+        with contextlib.suppress(NoMatches):
+            self.query_one(panel_type).update(data)
+
+    def _echo(self, line: str) -> None:
+        with contextlib.suppress(NoMatches):
+            self.query_one(PromptPane).echo(line)
+
     @work(thread=True, exclusive=True, group="metrics")
     def poll_metrics(self) -> None:
         # nvidia-smi initialises NVML and takes a few hundred milliseconds, so
         # this one genuinely does belong off the event loop.
         sample = self.metrics.sample()
-        self.call_from_thread(self.query_one(HardwarePanel).update, sample)
+        self.call_from_thread(self._fill, HardwarePanel, sample)
 
     # ---- The socket ----
 
@@ -217,6 +240,17 @@ class MinusDashboard(App):
 
         self.client = client
         self.call_from_thread(self._connected)
+
+    def reconnect(self) -> None:
+        """Pick the assistant back up when it comes back.
+
+        The dashboard is opened at least as often while MINUS is down as while
+        it is up -- to read the log that says why -- and `systemctl restart`
+        drops the connection by design. Without this, both leave a dashboard
+        that is permanently wrong until it is restarted itself.
+        """
+        if not self.connected:
+            self.connect()
 
     def _connected(self) -> None:
         self.connected = True
@@ -237,7 +271,7 @@ class MinusDashboard(App):
 
     def _apply_snapshot(self, snapshot: dict) -> None:
         self.snapshot = snapshot
-        self.query_one(AgentsPanel).update(snapshot)
+        self._fill(AgentsPanel, snapshot)
         self.redraw_status()
 
     @work(thread=True, exclusive=True, group="panels")
@@ -254,9 +288,10 @@ class MinusDashboard(App):
             self.call_from_thread(self._disconnected, str(exc))
             return
 
-        self.call_from_thread(self.query_one(ToolsPanel).update, tools)
+        self.call_from_thread(self._fill, ToolsPanel, tools)
         self.call_from_thread(
-            self.query_one(MemoryPanel).update,
+            self._fill,
+            MemoryPanel,
             {"facts": facts, "deep_notes": len(notes), "conversations": len(conversations)},
         )
         self.call_from_thread(self._apply_snapshot, snapshot)
@@ -273,7 +308,13 @@ class MinusDashboard(App):
     # ---- Status bar ----
 
     def redraw_status(self) -> None:
-        bar = self.query_one("#statusbar", Static)
+        try:
+            bar = self.query_one("#statusbar", Static)
+        except NoMatches:
+            # Reached from a worker's completion callback, which can land
+            # after the screen has gone.
+            return
+
         if not self.connected:
             bar.add_class("disconnected")
             reason = self.service_status.get("reason", "")
@@ -334,7 +375,7 @@ class MinusDashboard(App):
     @work(thread=True, exclusive=True, group="restart")
     def restart_service(self) -> None:
         ok, message = service.restart()
-        self.call_from_thread(self.query_one(PromptPane).echo, message)
+        self.call_from_thread(self._echo, message)
         if ok:
             self.call_from_thread(self.connect)
 
@@ -371,7 +412,7 @@ class MinusDashboard(App):
         try:
             self.client.request(command, **params)
         except Exception as exc:
-            self.call_from_thread(self.query_one(PromptPane).echo, f"failed: {exc}")
+            self.call_from_thread(self._echo, f"failed: {exc}")
             self.call_from_thread(self._disconnected, str(exc))
 
     def on_unmount(self) -> None:

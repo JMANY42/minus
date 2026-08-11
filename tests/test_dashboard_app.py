@@ -171,6 +171,30 @@ class TestDisconnected:
 
             assert pilot.app.query_one("#statusbar").has_class("disconnected")
 
+    async def test_it_keeps_looking_for_the_assistant(self, app):
+        """Opened while MINUS is down -- the common case -- it must recover."""
+        attempts = []
+        app.connect = lambda: attempts.append(1)
+
+        async with app.run_test() as pilot:
+            attempts.clear()  # mounting connects once already
+            pilot.app.connected = False
+            pilot.app.reconnect()
+            pilot.app.reconnect()
+
+        assert len(attempts) == 2
+
+    async def test_it_stops_looking_once_connected(self, app):
+        attempts = []
+        app.connect = lambda: attempts.append(1)
+
+        async with app.run_test() as pilot:
+            attempts.clear()  # mounting connects once already
+            pilot.app.connected = True
+            pilot.app.reconnect()
+
+        assert attempts == []
+
     async def test_typing_a_line_reports_that_nothing_is_listening(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()
