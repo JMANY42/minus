@@ -364,7 +364,7 @@ class MinusDashboard(App):
             for panel in self.query(Panel):
                 panel.remove_class("-expanded", "-hidden")
             return
-        self.query_one(ViewerPane).focus()
+        self.query_one(ViewerPane).focus_current()
 
     def action_interrupt(self) -> None:
         self.send("interrupt")

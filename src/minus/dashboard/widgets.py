@@ -63,9 +63,39 @@ class ViewerPane(Vertical):
         return self.VIEWS[self.index]
 
     def show(self, index: int) -> None:
+        was_viewing = self.viewing()
         self.index = index % len(self.VIEWS)
         self.query_one(ContentSwitcher).current = f"view-{self.current}"
         self.refresh_tabs()
+        # Focus follows the switch, or it is left on a view that is no longer
+        # displayed -- at which point the scroll keys move something invisible.
+        if was_viewing:
+            self.focus_current()
+
+    def viewing(self) -> bool:
+        """True if focus is currently inside one of the views."""
+        focused = self.app.focused
+        return focused is not None and focused.id in {f"view-{view}" for view in self.VIEWS}
+
+    def focus_current(self) -> None:
+        """Focus the view that is showing.
+
+        Not `self.focus()`: ViewerPane is a Vertical, and Vertical.can_focus
+        is False, so focusing it silently does nothing at all -- which is why
+        escape looked dead from the input box while in fact firing correctly.
+        The RichLog inside is the focusable thing, and focusing it is also
+        what makes the scroll keys move what you are actually looking at.
+
+        `focusable` covers visibility too, so this can never land on one of
+        the ContentSwitcher's hidden children.
+        """
+        view = self.query_one(f"#view-{self.current}")
+        if view.focusable:
+            view.focus()
+        else:
+            # Nothing to focus, but the input must still be released or the
+            # panel hotkeys keep being typed into it.
+            self.app.set_focus(None)
 
     def cycle(self, step: int) -> None:
         self.show(self.index + step)

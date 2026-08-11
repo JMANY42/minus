@@ -11,6 +11,8 @@ import pytest
 
 pytest.importorskip("textual")
 
+from textual.widgets import Input
+
 from minus.dashboard.app import MinusDashboard
 from minus.dashboard.widgets import Panel, ViewerPane, ascii_bar, human_bytes
 
@@ -146,6 +148,60 @@ class TestPanelExpansion:
 
             assert pilot.app.query_one("#panel-tools").has_class("-expanded")
             assert not pilot.app.query_one("#panel-memory").has_class("-expanded")
+
+    async def test_escape_leaves_the_input(self, app):
+        """`Vertical` is not focusable, so focusing the pane was a silent no-op."""
+        async with app.run_test() as pilot:
+            pilot.app.query_one("#prompt-input").focus()
+            await pilot.pause()
+
+            await pilot.press("escape")
+
+            assert not isinstance(pilot.app.focused, Input)
+
+    async def test_the_hotkeys_work_after_escape(self, app):
+        """The whole point of stepping out: m/h/t/p/a stop being typed text."""
+        async with app.run_test() as pilot:
+            pilot.app.query_one("#prompt-input").focus()
+            await pilot.pause()
+
+            await pilot.press("escape")
+            await pilot.press("m")
+
+            assert pilot.app.query_one("#panel-memory").has_class("-expanded")
+            assert pilot.app.query_one("#prompt-input").value == ""
+
+    async def test_escape_focuses_the_view_that_is_showing(self, app):
+        """So up/down scroll what you are looking at, not a hidden sibling."""
+        async with app.run_test() as pilot:
+            pilot.app.query_one("#prompt-input").focus()
+            await pilot.pause()
+
+            await pilot.press("ctrl+right")  # to the log
+            await pilot.press("escape")
+
+            assert pilot.app.focused is not None
+            assert pilot.app.focused.id == "view-log"
+
+    async def test_switching_views_keeps_focus_on_what_is_displayed(self, app):
+        async with app.run_test() as pilot:
+            pilot.app.query_one("#prompt-input").focus()
+            await pilot.pause()
+            await pilot.press("escape")
+
+            await pilot.press("right")
+
+            assert pilot.app.focused.id == "view-log"
+
+    async def test_i_returns_to_the_input(self, app):
+        async with app.run_test() as pilot:
+            pilot.app.query_one("#prompt-input").focus()
+            await pilot.pause()
+
+            await pilot.press("escape")
+            await pilot.press("i")
+
+            assert isinstance(pilot.app.focused, Input)
 
     async def test_the_hotkeys_type_rather_than_expand_while_the_input_has_focus(self, app):
         async with app.run_test() as pilot:
