@@ -11,10 +11,11 @@ from queue import Queue
 
 import pytest
 
-from minus.cli import Assistant, build_config_controller
+from minus.assembly import build_config_controller
 from minus.config import Settings
 from minus.control.config_control import BLOCKED, SECRETS, ConfigController, LiveField
 from minus.core.sources import MergedTranscriptSource
+from minus.runtime import Assistant
 
 
 class FakeSpeaker:

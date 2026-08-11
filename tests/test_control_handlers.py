@@ -12,12 +12,14 @@ from queue import Queue
 
 import pytest
 
-from minus.cli import Assistant, _describe, build_control_handlers, build_parser
+from minus.assembly import build_control_handlers
+from minus.cli import _describe, build_parser
 from minus.control.client import ControlClient, ControlError
 from minus.control.server import ControlServer
 from minus.control.state import THINKING, RuntimeState
 from minus.core.messages import Message, Transcript
 from minus.core.sources import MergedTranscriptSource
+from minus.runtime import Assistant
 
 
 class FakeInterrupts:

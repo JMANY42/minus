@@ -4,7 +4,7 @@ from pathlib import Path
 
 import minus.memory.condense as condense_module
 import minus.memory.service as memory_module
-from minus.core.prompts import SYSTEM_PROMPT
+from minus.prompts import SYSTEM_PROMPT
 from minus.services.json import parse_json
 
 

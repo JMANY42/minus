@@ -7,9 +7,10 @@ import signal
 import threading
 import time
 
-from minus.cli import _end_conversation_on_sigterm, build_parser
+from minus.cli import build_parser
 from minus.control.systemd import install_hint, render_unit
 from minus.core.sources import MergedTranscriptSource
+from minus.runtime import end_conversation_on_sigterm
 
 
 class TestUnitFile:
@@ -72,7 +73,7 @@ class TestSigterm:
         threading.Thread(target=lambda: (list(source), ended.set()), daemon=True).start()
         time.sleep(0.05)
 
-        with _end_conversation_on_sigterm(source):
+        with end_conversation_on_sigterm(source):
             os.kill(os.getpid(), signal.SIGTERM)
             assert ended.wait(2), "SIGTERM did not end the transcript source"
 
@@ -80,7 +81,7 @@ class TestSigterm:
         source = MergedTranscriptSource(None, idle_timeout=0)
         before = signal.getsignal(signal.SIGTERM)
 
-        with _end_conversation_on_sigterm(source):
+        with end_conversation_on_sigterm(source):
             assert signal.getsignal(signal.SIGTERM) is not before
 
         assert signal.getsignal(signal.SIGTERM) is before
@@ -91,7 +92,7 @@ class TestSigterm:
         worked = threading.Event()
 
         def run() -> None:
-            with _end_conversation_on_sigterm(source):
+            with end_conversation_on_sigterm(source):
                 worked.set()
 
         thread = threading.Thread(target=run, daemon=True)

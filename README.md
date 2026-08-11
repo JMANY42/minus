@@ -114,10 +114,13 @@ first one for the microphone. Pass `--no-control` to run one alongside anyway.
 
 ```
 src/minus/
-├── cli.py          composition root — the only place that picks implementations
+├── cli.py          argument parsing and one function per subcommand
+├── assembly.py     composition root — the only place that picks implementations
+├── runtime.py      the conversation loop, the deep courier, the idle rollover
 ├── config.py       every tunable value, env-overridable
 ├── paths.py        the single definition of where data lives
-├── core/           protocols, typed messages, prompts, agent loop, deep tier
+├── prompts.py      prompt text; imports nothing but paths, so anything may use it
+├── core/           protocols, typed messages, agent loop, deep tier
 ├── llm/            OpenRouter client + malformed-tool-call retry
 ├── tools/          @tool registry, schema derivation, built-in tools
 ├── memory/         transcripts, condensation, fact extraction, fact store
@@ -131,7 +134,12 @@ src/minus/
 Collaborators are injected rather than imported, and the seams are declared as
 protocols in `core/protocols.py` (`ChatModel`, `TranscriptSource`,
 `SpeechSynthesizer`, `FactStore`, `Embedder`). Swapping a model provider, TTS
-backend or fact store is a change to `cli.py`.
+backend or fact store is a change to `assembly.py`.
+
+The three top-level modules are layered, and only downwards: `cli.py` parses
+arguments and calls into `assembly.py`, which builds the object graph and hands
+it to `runtime.py`, which runs it and constructs none of it. That is what lets
+the tests drive a whole conversation with fakes and no entry point involved.
 
 ### Adding a tool
 
@@ -197,7 +205,7 @@ Known attributes are fed back into the extraction prompt so the model reuses
 ## Development
 
 ```bash
-uv run pytest             # 94 tests, no audio or torch needed
+uv run pytest             # 413 tests, no audio or torch needed
 uv run ruff check .
 uv run ruff format .
 uv run mypy src

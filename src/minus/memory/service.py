@@ -20,12 +20,12 @@ from typing import Any
 from uuid import uuid4
 
 from minus.config import Settings
-from minus.core.prompts import SYSTEM_PROMPT
 from minus.memory.condense import condense_conversation
 from minus.memory.extraction import extract_facts_from_conversation
 from minus.memory.facts.store import SqliteFactStore
 from minus.memory.transcript import TranscriptFile
 from minus.paths import condensed_conversations_dir, conversations_dir, semantic_memory_db
+from minus.prompts import SYSTEM_PROMPT
 from minus.services.json import serialize_json
 
 logger = logging.getLogger(__name__)

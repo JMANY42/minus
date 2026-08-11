@@ -11,10 +11,10 @@ from __future__ import annotations
 import pytest
 
 from minus.config import Settings
-from minus.core.prompts import RETRY_NOTE
 from minus.errors import GenerationFailedError, MalformedToolCallError
 from minus.llm.client import OpenRouterClient
 from minus.llm.retry import is_retryable_tool_call_error, validate_completion
+from minus.prompts import RETRY_NOTE
 
 from .fakes import FakeCompletion, FakeMessage, FakeToolCall
 

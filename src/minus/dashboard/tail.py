@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from minus.core.prompts import FACTS_MARKER
+from minus.prompts import FACTS_MARKER
 from minus.services.json import read_json
 
 # The run log's own format: a timestamp, then the level. Payloads logged with

@@ -13,7 +13,7 @@ import logging
 import re
 import time
 
-from minus.core.prompts import FACT_EXTRACTION_PROMPT
+from minus.prompts import FACT_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
 EXTRACTION_PROMPT = FACT_EXTRACTION_PROMPT

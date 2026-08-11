@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 
 import minus.core.agent as agent_module
-from minus.core.prompts import FACTS_MARKER
 from minus.errors import GenerationFailedError
+from minus.prompts import FACTS_MARKER
 from minus.tools.registry import ToolRegistry
 
 from .fakes import FakeChatModel, FakeCompletion, FakeFact, FakeMemory, FakeMessage, FakeToolCall

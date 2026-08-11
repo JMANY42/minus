@@ -472,7 +472,7 @@ class TestDelivery:
     def test_publishes_detail_speaks_the_summary_and_records_the_turn(self):
         import threading
 
-        from minus.cli import deliver_deep_result
+        from minus.runtime import deliver_deep_result
 
         sink = FakeDetailSink()
         assistant = self._assistant(sink)
@@ -493,7 +493,7 @@ class TestDelivery:
     def test_only_the_summary_reaches_the_transcript(self):
         import threading
 
-        from minus.cli import deliver_deep_result
+        from minus.runtime import deliver_deep_result
 
         assistant = self._assistant(FakeDetailSink())
         result = DeepResult(question="Why?", spoken="Short.", detail="A" * 5000)
@@ -514,8 +514,8 @@ class TestFullLoop:
     """
 
     def test_a_hard_question_is_acked_fast_then_answered_deeply(self):
-        from minus.cli import Assistant, conversation_loop
         from minus.core.agent import Conversation
+        from minus.runtime import Assistant, conversation_loop
 
         model = FakeChatModel(
             [
@@ -576,8 +576,8 @@ class TestFullLoop:
         assert model.calls[2]["reasoning_effort"] is None
 
     def test_an_ordinary_turn_never_touches_the_deep_tier(self):
-        from minus.cli import Assistant, conversation_loop
         from minus.core.agent import Conversation
+        from minus.runtime import Assistant, conversation_loop
 
         model = FakeChatModel([FakeCompletion(FakeMessage(content="Just after four."))])
         results: Queue = Queue()
@@ -610,7 +610,7 @@ class TestSystemPromptWiring:
     def test_escalation_guidance_is_opt_in(self):
         from pathlib import Path
 
-        from minus.core.prompts import build_system_prompt
+        from minus.prompts import build_system_prompt
 
         plain = build_system_prompt(Path("/tmp/ws"))
         with_escalation = build_system_prompt(Path("/tmp/ws"), can_escalate=True)

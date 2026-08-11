@@ -21,9 +21,9 @@ import logging
 from typing import Any
 
 from minus.core.messages import Message, Transcript
-from minus.core.prompts import FACTS_MARKER, RETRY_NOTE, SYSTEM_PROMPT
 from minus.errors import GenerationFailedError, LLMError, ToolError
 from minus.memory.service import MemoryManager
+from minus.prompts import FACTS_MARKER, RETRY_NOTE, SYSTEM_PROMPT
 from minus.services.json import pretty_json
 from minus.tools import registry as default_registry
 

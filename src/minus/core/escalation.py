@@ -41,8 +41,8 @@ from queue import Queue
 from typing import Any
 
 from minus.core.messages import Message
-from minus.core.prompts import DEEP_SYSTEM_PROMPT
 from minus.errors import ToolError
+from minus.prompts import DEEP_SYSTEM_PROMPT
 from minus.services.json import extract_json_object
 
 logger = logging.getLogger(__name__)

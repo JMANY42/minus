@@ -2,7 +2,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
-from minus.core.prompts import SYSTEM_PROMPT
+from minus.prompts import SYSTEM_PROMPT
 from minus.services.json import write_json
 
 logger = logging.getLogger(__name__)

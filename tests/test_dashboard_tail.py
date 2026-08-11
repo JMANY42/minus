@@ -7,7 +7,6 @@ __init__ is empty.
 
 from __future__ import annotations
 
-from minus.core.prompts import FACTS_MARKER
 from minus.dashboard.tail import (
     ConversationReader,
     DeepNoteReader,
@@ -17,6 +16,7 @@ from minus.dashboard.tail import (
     latest_log,
     render_messages,
 )
+from minus.prompts import FACTS_MARKER
 from minus.services.json import write_json
 
 

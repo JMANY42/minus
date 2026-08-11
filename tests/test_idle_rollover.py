@@ -10,13 +10,13 @@ import threading
 import time
 from queue import Queue
 
-from minus.cli import Assistant, deliver_deep_result, end_conversation_when_idle
 from minus.core.agent import Conversation
 from minus.core.escalation import DeepResult
 from minus.core.messages import Message, Transcript
 from minus.core.sources import MergedTranscriptSource
 from minus.memory.facts.store import SqliteFactStore
 from minus.memory.service import MemoryService
+from minus.runtime import Assistant, deliver_deep_result, end_conversation_when_idle
 
 from .fakes import FakeChatModel, FakeCompletion, FakeEmbedder, FakeMessage
 
