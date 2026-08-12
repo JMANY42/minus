@@ -8,6 +8,7 @@ server, which is where the interesting behaviour is anyway.
 
 from __future__ import annotations
 
+import time
 from queue import Queue
 
 import pytest
@@ -60,25 +61,38 @@ class FakeConversation:
         self.tools = FakeRegistry()
         self.transcript = Transcript()
         self.transcript.append(Message.user("hello"))
+        self.condensed = 0
+
+    def post_conversation(self) -> list[dict]:
+        self.condensed += 1
+        return [{"attribute": "favorite_band", "value": "queen"}]
+
+    def start_new_conversation(self) -> str:
+        self.transcript = Transcript()
+        return "20260811T090000Z-fresh"
 
 
 class FakeThinker:
     def status(self) -> dict:
-        return {"in_flight": False, "question": None, "elapsed_seconds": None}
+        return {"in_flight": False, "question": None, "elapsed_seconds": None, "started_at": None}
 
 
 @pytest.fixture
-def wired(short_socket_path):
-    interrupts = FakeInterrupts()
-    state = RuntimeState(pid=4242)
-    source = MergedTranscriptSource(None, idle_timeout=0)
-    assistant = Assistant(
+def assistant():
+    return Assistant(
         conversation=FakeConversation(),
         memory=FakeMemory(),
         thinker=FakeThinker(),
         results=Queue(),
         details=None,
     )
+
+
+@pytest.fixture
+def wired(short_socket_path, assistant):
+    interrupts = FakeInterrupts()
+    state = RuntimeState(pid=4242)
+    source = MergedTranscriptSource(None, idle_timeout=0)
     state.provide("deep", assistant.thinker.status)
 
     server = ControlServer(
@@ -216,6 +230,42 @@ class TestFactsOverTheSocket:
             store.close()
 
         assert [fact["value"] for fact in facts] == ["queen"]
+
+
+class TestEndConversation:
+    """The `e` key's command. The rollover itself is test_idle_rollover.py's."""
+
+    def test_it_answers_before_it_condenses(self, wired):
+        """Condensing is two model calls -- many times the client's timeout."""
+        client, _, _, _ = wired
+
+        assert client.request("end_conversation") == {"accepted": True}
+
+    def test_it_barges_in_first(self, wired):
+        """`immediately` has to mean during a reply too, or the floor is held."""
+        client, _, interrupts, _ = wired
+
+        client.request("end_conversation")
+
+        assert interrupts.generation == 1
+
+    def test_the_rollover_really_runs_and_is_announced(self, wired, assistant):
+        """A status event is the only way the caller learns it landed."""
+        client, _, _, _ = wired
+        events: list[dict] = []
+
+        with ControlClient(client.path, on_event=events.append) as watcher:
+            watcher.subscribe()
+            client.request("end_conversation")
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and len(events) < 2:
+                time.sleep(0.01)
+
+        assert assistant.conversation.condensed == 1
+        assert len(assistant.conversation.transcript) == 0
+        # The subscription's own snapshot, then the one the rollover pushed.
+        assert len(events) >= 2
 
 
 class TestShutdown:

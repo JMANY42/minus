@@ -175,6 +175,74 @@ class TestClientWithoutAServer:
             ControlClient(short_socket_path).connect()
 
 
+class TestNoticingTheServerGoAway:
+    """A killed assistant cannot send a farewell, so EOF is the whole signal.
+
+    Without this the dashboard's status bar stayed on its last known state
+    forever: nothing set `connected = False`, so its reconnect timer saw a
+    live connection every three seconds and never looked again.
+
+    Each of these makes a round trip before killing the server. That is not
+    ceremony: until a connection has actually been accepted it is still in the
+    listener's backlog, and closing the listener leaves such a peer blocked in
+    recv rather than waking it. The dashboard always calls `subscribe()`
+    immediately after connecting, so its connection is established by the time
+    any of this matters, and a server that dies in the gap is caught by that
+    request timing out instead.
+    """
+
+    def wait_for(self, closed: list, timeout: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    def test_the_server_going_away_is_reported(self, server):
+        closed: list[str] = []
+        with ControlClient(server.path, timeout=5.0, on_close=closed.append) as client:
+            client.request("ping")
+
+            server.close()
+            self.wait_for(closed)
+
+        assert len(closed) == 1
+        assert closed[0]
+
+    def test_closing_it_ourselves_is_not_reported(self, server):
+        """Every ordinary teardown would otherwise announce a disconnect."""
+        closed: list[str] = []
+        client = ControlClient(server.path, timeout=5.0, on_close=closed.append).connect()
+        client.request("ping")
+
+        client.close()
+        time.sleep(0.2)
+
+        assert closed == []
+
+    def test_it_is_reported_once(self, server):
+        """Closing after the peer already went is the dashboard's teardown."""
+        closed: list[str] = []
+        client = ControlClient(server.path, timeout=5.0, on_close=closed.append).connect()
+        client.request("ping")
+
+        server.close()
+        self.wait_for(closed)
+        client.close()
+        time.sleep(0.2)
+
+        assert len(closed) == 1
+
+    def test_a_client_without_the_callback_still_survives_it(self, server):
+        """on_close is optional; the reader thread must not raise without one."""
+        client = ControlClient(server.path, timeout=5.0).connect()
+        client.request("ping")
+
+        server.close()
+        time.sleep(0.2)
+
+        with pytest.raises(NotRunning):
+            client.request("ping")
+
+
 class TestBackpressure:
     def test_a_peer_that_never_reads_cannot_stall_the_assistant(self, server):
         """The conversation thread publishes state; it must never wait on a socket."""

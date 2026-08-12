@@ -2,11 +2,66 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, ClassVar
 
+from rich.table import Table
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import ContentSwitcher, Input, RichLog, Static
+
+# The label each role speaks under, and the style that label is drawn in. Rich
+# style names rather than the ansi_* ones theme.tcss is restricted to: this is
+# a renderable, not a stylesheet, and rich resolves these against the
+# terminal's own sixteen just as faithfully.
+SPEAKERS: dict[str, tuple[str, str]] = {
+    "user": ("you", "bold cyan"),
+    "assistant": ("minus", "bold green"),
+    "tool": ("·", "bright_black"),
+}
+
+# Wide enough for the longest label, which is "minus".
+SPEAKER_WIDTH = 5
+
+
+def render_turn(role: str, text: str) -> Table:
+    """One line of transcript: who spoke, then what they said.
+
+    A two-column grid rather than a prefixed string. It buys two things at
+    once: the label can carry its own style while the speech stays plain, and
+    rich wraps the speech inside its own column, so a long turn hangs under
+    itself instead of returning to the left wall. Doing that by hand with
+    textwrap would have to be redone on every resize.
+    """
+    label, label_style = SPEAKERS.get(role, (role, ""))
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(width=SPEAKER_WIDTH, justify="right", no_wrap=True, style=label_style)
+    grid.add_column(ratio=1, overflow="fold")
+    grid.add_row(label, Text(text, style="bright_black" if role == "tool" else ""))
+    return grid
+
+
+def deep_elapsed(deep: dict | None) -> float | None:
+    """How long the deep tier has been thinking, counted here rather than there.
+
+    The snapshot it comes from is pushed on state edges only, so the
+    `elapsed_seconds` in it is a reading taken when the tier started and never
+    moves afterwards -- which is why the timer used to stop a second or two in.
+    Counting from the wall-clock `started_at` instead means every redraw
+    produces a fresh number without asking the assistant for one.
+
+    Falls back to the frozen reading for an assistant too old to send a start
+    time, so a mismatched pair shows a stale timer rather than none at all.
+    """
+    if not deep or not deep.get("in_flight"):
+        return None
+    started_at = deep.get("started_at")
+    if started_at is None:
+        return deep.get("elapsed_seconds")
+    # Clamped: a clock stepped backwards between the two readings would
+    # otherwise count down through zero.
+    return max(0.0, time.time() - started_at)
 
 
 def ascii_bar(percent: float | None, width: int = 12) -> str:
@@ -109,28 +164,70 @@ class ViewerPane(Vertical):
 
 
 class PromptPane(Vertical):
-    """Type here; it reaches MINUS as though it had been spoken."""
+    """Type here; it reaches MINUS as though it had been spoken.
+
+    Just the one line. What you type used to be echoed into a log above it,
+    which said the same thing twice: the transcript above already shows the
+    turn as soon as MINUS records it.
+    """
 
     def __init__(self) -> None:
         super().__init__(id="prompt")
 
     def compose(self) -> ComposeResult:
-        yield RichLog(id="prompt-echo", markup=False, wrap=True, max_lines=200)
         yield Input(placeholder="say something…", id="prompt-input")
 
     def on_mount(self) -> None:
         self.border_title = "input"
 
-    def echo(self, line: str) -> None:
-        self.query_one("#prompt-echo", RichLog).write(line)
+
+class ConsolePane(Vertical):
+    """Everything the assistant writes to stdout and stderr.
+
+    Follows a file `minus serve` redirects its own descriptors into, which is
+    the same bargain the viewer strikes: reads come off the disk, so the
+    console still has yesterday's crash in it with nothing running.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="console")
+
+    def compose(self) -> ComposeResult:
+        # wrap=False to match the log view: console output is mostly
+        # tracebacks and progress bars, and folding those makes them harder
+        # to read rather than easier.
+        yield RichLog(id="console-body", markup=False, wrap=False, max_lines=2000)
+        yield Static(id="console-live")
+
+    def on_mount(self) -> None:
+        self.border_title = r"console  \[c]"
+
+    def write(self, line: str, style: str = "") -> None:
+        self.query_one("#console-body", RichLog).write(Text(line, style=style))
+
+    def show_live(self, text: str) -> None:
+        """Draw the line a writer is still overwriting, on its own row.
+
+        Kept out of the RichLog above deliberately. That widget has no way to
+        replace a line it has already rendered -- `lines` holds rendered
+        Strips, and rewriting one means repairing virtual_size, an internal
+        cache and the deferred-render queue that is live during backfill. A
+        row of its own costs one line and no private API, and it puts the
+        spinner where the eye already looks for a status line.
+        """
+        self.query_one("#console-live", Static).update(text)
 
 
-class Panel(Vertical):
+class Panel(Vertical, can_focus=True):
     """One management panel, collapsed to a summary until it is expanded.
 
     Subclasses fill in `summary()`. `options()` is where the expanded contents
     will go and returns nothing today -- deliberately, so that adding them
     later is a matter of returning a list rather than restructuring anything.
+
+    `can_focus` because a Vertical is not focusable by default, which left the
+    whole right-hand column unreachable by tab and an expanded panel with no
+    way to scroll what did not fit. Textual propagates it to the subclasses.
     """
 
     title = "panel"
@@ -145,7 +242,9 @@ class Panel(Vertical):
         yield Static(id="options")
 
     def on_mount(self) -> None:
-        self.border_title = f"{self.title}  [{self.hotkey}]"
+        # Escaped, or Textual reads the brackets as content markup and every
+        # panel silently loses the one thing that says which key opens it.
+        self.border_title = rf"{self.title}  \[{self.hotkey}]"
         self.redraw()
 
     def summary(self) -> str:
@@ -257,8 +356,26 @@ class AgentsPanel(Panel):
 
     def summary(self) -> str:
         deep = (self.data or {}).get("deep") or {}
-        if deep.get("in_flight"):
-            elapsed = deep.get("elapsed_seconds") or 0
+        elapsed = deep_elapsed(deep)
+        if elapsed is not None:
             question = (deep.get("question") or "")[:30]
             return f"  deep tier: thinking {elapsed:.0f}s\n  {question}"
         return "  deep tier: idle\n  no other agents"
+
+
+class ManagementPanel(Panel):
+    """Where changing MINUS from the dashboard will live.
+
+    Empty on purpose. The socket already carries `get_config`/`set_config`
+    (assembly.build_control_handlers), so this is the place those grow into
+    rather than a new one to invent later.
+    """
+
+    title = "management"
+    hotkey = "g"
+
+    def __init__(self) -> None:
+        super().__init__("panel-management")
+
+    def summary(self) -> str:
+        return "  (nothing here yet)"

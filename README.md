@@ -58,17 +58,40 @@ minus dash            # add --unicode for a terminal emulator rather than a VT
 │   ← conversation │ log │      │  HARDWARE                 [h] │
 │     deep think →              ├───────────────────────────────┤
 │                               │  TOOLS                    [t] │
-├───────────────────────────────┤───────────────────────────────┤
-│   input             (1/3)     │  EXTERNAL PROGRAMS        [p] │
-│   > _                         ├───────────────────────────────┤
-│                               │  AGENTS                   [a] │
+│                               ├───────────────────────────────┤
+├───────────────────────────────┤  EXTERNAL PROGRAMS        [p] │
+│   input             > _       ├───────────────────────────────┤
+├───────────────────────────────┤  AGENTS                   [a] │
+│   console  [c]      (1/3)     ├───────────────────────────────┤
+│   hidden until asked for      │  MANAGEMENT               [g] │
 └───────────────────────────────┴───────────────────────────────┘
 ```
 
-`←`/`→` switches the viewer, `m h t p a` expands a panel, `i` focuses the
-input, `escape` steps back out, `c` interrupts, `R` restarts the service, and
-`q` quits **the dashboard, not MINUS**. `ctrl+←`/`ctrl+→` switch the view
-without leaving the input box, which owns the bare arrow keys for its cursor.
+It opens holding nothing, so the letter keys are keys rather than typed text.
+`m h t p a g` expands a panel and focuses it, `v` focuses the viewer and `V`
+gives it the whole screen, `tab` walks everything, `enter` expands whatever is
+focused, `i` focuses the input, `s` stops MINUS mid-reply, `e` ends the current
+conversation and opens a fresh one, `c` opens the console, `R` restarts the
+service, and `q` quits **the dashboard, not MINUS**.
+
+`e` is the rollover a silence would eventually do, done now: the conversation
+is condensed, its facts are extracted into the store the next one starts from,
+and the transcript is dropped.
+
+Focus lives in exactly one place: opening a panel takes it off the viewer or
+the console, and pressing `v` or `c` collapses an expanded panel. Pressing the
+key for what you already have puts it back down. The one exception is `i` —
+you can type at the input box with a panel still enlarged behind it.
+
+`escape` walks back out the way you came: it drops fullscreen, then steps out
+of the input box back to the panel it was entered from, then collapses that
+panel, then closes the console, and finally lets go of focus altogether.
+
+The bare arrow keys belong to whatever has focus, so `←`/`→` scroll a wide log
+line sideways and `↑`/`↓` scroll a deep-think note. Both modified with `ctrl`
+move between things instead: `ctrl+←`/`ctrl+→` switch the view, and
+`ctrl+↑`/`ctrl+↓` page between deep-think notes. Those keep working while the
+input box has focus, which owns the bare arrows for its cursor.
 
 Built for the console on the machine itself: sixteen ANSI colours, ASCII
 borders and character meters, because the VT font has no block-drawing glyphs.
@@ -78,6 +101,13 @@ It is a separate process and a separate dependency. `minus serve` never
 imports textual. Reads come from the files MINUS already writes, so the log,
 the conversation and the deep-think notes still render with the assistant
 stopped -- only the input box needs the socket.
+
+The console follows the same bargain. `minus serve` redirects its own stdout
+and stderr into `logs/console-*.log` before anything can write to them, which
+is the only way to catch what the C extensions print: they write to the file
+descriptors directly and have never heard of the logging module. Under
+systemd that output went to `/dev/null` and the journal, where the dashboard
+could not reach it.
 
 The expanded panels are scaffolding: each one says "nothing here yet", and
 filling one in means returning a list from its `options()`.

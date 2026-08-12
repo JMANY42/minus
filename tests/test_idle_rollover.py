@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+import types
 from queue import Queue
 
 from minus.core.agent import Conversation
@@ -16,7 +17,12 @@ from minus.core.messages import Message, Transcript
 from minus.core.sources import MergedTranscriptSource
 from minus.memory.facts.store import SqliteFactStore
 from minus.memory.service import MemoryService
-from minus.runtime import Assistant, deliver_deep_result, end_conversation_when_idle
+from minus.runtime import (
+    Assistant,
+    deliver_deep_result,
+    end_conversation_now,
+    end_conversation_when_idle,
+)
 
 from .fakes import FakeChatModel, FakeCompletion, FakeEmbedder, FakeMessage
 
@@ -62,7 +68,9 @@ def build(*, said: bool = True, in_flight: bool = False, facts=None):
 
     assistant = Assistant(
         conversation=conversation,
-        memory=None,
+        # Only ever read for which conversation is open, which is the one thing
+        # a rollover that decides to do nothing still has to report.
+        memory=types.SimpleNamespace(conversation_id="conv-0"),
         thinker=FakeThinker(in_flight=in_flight),
         results=Queue(),
         details=None,
@@ -112,6 +120,72 @@ def test_rolls_over_once_the_deep_answer_has_landed():
 
     assert end_conversation_when_idle(assistant, floor) is True
     assert conversation.condensed == 1
+
+
+class TestEndingItOnRequest:
+    """The deliberate version, which declines nothing the idle one would.
+
+    Every refusal in `end_conversation_when_idle` exists because a silence is
+    only a guess that the conversation is over. Being asked is not a guess.
+    """
+
+    def test_condenses_and_starts_a_fresh_conversation(self):
+        assistant, conversation = build(facts=[{"attribute": "x", "value": "y"}])
+
+        result = end_conversation_now(assistant, threading.Lock())
+
+        assert result == {"conversation_id": "conv-1", "facts": 1}
+        assert conversation.condensed == 1
+        assert len(conversation.transcript) == 0
+
+    def test_an_empty_conversation_is_left_alone(self):
+        """The conversation it would open is the one already open."""
+        assistant, conversation = build(said=False)
+
+        result = end_conversation_now(assistant, threading.Lock())
+
+        assert conversation.condensed == 0
+        assert conversation.started == []
+        assert result == {"conversation_id": "conv-0", "facts": 0}
+
+    def test_it_does_not_wait_for_a_deep_answer(self):
+        """The idle path waits; this one was asked for, so it goes ahead."""
+        assistant, conversation = build(in_flight=True)
+
+        end_conversation_now(assistant, threading.Lock())
+
+        assert conversation.condensed == 1
+        assert conversation.started == ["conv-1"]
+
+    def test_the_fresh_conversation_starts_with_a_full_silence(self):
+        """It must not inherit the quiet that led to the request and roll over."""
+        marked: list[int] = []
+        assistant, _ = build()
+
+        end_conversation_now(
+            assistant,
+            threading.Lock(),
+            types.SimpleNamespace(mark_activity=lambda: marked.append(1)),
+        )
+
+        assert marked == [1]
+
+    def test_it_waits_for_the_floor(self):
+        """A reply being spoken is still being appended to the transcript."""
+        assistant, conversation = build()
+        floor = threading.Lock()
+
+        done = threading.Event()
+        with floor:
+            threading.Thread(
+                target=lambda: (end_conversation_now(assistant, floor), done.set()),
+                daemon=True,
+            ).start()
+            assert not done.wait(0.2)
+            assert conversation.condensed == 0
+
+        assert done.wait(2)
+        assert conversation.condensed == 1
 
 
 class RecentlySpoke:

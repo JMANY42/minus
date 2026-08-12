@@ -48,6 +48,7 @@ from minus.prompts import build_system_prompt
 from minus.runtime import (
     Assistant,
     conversation_loop,
+    end_conversation_now,
     end_conversation_on_sigterm,
     end_conversation_when_idle,
 )
@@ -259,13 +260,21 @@ def build_config_controller(
     )
 
 
-def build_control_handlers(assistant: Assistant, source, interrupts, state, config=None) -> dict:
+def build_control_handlers(
+    assistant: Assistant, source, interrupts, state, config=None, floor=None
+) -> dict:
     """What the control socket is allowed to ask of a running assistant.
 
     Built here because this is the module that knows the object graph. The
     server itself takes a table of callables and has no idea what any of them
     mean, which is what keeps it testable with a handful of lambdas.
+
+    `floor` must be the lock the conversation loop holds, or a command that
+    touches the transcript can run while a turn is being spoken into it. A
+    fresh one is made when it is absent so this stays callable with the four
+    collaborators a test cares about.
     """
+    floor = floor if floor is not None else threading.Lock()
 
     def say(params: dict) -> dict:
         text = params.get("text")
@@ -277,6 +286,32 @@ def build_control_handlers(assistant: Assistant, source, interrupts, state, conf
         # the real thing, including cutting off a reply already in progress.
         interrupts.request()
         source.submit(text.strip())
+        return {"accepted": True}
+
+    def roll_over() -> None:
+        try:
+            end_conversation_now(assistant, floor, source)
+        except Exception:
+            logger.exception("Ending the conversation on request failed")
+        # Either way: the conversation section of the snapshot is read fresh,
+        # so this is what tells a dashboard which conversation it is now
+        # looking at -- and, when it failed, that it is still the old one.
+        state.touch()
+
+    def end_conversation(params: dict) -> dict:
+        """End the current conversation now, and open a fresh one.
+
+        Answered before the work is done, and the work is done on a thread of
+        its own. Condensing is two model calls, which is many times the
+        client's request timeout -- so doing it inline would report a failure
+        for something that had in fact worked, and would block this connection
+        throughout. What actually happened arrives as a status event instead.
+        """
+        # Barge in first, for the same reason `say` does: "now" has to mean
+        # during a reply too, and the floor the rollover takes is held for as
+        # long as one is still being spoken.
+        interrupts.request()
+        threading.Thread(target=roll_over, name="end-conversation", daemon=True).start()
         return {"accepted": True}
 
     def limit_of(params: dict, default: int = 20) -> int:
@@ -309,6 +344,7 @@ def build_control_handlers(assistant: Assistant, source, interrupts, state, conf
         "get_status": lambda params: state.snapshot(),
         "say": say,
         "interrupt": lambda params: {"generation": interrupts.request()},
+        "end_conversation": end_conversation,
         "list_tools": lambda params: [
             {
                 "name": schema["function"]["name"],
@@ -364,14 +400,16 @@ def run_assistant(
     # too, and one decorator covers both callers and any future third.
     speaker = ObservedSpeaker(voice, state)
 
-    # Free, and the best available use of the existing bus: the microphone
-    # already calls interrupts.request() from on_vad_start, so this is a real
-    # "the user is talking right now" indicator with no change to stt.py.
-    interrupts.subscribe(lambda: state.set_phase(HEARING))
-
     primary: Any = None
     if use_mic:
-        primary = MicrophoneTranscriptSource(interrupts, settings)
+        # Wired to the microphone's own voice detection rather than to the
+        # interrupt bus. Subscribing to the bus was free and wrong: every
+        # interrupt reported speech, so pressing `s` in the dashboard -- or
+        # Ctrl-C, or injecting a line -- left the assistant claiming to be
+        # hearing someone with nothing to hear and nothing to move it back.
+        primary = MicrophoneTranscriptSource(
+            interrupts, settings, on_speech=lambda: state.set_phase(HEARING)
+        )
     elif interactive:
         primary = CliTranscriptSource(interrupts)
     # Otherwise the socket is the only way in. A CLI source on a dead stdin
@@ -404,6 +442,7 @@ def run_assistant(
                 interrupts,
                 state,
                 build_config_controller(assistant, voice, source, settings),
+                floor=floor,
             ),
             state=state,
         )

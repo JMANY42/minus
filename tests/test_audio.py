@@ -21,7 +21,7 @@ import pytest
 
 from minus.audio.chunking import split_text_into_chunks
 from minus.audio.interrupt import InterruptBus, barge_in_on_sigint
-from minus.audio.stt import CliTranscriptSource, is_exit_phrase
+from minus.audio.stt import CliTranscriptSource, MicrophoneTranscriptSource, is_exit_phrase
 
 
 class TestInterruptBus:
@@ -265,6 +265,69 @@ class TestCliTranscriptSource:
 
         with patch.object(builtins, "input", side_effect=["first", KeyboardInterrupt()]):
             assert list(source) == ["first"]
+
+
+class TestSpeechOnset:
+    """Who is told that the microphone can hear a voice, and who is not.
+
+    The phase used to be reported off the interrupt bus, which made every
+    interrupt look like speech: pressing `s` in the dashboard put a listening
+    assistant into `hearing` with nothing to hear and nothing to bring it back.
+    """
+
+    def source(self, heard: list[int]):
+        return MicrophoneTranscriptSource(InterruptBus(), on_speech=lambda: heard.append(1))
+
+    def test_voice_activity_reports_speech_and_barges_in(self):
+        heard: list[int] = []
+        source = self.source(heard)
+
+        source._on_voice_activity()
+
+        assert heard == [1]
+        assert source.interrupts.token() == 1
+
+    def test_a_realtime_update_reports_speech(self):
+        heard: list[int] = []
+        source = self.source(heard)
+
+        source._on_realtime_update("what time")
+
+        assert heard == [1]
+
+    def test_an_empty_update_reports_nothing(self):
+        heard: list[int] = []
+        source = self.source(heard)
+
+        source._on_realtime_update("   ")
+
+        assert heard == []
+
+    def test_an_interrupt_from_elsewhere_is_not_speech(self):
+        """The whole point: the dashboard's stop key must not claim a voice."""
+        heard: list[int] = []
+        source = self.source(heard)
+
+        source.interrupts.request()
+
+        assert heard == []
+
+    def test_a_broken_watcher_does_not_break_the_microphone(self):
+        def explode() -> None:
+            raise RuntimeError("the dashboard fell over")
+
+        source = MicrophoneTranscriptSource(InterruptBus(), on_speech=explode)
+
+        source._on_voice_activity()  # must not raise
+
+        assert source.interrupts.token() == 1
+
+    def test_it_works_with_nobody_watching(self):
+        source = MicrophoneTranscriptSource(InterruptBus())
+
+        source._on_voice_activity()
+
+        assert source.interrupts.token() == 1
 
 
 class TestChunking:

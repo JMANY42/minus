@@ -150,6 +150,54 @@ def end_conversation_when_idle(assistant: Assistant, floor: threading.Lock, sour
     return True
 
 
+def end_conversation_now(assistant: Assistant, floor: threading.Lock, source=None) -> dict:
+    """End the current conversation because somebody asked, and open a fresh one.
+
+    The deliberate twin of `end_conversation_when_idle`, and deliberately
+    without its refusals. Those exist because a silence is only a guess that
+    the conversation is over -- an empty transcript or a deep answer still
+    coming means the guess was wrong. A request is not a guess, so the only
+    thing kept from that path is the floor: condensing while a reply is being
+    spoken would read a transcript that is still being written.
+
+    A deep answer still in flight will be delivered into the new conversation
+    rather than the one it was asked in. Logged rather than refused, since
+    holding the old conversation open would ignore what was actually asked for.
+
+    Slow -- condensing and fact extraction are two model calls -- so the caller
+    is responsible for not running this anywhere that something is waiting on
+    an answer.
+    """
+    conversation = assistant.conversation
+
+    with floor:
+        if not conversation.transcript:
+            # Nothing to condense, and nothing to roll over to: the conversation
+            # this would open is the one already open. Saying so is better than
+            # leaving another empty file behind on every press.
+            logger.info("Asked to end an empty conversation; it is already a fresh one.")
+            return {"conversation_id": assistant.memory.conversation_id, "facts": 0}
+
+        if assistant.thinker.status()["in_flight"]:
+            logger.info(
+                "Ending the conversation with a deep answer still coming; "
+                "it will be delivered into the next one."
+            )
+
+        facts = conversation.post_conversation()
+        conversation_id = conversation.start_new_conversation()
+
+    # The idle clock has been running through whatever silence led to this, and
+    # the fresh conversation should not inherit it and roll over immediately.
+    if source is not None:
+        source.mark_activity()
+
+    logger.info("Conversation ended on request. Now recording to %s", conversation_id)
+    if facts:
+        logger.info("Facts extracted from the finished conversation:\n%s", pretty_json(facts))
+    return {"conversation_id": conversation_id, "facts": len(facts)}
+
+
 def conversation_loop(
     transcripts, assistant, speaker, floor, mark_activity=None, state=None
 ) -> None:

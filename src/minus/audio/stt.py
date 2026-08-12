@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from minus.audio.interrupt import InterruptBus
@@ -54,11 +54,25 @@ class CliTranscriptSource:
 
 
 class MicrophoneTranscriptSource:
-    """RealtimeSTT-backed microphone input with barge-in."""
+    """RealtimeSTT-backed microphone input with barge-in.
 
-    def __init__(self, interrupts: InterruptBus, settings: Any | None = None) -> None:
+    `on_speech` fires when the recorder decides somebody is talking. It is
+    separate from the interrupt bus on purpose, even though both fire from the
+    same two callbacks: barge-in is "stop what you are doing", which anything
+    may ask for, while this is "the microphone can hear a voice", which only
+    the microphone can know. Reporting the phase off the bus meant every
+    interrupt claimed there was speech.
+    """
+
+    def __init__(
+        self,
+        interrupts: InterruptBus,
+        settings: Any | None = None,
+        on_speech: Callable[[], None] | None = None,
+    ) -> None:
         self.interrupts = interrupts
         self.settings = settings
+        self.on_speech = on_speech
         self._recorder: Any | None = None
         self._recorder_lock = threading.Lock()
 
@@ -82,12 +96,23 @@ class MicrophoneTranscriptSource:
             recorder.shutdown()
 
     # These fire on RealtimeSTT's own threads.
-    def _on_voice_activity(self, *args: Any, **kwargs: Any) -> None:
+    def _heard_speech(self) -> None:
         self.interrupts.request()
+        if self.on_speech is None:
+            return
+        try:
+            self.on_speech()
+        except Exception:
+            # A watcher that has gone wrong must not take the microphone with
+            # it, exactly as InterruptBus contains its own subscribers.
+            logger.exception("The speech-onset callback raised")
+
+    def _on_voice_activity(self, *args: Any, **kwargs: Any) -> None:
+        self._heard_speech()
 
     def _on_realtime_update(self, text: str) -> None:
         if text and text.strip():
-            self.interrupts.request()
+            self._heard_speech()
 
     def create_recorder(self) -> Any:
         from RealtimeSTT import AudioToTextRecorder

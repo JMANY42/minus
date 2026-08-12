@@ -99,6 +99,77 @@ class TestLogTailer:
         assert tailer.poll() == []
 
 
+class TestCarriageReturns:
+    """A spinner is one line being redrawn, not a thousand lines.
+
+    Opening the file in text mode used to translate every \\r into \\n during
+    the read, so halo's `\\r\\r<glyph> speak now` arrived indistinguishable from
+    real output and filled the console at ten lines a second.
+    """
+
+    def test_a_redrawn_line_collapses_to_what_is_left_on_screen(self, tmp_path):
+        path = tmp_path / "console-1.log"
+        path.write_bytes(b"a\rb\rc\n")
+
+        assert LogTailer(path).poll() == ["c"]
+
+    def test_a_spinner_produces_no_lines_at_all(self, tmp_path):
+        """It never emits a newline until it stops, so nothing is complete."""
+        path = tmp_path / "console-1.log"
+        path.write_bytes("\r⠋ speak now\r⠙ speak now".encode())
+        tailer = LogTailer(path)
+
+        assert tailer.poll() == []
+        assert tailer.current == "⠙ speak now"
+
+    def test_the_held_back_bytes_do_not_grow_with_the_spinner(self, tmp_path):
+        """Otherwise minutes of frames pile up and flush at once."""
+        path = tmp_path / "console-1.log"
+        path.write_bytes(b"\rframe 0")
+        tailer = LogTailer(path)
+        tailer.poll()
+
+        with path.open("ab") as handle:
+            for index in range(1, 200):
+                handle.write(f"\rframe {index}".encode())
+        tailer.poll()
+
+        assert tailer.current == "frame 199"
+        assert len(tailer._pending) < 40
+
+    def test_the_spinner_line_is_committed_once_it_ends(self, tmp_path):
+        path = tmp_path / "console-1.log"
+        path.write_bytes(b"\rworking\rdone\n")
+
+        assert LogTailer(path).poll() == ["done"]
+
+    def test_crlf_endings_are_not_counted_short(self, tmp_path):
+        """Text mode decoded \\r\\n to one byte, so the offset drifted backwards."""
+        path = tmp_path / "console-1.log"
+        path.write_bytes(b"first\r\nsecond\r\n")
+        tailer = LogTailer(path)
+        tailer.poll()
+
+        with path.open("ab") as handle:
+            handle.write(b"third\r\n")
+
+        assert tailer.poll() == ["third"]
+
+    def test_a_partial_line_without_a_carriage_return_is_still_held(self, tmp_path):
+        path = tmp_path / "console-1.log"
+        path.write_bytes(b"complete\npart")
+        tailer = LogTailer(path)
+
+        assert tailer.poll() == ["complete"]
+        assert tailer.current == "part"
+
+    def test_backfill_collapses_redrawn_lines_too(self, tmp_path):
+        path = tmp_path / "console-1.log"
+        path.write_bytes(b"one\n\ra\rb\rc\n")
+
+        assert LogTailer(path).backfill() == ["one", "c"]
+
+
 class TestLogLineStyler:
     def test_styles_by_level(self):
         styler = LogLineStyler()

@@ -23,7 +23,7 @@ from queue import Queue
 from minus.assembly import build_fast_tools, run_assistant
 from minus.config import Settings, load_settings
 from minus.core.escalation import DeepThinker
-from minus.logging_config import setup_logging
+from minus.logging_config import redirect_console, setup_logging
 from minus.paths import control_socket, project_root, semantic_memory_db
 
 logger = logging.getLogger(__name__)
@@ -178,13 +178,20 @@ def run_serve(settings: Settings, use_mic: bool) -> None:
     handler, because journald already receives the file log's contents once and
     does not need them twice, and no CLI transcript source, because there is no
     stdin worth reading.
+
+    Its own stdout and stderr are captured to a file first, before anything has
+    had a chance to write to them. Without a terminal they otherwise go to
+    /dev/null and the journal, so the dependencies' unlogged chatter -- and a
+    faulthandler dump, which is exactly what you want when this hangs -- were
+    somewhere the dashboard could not follow.
     """
+    console_file = redirect_console(retention=settings.log_retention)
     log_file = setup_logging(
         level=settings.log_level,
         retention=settings.log_retention,
         console=False,
     )
-    logger.info("Serving; logging to %s", log_file)
+    logger.info("Serving; logging to %s, console to %s", log_file, console_file)
 
     _install_stack_dumper()
     run_assistant(settings, use_mic=use_mic, control=True, interactive=False)

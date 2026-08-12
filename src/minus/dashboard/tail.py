@@ -52,22 +52,55 @@ def latest_log(directory: Path, prefix: str = "run") -> Path | None:
     return logs[-1] if logs else None
 
 
+def visible(line: str) -> str:
+    """What a terminal would have left on screen after drawing `line`.
+
+    Only the text after the last carriage return: everything before it was
+    overwritten in place. Spinners and progress bars are built entirely out of
+    this, and without it each frame reads as a line of its own.
+
+    One trailing `\\r` is dropped first, since a CRLF line ends with the `\\r`
+    of its own terminator -- treating that as an overwrite would blank every
+    line of a file that happens to use DOS endings.
+    """
+    if line.endswith("\r"):
+        line = line[:-1]
+    return line.rpartition("\r")[2]
+
+
 class LogTailer:
-    """Incremental reads of a growing file."""
+    """Incremental reads of a growing file.
+
+    Reads bytes rather than text on purpose. Opening in text mode applies
+    universal newlines, which rewrites every `\\r` to `\\n` during the read --
+    at which point a spinner frame is indistinguishable from a log line and no
+    amount of work further down can tell them apart again. It also made the
+    offset drift, since it was recovered by re-encoding the decoded text and a
+    `\\r\\n` came back a byte short.
+    """
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path
         self._offset = 0
         self._inode: int | None = None
         self._header = b""
-        self._partial = ""
+        self._pending = b""
 
     def reset(self, path: Path | None) -> None:
         self.path = path
         self._offset = 0
         self._inode = None
         self._header = b""
-        self._partial = ""
+        self._pending = b""
+
+    @property
+    def current(self) -> str:
+        """The line being overwritten in place, if a writer is mid-line.
+
+        A spinner never emits a newline until it stops, so this is where it
+        lives -- shown on its own row rather than appended to the scrollback.
+        """
+        return visible(self._pending.decode("utf-8", errors="replace"))
 
     def _read_header(self) -> bytes:
         """The first few bytes, as a cheap identity check.
@@ -108,7 +141,7 @@ class LogTailer:
             or not header.startswith(self._header)
         ):
             self._offset = 0
-            self._partial = ""
+            self._pending = b""
 
         self._inode = stat.st_ino
         self._header = header
@@ -116,20 +149,26 @@ class LogTailer:
         if stat.st_size <= self._offset:
             return []
 
-        with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+        with self.path.open("rb") as handle:
             handle.seek(self._offset)
-            chunk = handle.read(MAX_READ_BYTES)
-            self._offset += len(chunk.encode("utf-8", errors="replace"))
+            raw = handle.read(MAX_READ_BYTES)
+            self._offset += len(raw)
 
-        text = self._partial + chunk
-        # A read can land mid-line; hold the remainder back rather than
-        # displaying half a message and then the other half as its own line.
-        if not text.endswith("\n"):
-            text, _, self._partial = text.rpartition("\n")
-        else:
-            self._partial = ""
+        # Held back as bytes, not text: a read can land in the middle of a
+        # multi-byte character as easily as in the middle of a line, and
+        # decoding the halves separately would replace both.
+        data = self._pending + raw
+        head, newline, tail = data.rpartition(b"\n")
+        self._pending = tail if newline else data
 
-        return text.splitlines()
+        # Nothing before the last carriage return can still be seen, so it can
+        # never be needed again. Dropping it is also what bounds this buffer
+        # during a spinner that runs for minutes without a single newline.
+        self._pending = self._pending.rpartition(b"\r")[2]
+
+        if not newline:
+            return []
+        return [visible(line) for line in head.decode("utf-8", errors="replace").split("\n")]
 
     def backfill(self, lines: int = 400) -> list[str]:
         """The tail of the file, for a viewer that has just opened."""
@@ -137,17 +176,26 @@ class LogTailer:
             return []
 
         stat = self.path.stat()
-        with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+        with self.path.open("rb") as handle:
             if stat.st_size > MAX_READ_BYTES:
                 handle.seek(stat.st_size - MAX_READ_BYTES)
                 handle.readline()  # discard the partial line seeking landed in
-            text = handle.read()
+            raw = handle.read()
 
         self._offset = stat.st_size
         self._inode = stat.st_ino
         self._header = self._read_header()
-        self._partial = ""
-        return text.splitlines()[-lines:]
+
+        # The same holdback poll() does. A file that ends mid-line -- which is
+        # the normal state of one a spinner is writing to -- must not have its
+        # unfinished last line committed to the scrollback.
+        head, newline, tail = raw.rpartition(b"\n")
+        self._pending = (tail if newline else raw).rpartition(b"\r")[2]
+        if not newline:
+            return []
+
+        text = head.decode("utf-8", errors="replace")
+        return [visible(line) for line in text.split("\n")][-lines:]
 
 
 class LogLineStyler:

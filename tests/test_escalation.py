@@ -10,6 +10,7 @@ what "already thinking" needs in order to be observable.
 from __future__ import annotations
 
 import threading
+import time
 import types
 from queue import Queue
 
@@ -130,6 +131,7 @@ class TestStatus:
             "in_flight": False,
             "question": None,
             "elapsed_seconds": None,
+            "started_at": None,
         }
 
     def test_reports_the_question_while_in_flight(self):
@@ -152,6 +154,21 @@ class TestStatus:
         # A monotonic reading is uptime-sized; a duration measured just now is
         # not. Anything under a second can only be the latter.
         assert 0 <= elapsed < 1
+
+    def test_the_start_time_is_a_wall_clock_reading(self):
+        """A watcher subtracts it from its own time.time() to keep counting.
+
+        The elapsed figure beside it is frozen the moment the snapshot is
+        taken, and snapshots are pushed on edges -- so without this the
+        dashboard's timer stopped a second or two into every escalation.
+        """
+        thinker, _, _ = build_thinker([answer()], executor=StalledExecutor())
+
+        thinker.escalate("Why is this slow?")
+        started_at = thinker.status()["started_at"]
+
+        assert started_at is not None
+        assert abs(time.time() - started_at) < 1
 
     def test_reports_idle_once_the_answer_has_landed(self):
         thinker, _, results = build_thinker([answer()])

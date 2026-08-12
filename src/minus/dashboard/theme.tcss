@@ -42,7 +42,11 @@ Screen {
     width: 1fr;
 }
 
-/* The requested split: viewer two thirds, input one third. */
+/* Two thirds viewer, one third console, with the input pinned to the single
+ * line it needs between them. The console is where the echo box used to be
+ * and takes the same block, so opening it costs the viewer exactly what the
+ * echo box cost it before. Hidden it is not laid out at all, and the viewer
+ * -- then the only flexible child -- takes the whole column. */
 #viewer {
     height: 2fr;
     border: ascii ansi_bright_black;
@@ -50,9 +54,31 @@ Screen {
 }
 
 #prompt {
+    height: 3;
+    border: ascii ansi_bright_black;
+    border-title-color: ansi_bright_white;
+}
+
+#console {
+    display: none;
     height: 1fr;
     border: ascii ansi_bright_black;
     border-title-color: ansi_bright_white;
+}
+
+#console.-shown {
+    display: block;
+}
+
+#console-body {
+    height: 1fr;
+}
+
+/* The line a spinner or progress bar is still overwriting. One row, pinned
+ * below the scrollback, so it can change in place without the log growing. */
+#console-live {
+    height: 1;
+    color: ansi_bright_black;
 }
 
 #viewer-tabs {
@@ -65,14 +91,19 @@ Screen {
     height: 1fr;
 }
 
-#prompt-echo {
-    height: 1fr;
+/* No border of its own: #prompt is already a bordered pane, and with the echo
+ * box gone there is nothing inside it to separate the input from. */
+#prompt-input {
+    height: 1;
+    border: none;
+    background: ansi_black;
 }
 
-#prompt-input {
-    height: 3;
-    border: ascii ansi_bright_black;
-    background: ansi_black;
+/* V, or enter from inside the viewer: everything else stops being laid out. */
+#body.-viewer-full #prompt,
+#body.-viewer-full #console,
+#body.-viewer-full #right {
+    display: none;
 }
 
 Panel {
@@ -82,10 +113,13 @@ Panel {
 }
 
 /* Expansion is two class toggles and no screen stack: the chosen panel keeps
- * its 1fr and the others stop being laid out at all. */
+ * its 1fr and the others stop being laid out at all.
+ *
+ * A brighter yellow than the focus border below, because a panel can now be
+ * both at once and the two used to be the same colour. */
 Panel.-expanded {
     height: 1fr;
-    border: ascii ansi_yellow;
+    border: ascii ansi_bright_yellow;
 }
 
 Panel.-hidden {
@@ -105,7 +139,20 @@ Panel.-expanded #options {
     height: auto;
 }
 
-*:focus {
+/* Focus is marked on the bordered pane, not the widget inside it.
+ *
+ * A blanket `*:focus` was the obvious thing and the wrong one: it is a
+ * universal selector, so the id rules above beat it, and #viewer and #prompt
+ * kept their grey border while some invisible child claimed the highlight.
+ * `:focus-within` puts it on the frame the eye is actually looking for, and
+ * moving focus to a panel takes it off both. */
+#viewer:focus-within,
+#prompt:focus-within,
+#console:focus-within {
+    border: ascii ansi_yellow;
+}
+
+Panel:focus {
     border: ascii ansi_yellow;
 }
 

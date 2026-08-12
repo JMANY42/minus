@@ -173,6 +173,7 @@ class DeepThinker:
         self._busy = False
         self._question: str | None = None
         self._started_at = 0.0
+        self._started_at_wall = 0.0
         self._recent: list[DeepResult] = []
         self._snapshot: Callable[[], list[dict]] = list
 
@@ -196,16 +197,25 @@ class DeepThinker:
     def status(self) -> dict:
         """What the deep tier is doing, for anything that needs to wait on it.
 
-        Reports `elapsed_seconds` rather than the start time on purpose:
-        `_started_at` is a `time.monotonic()` reading, which is meaningful only
-        inside this process and would be nonsense to a dashboard reading it
-        over a socket.
+        Two clocks, because two kinds of reader need different things.
+        `elapsed_seconds` is measured from `_started_at`, a `time.monotonic()`
+        reading that is meaningful only inside this process, and answers the
+        question a one-shot caller asks: how long has this been going?
+
+        A dashboard needs more than that. A snapshot is pushed on state
+        *edges*, so between them a client redrawing once a second has nothing
+        newer to draw and its timer sits still -- which is exactly what it did.
+        `started_at` is a wall-clock reading it can subtract from its own
+        `time.time()` to keep counting between snapshots. Safe because the
+        control channel is a unix socket: the reader is on this machine, and
+        therefore on this clock.
         """
         with self._lock:
             return {
                 "in_flight": self._busy,
                 "question": self._question,
                 "elapsed_seconds": (time.monotonic() - self._started_at if self._busy else None),
+                "started_at": self._started_at_wall if self._busy else None,
             }
 
     # ---- Wiring ----
@@ -270,6 +280,7 @@ class DeepThinker:
             self._busy = True
             self._question = question
             self._started_at = time.monotonic()
+            self._started_at_wall = time.time()
 
         # Announced before submit(), not after: an inline executor runs the
         # job on this thread, so a notification after the call would arrive

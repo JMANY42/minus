@@ -8,11 +8,19 @@ suite's logging into a temporary directory that no longer exists.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 
 import pytest
 
 from minus import paths
-from minus.logging_config import prune_old_logs, setup_logging
+from minus.logging_config import (
+    CONSOLE_PREFIX,
+    prune_old_logs,
+    redirect_console,
+    setup_logging,
+)
 
 
 @pytest.fixture
@@ -26,6 +34,21 @@ def logs(tmp_path, monkeypatch):
         handler.close()
     root.handlers[:] = saved_handlers
     root.setLevel(saved_level)
+
+
+@pytest.fixture
+def streams():
+    """Hold on to fds 1 and 2, since the thing under test replaces them.
+
+    Without this the first redirect would take pytest's own output with it and
+    everything after would report into a temporary directory.
+    """
+    saved = os.dup(1), os.dup(2)
+    yield
+    os.dup2(saved[0], 1)
+    os.dup2(saved[1], 2)
+    for descriptor in saved:
+        os.close(descriptor)
 
 
 def handler_kinds() -> list[str]:
@@ -58,6 +81,77 @@ class TestFileNaming:
 
     def test_prefix_names_the_file(self, logs):
         assert setup_logging(prefix="dash").name.startswith("dash-")
+
+
+class TestRedirectConsole:
+    def test_it_writes_under_its_own_prefix(self, logs, streams):
+        """Distinct from run-, or each file would show up in the other's viewer."""
+        path = redirect_console()
+
+        assert path.name.startswith(f"{CONSOLE_PREFIX}-")
+        assert path.parent == logs
+
+    def test_a_raw_write_to_the_descriptor_lands_in_it(self, logs, streams):
+        """The point of dup2: the noisy writers here never touch sys.stdout."""
+        path = redirect_console()
+
+        os.write(1, b"loading model\n")
+
+        assert "loading model" in path.read_text(encoding="utf-8")
+
+    def test_stderr_lands_in_the_same_file(self, logs, streams):
+        """One console, as a terminal would have shown it."""
+        path = redirect_console()
+
+        os.write(2, b"Traceback (most recent call last):\n")
+
+        assert "Traceback" in path.read_text(encoding="utf-8")
+
+    def test_a_print_is_not_held_back_by_the_block_buffer(self, tmp_path):
+        """Writing to a file Python block-buffers, and a tail would see nothing.
+
+        In a subprocess because pytest replaces sys.stdout with a capture
+        object that never reaches fd 1, so the buffering being tested here
+        cannot be observed in-process. It exits through os._exit to skip the
+        flush interpreter shutdown would otherwise do for us, which would hide
+        exactly the bug this is about.
+        """
+        script = (
+            "import os\n"
+            "from minus.logging_config import redirect_console\n"
+            "redirect_console()\n"
+            "print('still here')\n"
+            "os._exit(0)\n"
+        )
+        subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            env={**os.environ, "MINUS_PROJECT_ROOT": str(tmp_path)},
+        )
+
+        written = sorted((tmp_path / "logs").glob(f"{CONSOLE_PREFIX}-*.log"))
+
+        assert len(written) == 1
+        assert "still here" in written[0].read_text(encoding="utf-8")
+
+    def test_it_prunes_only_its_own_prefix(self, logs, streams):
+        logs.mkdir(parents=True, exist_ok=True)
+        for index in range(3):
+            (logs / f"{CONSOLE_PREFIX}-{index}.log").write_text("x", encoding="utf-8")
+            (logs / f"run-{index}.log").write_text("x", encoding="utf-8")
+
+        redirect_console(retention=1)
+
+        assert len(list(logs.glob("run-*.log"))) == 3
+
+    def test_it_does_not_disturb_the_run_log(self, logs, streams):
+        """They are separate sinks: logging keeps its file, the fds get theirs."""
+        console = redirect_console()
+        log_file = setup_logging(console=False)
+        logging.getLogger("minus.test").warning("through logging")
+
+        assert "through logging" in log_file.read_text(encoding="utf-8")
+        assert "through logging" not in console.read_text(encoding="utf-8")
 
 
 class TestRetention:

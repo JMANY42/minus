@@ -50,10 +50,15 @@ class ControlClient:
         *,
         timeout: float = DEFAULT_TIMEOUT,
         on_event: Callable[[dict], None] | None = None,
+        on_close: Callable[[str], None] | None = None,
     ) -> None:
         self.path = Path(path)
         self.timeout = timeout
         self.on_event = on_event
+        # Called from the reader thread when the *peer* goes away, which is
+        # the only way a killed or crashed assistant can ever be noticed: it
+        # cannot send a farewell, so the EOF is the whole signal.
+        self.on_close = on_close
 
         self._socket: socket.socket | None = None
         self._lock = threading.Lock()
@@ -164,11 +169,13 @@ class ControlClient:
     def _read_loop(self) -> None:
         buffer = b""
         sock = self._socket
+        reason = "MINUS closed the connection"
         try:
             while not self._closed.is_set() and sock is not None:
                 try:
                     chunk = sock.recv(65536)
-                except OSError:
+                except OSError as exc:
+                    reason = f"The connection to MINUS failed: {exc}"
                     return
                 if not chunk:
                     return
@@ -179,7 +186,14 @@ class ControlClient:
                     if line.strip():
                         self._dispatch(line)
         finally:
+            # `close()` sets _closed before touching the socket, so finding it
+            # already set means the owner asked for this and does not need
+            # telling. Only a peer that went away on its own gets reported --
+            # otherwise every ordinary teardown would announce a disconnect.
+            was_ours = self._closed.is_set()
             self.close()
+            if not was_ours and self.on_close is not None:
+                self.on_close(reason)
 
     def _dispatch(self, line: bytes) -> None:
         try:
