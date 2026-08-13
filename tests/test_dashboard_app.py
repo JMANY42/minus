@@ -13,7 +13,8 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Input, Static
+from rich.text import Text
+from textual.widgets import Input, RichLog, Static
 
 from minus.dashboard.app import MinusDashboard
 from minus.dashboard.widgets import (
@@ -201,6 +202,79 @@ class TestViewSwitching:
             await pilot.press("3")
 
             assert pilot.app.query_one(ViewerPane).current == "deep"
+
+
+class TestScrollingWithFocusNowhere:
+    """The arrows still move the viewer when nothing holds the keys.
+
+    Focus nowhere is how the dashboard opens and where escape puts you back,
+    so the views' own scroll bindings never fire there -- which left the
+    arrows doing nothing at all in the state the dashboard spends most of its
+    time in.
+    """
+
+    async def fill(self, pilot):
+        """Enough text in both logs to have somewhere to scroll to."""
+        for view_id in ("view-conversation", "view-log"):
+            log = pilot.app.query_one(f"#{view_id}", RichLog)
+            for index in range(200):
+                log.write(Text(f"{index} " + "x" * 400))
+        await pilot.pause()
+
+    async def test_left_and_right_scroll_the_log_sideways(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            pilot.app.set_focus(None)
+            await self.fill(pilot)
+            await pilot.press("2")
+            log = pilot.app.query_one("#view-log")
+
+            await pilot.press("right")
+            await pilot.pause()
+            scrolled = log.scroll_offset.x
+            assert scrolled > 0
+
+            await pilot.press("left")
+            await pilot.pause()
+            assert log.scroll_offset.x < scrolled
+
+    @pytest.mark.parametrize(
+        "key,view_id",
+        [("1", "view-conversation"), ("2", "view-log"), ("3", "view-deep")],
+    )
+    async def test_up_and_down_scroll_whichever_view_is_showing(self, app, notes, key, view_id):
+        async with app.run_test(size=(120, 40)) as pilot:
+            pilot.app.set_focus(None)
+            await self.fill(pilot)
+            await pilot.press(key)
+            view = pilot.app.query_one(f"#{view_id}")
+            # Away from both ends first: the logs open pinned to the bottom
+            # and the deep view opens at the top, so either one alone would
+            # only ever prove the direction it had room to move in.
+            view.scroll_to(y=10, animate=False)
+            await pilot.pause()
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert view.scroll_offset.y > 10
+
+            await pilot.press("up", "up")
+            await pilot.pause()
+            assert view.scroll_offset.y < 10
+
+    async def test_the_arrows_are_left_to_whatever_does_have_focus(self, app):
+        """Only the unfocused case is the app's: the input box keeps its own."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.fill(pilot)
+            pilot.app.query_one("#prompt-input").focus()
+            view = pilot.app.query_one("#view-conversation")
+            view.scroll_to(y=10, animate=False)
+            await pilot.pause()
+            before = view.scroll_offset
+
+            await pilot.press("down", "right")
+            await pilot.pause()
+
+            assert view.scroll_offset == before
 
 
 class TestPanelExpansion:

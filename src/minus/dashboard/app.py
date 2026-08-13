@@ -89,6 +89,13 @@ class MinusDashboard(App):
         # the view keys above.
         Binding("ctrl+up", "cycle_note(-1)", "prev note", priority=True, show=False),
         Binding("ctrl+down", "cycle_note(1)", "next note", priority=True, show=False),
+        # With focus nowhere -- how the dashboard opens, and where escape puts
+        # you back -- there is no view to leave the bare arrows to, so the app
+        # scrolls the showing one on their behalf.
+        Binding("left", "scroll_view('left')", "scroll left", show=False),
+        Binding("right", "scroll_view('right')", "scroll right", show=False),
+        Binding("up", "scroll_view('up')", "scroll up", show=False),
+        Binding("down", "scroll_view('down')", "scroll down", show=False),
         Binding("1", "show_view(0)", "conversation", show=False),
         Binding("2", "show_view(1)", "log", show=False),
         Binding("3", "show_view(2)", "deep", show=False),
@@ -157,7 +164,8 @@ class MinusDashboard(App):
                 self.query_one(pane).styles.border = ("solid", "ansi_bright_black")
 
         self.query_one("#hints", Static).update(
-            "ctrl+←/→ view · v/V viewer · m h t p a g panels · enter expand · i input "
+            "ctrl+←/→ view · arrows scroll · v/V viewer · m h t p a g panels "
+            "· enter expand · i input "
             "· esc back · s stop · e end conversation · c console · R restart minus "
             "· q quit"
         )
@@ -465,6 +473,19 @@ class MinusDashboard(App):
 
     def action_show_view(self, index: int) -> None:
         self.query_one(ViewerPane).show(index)
+
+    def action_scroll_view(self, direction: str) -> None:
+        """A bare arrow with focus nowhere: scroll what the viewer is showing.
+
+        Guarded on focus rather than left to binding precedence. A focused
+        widget that does not bind an arrow itself -- the input box has no use
+        for up and down, and a panel has no use for any of them -- would
+        otherwise let the key fall through to here and scroll a pane nobody
+        was pointing at.
+        """
+        if self.focused is not None:
+            return
+        self.query_one(ViewerPane).scroll_current(direction)
 
     def _collapse_panels(self) -> None:
         for panel in self.query(Panel):

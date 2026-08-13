@@ -158,6 +158,17 @@ class ViewerPane(Vertical):
     def cycle(self, step: int) -> None:
         self.show(self.index + step)
 
+    def scroll_current(self, direction: str) -> None:
+        """Scroll the view that is showing, without it having focus.
+
+        The views' own scroll bindings only fire while one of them holds the
+        keys, so with focus nowhere the arrows did nothing at all. Calling the
+        same scroll methods those bindings call keeps a bare arrow moving the
+        pane by the same amount either way.
+        """
+        view = self.query_one(f"#view-{self.current}")
+        getattr(view, f"scroll_{direction}")(animate=False)
+
     def refresh_tabs(self) -> None:
         labels = []
         for index, view in enumerate(self.VIEWS):
