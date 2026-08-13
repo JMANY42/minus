@@ -147,6 +147,10 @@ def build_conversation(settings: Settings, state=None) -> Assistant:
 
 def _fact_summary(fact) -> dict:
     return {
+        # The id travels with it because a dashboard that can list facts is
+        # expected to be able to forget one, and it cannot delete what it has
+        # no name for.
+        "id": fact.id,
         "attribute": fact.attribute,
         "value": fact.value,
         "active": fact.active,
@@ -318,6 +322,15 @@ def build_control_handlers(
         value = params.get("limit", default)
         return max(1, min(int(value), 500))
 
+    def delete_facts(params: dict) -> dict:
+        """Forget the named facts. Hard deletes, so the caller confirms first."""
+        ids = params.get("ids")
+        if not isinstance(ids, list) or not ids:
+            raise ProtocolError("ids must be a non-empty list", BAD_PARAMS)
+        for fact_id in ids:
+            assistant.memory.delete_fact(str(fact_id))
+        return {"deleted": len(ids)}
+
     def get_config(params: dict) -> dict:
         if config is None:
             raise ProtocolError("Configuration is not available", BAD_PARAMS)
@@ -355,6 +368,7 @@ def build_control_handlers(
         "list_facts": lambda params: [
             _fact_summary(fact) for fact in assistant.memory.all_facts()[: limit_of(params)]
         ],
+        "delete_facts": delete_facts,
         "list_deep_notes": lambda params: [
             _note_summary(path) for path in _newest(deep_notes_dir(), limit_of(params))
         ],

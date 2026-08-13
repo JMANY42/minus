@@ -42,6 +42,7 @@ class FakeRegistry:
 
 class FakeFact:
     def __init__(self, attribute: str, value: str) -> None:
+        self.id = f"fact-{attribute}"
         self.attribute = attribute
         self.value = value
         self.active = True
@@ -52,8 +53,16 @@ class FakeMemory:
     conversation_id = "20260810T205424Z-2cd0f926"
     file_path = "/tmp/minus-test/conversations/x.json"
 
+    def __init__(self) -> None:
+        # Held rather than rebuilt per call, so that forgetting one is visible
+        # to the next `list_facts`.
+        self.facts = [FakeFact("favorite_band", "queen"), FakeFact("chronotype", "night owl")]
+
     def all_facts(self) -> list[FakeFact]:
-        return [FakeFact("favorite_band", "queen"), FakeFact("chronotype", "night owl")]
+        return list(self.facts)
+
+    def delete_fact(self, fact_id: str) -> None:
+        self.facts = [fact for fact in self.facts if fact.id != fact_id]
 
 
 class FakeConversation:
@@ -167,6 +176,42 @@ class TestIntrospection:
 
         assert facts[0]["attribute"] == "favorite_band"
         assert facts[0]["value"] == "queen"
+
+    def test_a_listed_fact_carries_the_id_needed_to_forget_it(self, wired):
+        """The dashboard deletes by id; a summary without one is read-only."""
+        client, _, _, _ = wired
+
+        facts = client.request("list_facts")
+
+        assert facts[0]["id"] == "fact-favorite_band"
+
+
+class TestForgettingFacts:
+    """The dashboard's `d` key, from the other end of the socket."""
+
+    def test_it_forgets_the_named_facts(self, wired):
+        client, _, _, _ = wired
+
+        assert client.request("delete_facts", ids=["fact-chronotype"]) == {"deleted": 1}
+
+        assert [fact["attribute"] for fact in client.request("list_facts")] == ["favorite_band"]
+
+    def test_it_forgets_several_at_once(self, wired):
+        client, _, _, _ = wired
+
+        client.request("delete_facts", ids=["fact-chronotype", "fact-favorite_band"])
+
+        assert client.request("list_facts") == []
+
+    @pytest.mark.parametrize("params", [{}, {"ids": []}, {"ids": "fact-chronotype"}])
+    def test_it_refuses_anything_that_is_not_a_list_of_ids(self, wired, params):
+        """A hard delete is the wrong place to guess at what was meant."""
+        client, _, _, _ = wired
+
+        with pytest.raises(ControlError):
+            client.request("delete_facts", **params)
+
+        assert len(client.request("list_facts")) == 2
 
     def test_the_unbuilt_panels_return_an_empty_list(self, wired):
         """Shape frozen now; only the data source changes when they exist."""

@@ -18,6 +18,8 @@ from textual.widgets import Input, Static
 from minus.dashboard.app import MinusDashboard
 from minus.dashboard.widgets import (
     AgentsPanel,
+    FactList,
+    MemoryPanel,
     Panel,
     ViewerPane,
     ascii_bar,
@@ -57,6 +59,31 @@ def app(tmp_path, monkeypatch):
 def live_row(app) -> str:
     """The console's in-place line -- what a spinner is currently drawing."""
     return str(app.query_one("#console-live", Static).content)
+
+
+def focus_within(app, panel_id: str) -> bool:
+    """True if the keys are going to that panel, or to something inside it.
+
+    Both count: a panel with an interactive expanded view hands focus to that
+    view rather than keeping it on the frame.
+    """
+    focused = app.focused
+    if focused is None:
+        return False
+    return focused.id == panel_id or any(node.id == panel_id for node in focused.ancestors)
+
+
+@pytest.fixture
+def connected(app):
+    """A dashboard with a MINUS answering on the other end of the socket.
+
+    `connect` is stubbed rather than the flag simply set: the real one runs on
+    a worker thread and reports back that nothing is listening, which would
+    otherwise land on top of the flag at whatever moment it finished.
+    """
+    app.connect = lambda: None
+    app.connected = True
+    return app
 
 
 @pytest.fixture
@@ -293,11 +320,13 @@ class TestPanelExpansion:
 
                 assert f"[{key}]" in panel._border_title.plain
 
-    async def test_every_panel_says_it_has_no_options_yet(self, app):
-        """Scaffolding, deliberately. Filling one in is returning a list."""
+    async def test_the_panels_without_an_expanded_view_say_they_have_none(self, app):
+        """Scaffolding, deliberately. Filling one in is building the view."""
         async with app.run_test() as pilot:
             for panel in pilot.app.query(Panel):
-                assert panel.options() == []
+                if panel.interactive() is None:
+                    assert panel.options() == []
+                    assert "(nothing here yet)" in str(panel.query_one("#options").content)
 
 
 class TestDisconnected:
@@ -419,7 +448,7 @@ class TestOneFocusAtATime:
 
             await pilot.press("m")
 
-            assert pilot.app.focused.id == "panel-memory"
+            assert focus_within(pilot.app, "panel-memory")
             assert not pilot.app.query_one("#viewer").has_pseudo_class("focus-within")
 
     async def test_a_panel_hotkey_takes_focus_off_the_console(self, app):
@@ -491,6 +520,331 @@ class TestTabbingThePanels:
             assert not pilot.app.query_one("#viewer").has_pseudo_class("focus-within")
 
 
+FACTS = [
+    {"id": "f1", "attribute": "timezone", "value": "PST", "active": True},
+    {"id": "f2", "attribute": "favorite_band", "value": "queen", "active": True},
+    {"id": "f3", "attribute": "preferred_editor", "value": "vim", "active": True},
+]
+
+
+def remember(app, facts=FACTS) -> FactList:
+    """Fill the memory panel as a `refresh_panels` from a live MINUS would."""
+    app.query_one(MemoryPanel).update({"facts": facts, "conversations": 2, "deep_notes": 1})
+    return app.query_one(FactList)
+
+
+class TestFactList:
+    """The expanded memory panel: `minus memory`, inside the dashboard."""
+
+    async def test_expanding_memory_hands_the_keys_to_the_list(self, app):
+        async with app.run_test() as pilot:
+            remember(pilot.app)
+
+            await pilot.press("m")
+
+            assert pilot.app.focused is pilot.app.query_one(FactList)
+
+    async def test_the_arrows_move_the_cursor(self, app):
+        async with app.run_test() as pilot:
+            facts = remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("down", "down")
+            assert facts.cursor == 2
+            await pilot.press("up")
+            assert facts.cursor == 1
+
+    async def test_the_cursor_stops_at_both_ends(self, app):
+        async with app.run_test() as pilot:
+            facts = remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("up")
+            assert facts.cursor == 0
+            await pilot.press("down", "down", "down", "down")
+            assert facts.cursor == len(FACTS) - 1
+
+    async def test_the_arrows_do_not_reach_the_viewer(self, app, notes):
+        """The list owns them outright while it has focus, which is the point."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")  # the deep view, which scrolls and pages
+            await pilot.pause()
+            remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("down", "down")
+
+            assert pilot.app.note_index == 0
+            assert pilot.app.query_one("#view-deep").scroll_offset.y == 0
+
+    async def test_space_marks_and_unmarks(self, app):
+        async with app.run_test() as pilot:
+            facts = remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("space")
+            assert facts.marked == {"f1"}
+            await pilot.press("down", "space")
+            assert facts.marked == {"f1", "f2"}
+            await pilot.press("space")
+            assert facts.marked == {"f1"}
+
+    async def test_one_d_only_asks(self, connected):
+        """A hard delete with no history behind it takes saying twice."""
+        forgotten = []
+
+        async with connected.run_test() as pilot:
+            pilot.app.forget_facts = forgotten.append
+            facts = remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("space", "d")
+            await pilot.pause()
+
+            assert forgotten == []
+            assert facts.pending
+
+    async def test_the_second_d_forgets_what_is_marked(self, connected):
+        forgotten = []
+
+        async with connected.run_test() as pilot:
+            pilot.app.forget_facts = forgotten.append
+            remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("down", "space", "d", "d")
+            await pilot.pause()
+
+            assert forgotten == [["f2"]]
+
+    async def test_it_forgets_every_mark_at_once(self, connected):
+        forgotten = []
+
+        async with connected.run_test() as pilot:
+            pilot.app.forget_facts = forgotten.append
+            remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("space", "down", "down", "space", "d", "d")
+            await pilot.pause()
+
+            assert forgotten == [["f1", "f3"]]
+
+    async def test_d_with_nothing_marked_takes_what_is_under_the_cursor(self, connected):
+        forgotten = []
+
+        async with connected.run_test() as pilot:
+            pilot.app.forget_facts = forgotten.append
+            remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("down", "d", "d")
+            await pilot.pause()
+
+            assert forgotten == [["f2"]]
+
+    async def test_moving_the_cursor_cancels_the_question(self, connected):
+        forgotten = []
+
+        async with connected.run_test() as pilot:
+            pilot.app.forget_facts = forgotten.append
+            facts = remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("d", "down", "d")
+            await pilot.pause()
+
+            assert forgotten == []
+            assert facts.pending  # the last d asked again, about the new row
+
+    async def test_leaving_the_list_cancels_it_too(self, app):
+        """A `d` typed a minute later somewhere else is not the second half."""
+        async with app.run_test() as pilot:
+            facts = remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("d")
+            await pilot.press("i")
+            await pilot.pause()
+
+            assert not facts.pending
+
+    async def test_an_empty_store_has_nothing_to_forget(self, connected):
+        forgotten = []
+
+        async with connected.run_test() as pilot:
+            pilot.app.forget_facts = forgotten.append
+            remember(pilot.app, [])
+            await pilot.press("m")
+
+            await pilot.press("space", "d", "d")
+            await pilot.pause()
+
+            assert forgotten == []
+
+    async def test_it_says_so_when_nothing_is_listening(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            said = []
+            pilot.app.notice = lambda line, severity="information": said.append(line)
+            remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("d", "d")
+            await pilot.pause()
+
+            assert any("not connected" in line for line in said)
+
+    async def test_a_refresh_keeps_the_marks_it_still_has_facts_for(self, app):
+        """Panels are repopulated on their own -- a rollover does it."""
+        async with app.run_test() as pilot:
+            facts = remember(pilot.app)
+            await pilot.press("m")
+            await pilot.press("space", "down", "space")
+
+            remember(pilot.app, FACTS[1:])
+
+            assert facts.marked == {"f2"}
+            assert facts.cursor <= len(FACTS[1:]) - 1
+
+    async def test_escape_collapses_it_and_takes_the_keys_back(self, app):
+        """Focus cannot stay on a list CSS has stopped laying out."""
+        async with app.run_test() as pilot:
+            remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#panel-memory").has_class("-expanded")
+            assert pilot.app.focused.id == "panel-memory"
+            assert not pilot.app.query_one("#panel-memory #expanded").display
+
+    async def test_the_hotkeys_still_work_from_inside_the_list(self, app):
+        """Its own bindings are three keys; the rest belong to the app."""
+        async with app.run_test() as pilot:
+            remember(pilot.app)
+            await pilot.press("m")
+
+            await pilot.press("t")
+
+            assert pilot.app.query_one("#panel-tools").has_class("-expanded")
+            assert not pilot.app.query_one("#panel-memory").has_class("-expanded")
+
+
+class TestFactListRendering:
+    """It draws its own window, so the drawing is worth pinning down."""
+
+    async def test_the_footer_holds_the_bottom_line(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            facts = remember(pilot.app)
+            await pilot.press("m")
+            await pilot.pause()
+
+            lines = facts.render().plain.splitlines()
+
+            assert len(lines) == facts.size.height
+            assert "d forget" in lines[-1]
+
+    async def test_a_long_fact_is_cropped_rather_than_folded(self, app):
+        """Folded, it pushed everything under it down and the footer off."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            facts = remember(
+                pilot.app,
+                [{"id": "f1", "attribute": "routine", "value": "coffee " * 30, "active": True}],
+            )
+            await pilot.press("m")
+            await pilot.pause()
+
+            lines = facts.render().plain.splitlines()
+
+            assert all(len(line) <= facts.size.width for line in lines)
+            assert "d forget" in lines[-1]
+
+    async def test_the_window_follows_the_cursor_off_the_bottom(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            many = [
+                {"id": f"f{index}", "attribute": f"a{index}", "value": "x", "active": True}
+                for index in range(200)
+            ]
+            facts = remember(pilot.app, many)
+            await pilot.press("m")
+            await pilot.press(*(["down"] * 199))
+            await pilot.pause()
+
+            lines = facts.render().plain.splitlines()
+
+            assert " [ ] a199 = x" in lines[-2]
+            assert " [ ] a0 = x" not in lines[0]
+
+    async def test_an_inactive_fact_says_so(self, app):
+        """Superseded facts are still in the store; forgetting one is the point."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            facts = remember(
+                pilot.app,
+                [{"id": "f1", "attribute": "old_job", "value": "barista", "active": False}],
+            )
+            await pilot.press("m")
+            await pilot.pause()
+
+            assert "(inactive)" in facts.render().plain
+
+    async def test_an_empty_store_says_so(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            facts = remember(pilot.app, [])
+            await pilot.press("m")
+            await pilot.pause()
+
+            assert "no facts" in facts.render().plain
+
+
+class TakeoverPanel(Panel):
+    """A panel that wants its expanded view to have the frame to itself."""
+
+    title = "takeover"
+    hotkey = "z"
+    takeover = True
+
+    def __init__(self) -> None:
+        super().__init__("panel-takeover")
+
+
+class TestTakeover:
+    async def test_the_summary_steps_aside_while_it_is_expanded(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.app.query_one("#right").mount(TakeoverPanel())
+            await pilot.pause()
+            assert pilot.app.query_one("#panel-takeover #summary").display
+
+            pilot.app.action_expand("panel-takeover")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#panel-takeover #summary").display
+            assert pilot.app.query_one("#panel-takeover #expanded").display
+
+    async def test_it_comes_back_when_the_panel_collapses(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.app.query_one("#right").mount(TakeoverPanel())
+            await pilot.pause()
+
+            pilot.app.action_expand("panel-takeover")
+            await pilot.pause()
+            pilot.app.action_expand("panel-takeover")
+            await pilot.pause()
+
+            assert pilot.app.query_one("#panel-takeover #summary").display
+
+    async def test_a_panel_that_did_not_ask_keeps_its_summary(self, app):
+        """The memory panel's counts stay above its fact list."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            remember(pilot.app)
+
+            await pilot.press("m")
+            await pilot.pause()
+
+            assert pilot.app.query_one("#panel-memory #summary").display
+
+
 class TestEscapeLadder:
     async def test_escape_out_of_the_input_returns_to_the_panel(self, app):
         async with app.run_test() as pilot:
@@ -521,7 +875,7 @@ class TestEscapeLadder:
 
             await pilot.press("escape")
 
-            assert pilot.app.focused.id == "panel-memory"
+            assert focus_within(pilot.app, "panel-memory")
             assert pilot.app.query_one("#panel-memory").has_class("-expanded")
 
     async def test_the_next_escape_collapses_it(self, app):
@@ -533,6 +887,7 @@ class TestEscapeLadder:
             await pilot.press("escape")
 
             assert not pilot.app.query_one("#panel-memory").has_class("-expanded")
+            # On the panel itself now: the list it was on is no longer laid out.
             assert pilot.app.focused.id == "panel-memory"
 
     async def test_and_the_third_lets_go(self, app):

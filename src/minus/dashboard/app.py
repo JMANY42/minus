@@ -39,6 +39,7 @@ from minus.dashboard.tail import (
 from minus.dashboard.widgets import (
     AgentsPanel,
     ConsolePane,
+    FactList,
     HardwarePanel,
     ManagementPanel,
     MemoryPanel,
@@ -201,15 +202,19 @@ class MinusDashboard(App):
         self.poll_notes()
 
     def poll_log(self) -> None:
-        # A restart starts a new file; the newest name is the one to follow.
-        newest = latest_log(logs_dir())
-        if newest is not None and newest != self.log_tailer.path:
-            self.log_tailer.reset(newest)
-            self.query_one("#view-log", RichLog).write(Text(f"--- {newest.name} ---"))
+        # Suppressed for the same reason _fill's is, and it is the interval
+        # timers that need it most: they keep firing while the screen is being
+        # torn down, at which point the view they write to is already gone.
+        with contextlib.suppress(NoMatches):
+            # A restart starts a new file; the newest name is the one to follow.
+            newest = latest_log(logs_dir())
+            if newest is not None and newest != self.log_tailer.path:
+                self.log_tailer.reset(newest)
+                self.query_one("#view-log", RichLog).write(Text(f"--- {newest.name} ---"))
 
-        view = self.query_one("#view-log", RichLog)
-        for line in self.log_tailer.poll():
-            view.write(Text(line, style=self.styler.style(line)))
+            view = self.query_one("#view-log", RichLog)
+            for line in self.log_tailer.poll():
+                view.write(Text(line, style=self.styler.style(line)))
 
     def poll_console(self) -> None:
         """Follow what MINUS writes to its own stdout and stderr.
@@ -217,19 +222,20 @@ class MinusDashboard(App):
         Polled whether or not the pane is showing, so that pressing `c` after
         something has already gone wrong shows the thing that went wrong.
         """
-        console = self.query_one(ConsolePane)
+        with contextlib.suppress(NoMatches):
+            console = self.query_one(ConsolePane)
 
-        newest = latest_log(logs_dir(), prefix=CONSOLE_PREFIX)
-        if newest is not None and newest != self.console_tailer.path:
-            self.console_tailer.reset(newest)
-            console.write(f"--- {newest.name} ---")
+            newest = latest_log(logs_dir(), prefix=CONSOLE_PREFIX)
+            if newest is not None and newest != self.console_tailer.path:
+                self.console_tailer.reset(newest)
+                console.write(f"--- {newest.name} ---")
 
-        for line in self.console_tailer.poll():
-            console.write(line)
+            for line in self.console_tailer.poll():
+                console.write(line)
 
-        # Whatever is still being overwritten goes on its own row rather than
-        # into the log, so a spinner spins instead of scrolling.
-        console.show_live(self.console_tailer.current)
+            # Whatever is still being overwritten goes on its own row rather
+            # than into the log, so a spinner spins instead of scrolling.
+            console.show_live(self.console_tailer.current)
 
     def poll_conversation(self) -> None:
         newest = latest_conversation(conversations_dir())
@@ -240,10 +246,11 @@ class MinusDashboard(App):
         if turns is None:
             return
 
-        view = self.query_one("#view-conversation", RichLog)
-        view.clear()
-        for turn in turns:
-            view.write(render_turn(turn.role, turn.text))
+        with contextlib.suppress(NoMatches):
+            view = self.query_one("#view-conversation", RichLog)
+            view.clear()
+            for turn in turns:
+                view.write(render_turn(turn.role, turn.text))
 
     def poll_notes(self) -> None:
         if not self.note_reader.poll():
@@ -253,20 +260,21 @@ class MinusDashboard(App):
 
     def show_note(self) -> None:
         notes = self.note_reader.notes
-        body = self.query_one("#deep-body", Static)
-        if not notes:
-            body.update("No deep-think answers yet.")
-            return
+        with contextlib.suppress(NoMatches):
+            body = self.query_one("#deep-body", Static)
+            if not notes:
+                body.update("No deep-think answers yet.")
+                return
 
-        self.note_index = max(0, min(self.note_index, len(notes) - 1))
-        note = notes[self.note_index]
-        body.update(
-            f"{note.title}\n{note.created_at}"
-            f"   ({self.note_index + 1}/{len(notes)}, ctrl+↑/↓ to move)\n\n{note.detail}"
-        )
-        # Back to the top, or a short note opens scrolled to wherever the last
-        # long one was left.
-        self.query_one("#view-deep", VerticalScroll).scroll_home(animate=False)
+            self.note_index = max(0, min(self.note_index, len(notes) - 1))
+            note = notes[self.note_index]
+            body.update(
+                f"{note.title}\n{note.created_at}"
+                f"   ({self.note_index + 1}/{len(notes)}, ctrl+↑/↓ to move)\n\n{note.detail}"
+            )
+            # Back to the top, or a short note opens scrolled to wherever the
+            # last long one was left.
+            self.query_one("#view-deep", VerticalScroll).scroll_home(animate=False)
 
     def _fill(self, panel_type: type, data: Any) -> None:
         """Put data into a panel, from the UI thread.
@@ -378,7 +386,10 @@ class MinusDashboard(App):
             return
         try:
             tools = self.client.request("list_tools")
-            facts = self.client.request("list_facts", limit=6)
+            # All of them, up to the handler's own ceiling: the panel counts
+            # what it is given, so asking for six made it report six, and the
+            # expanded list has every one of them to arrow through.
+            facts = self.client.request("list_facts", limit=500)
             notes = self.client.request("list_deep_notes", limit=200)
             conversations = self.client.request("list_conversations", limit=500)
             snapshot = self.client.request("get_status")
@@ -457,24 +468,27 @@ class MinusDashboard(App):
 
     def _collapse_panels(self) -> None:
         for panel in self.query(Panel):
-            panel.remove_class("-expanded", "-hidden")
+            panel.collapse()
 
     def action_expand(self, panel_id: str) -> None:
         """Give one panel the whole column, or give it back.
 
         Focus follows, which is what stops the left half from still looking
-        focused once a panel has been opened over here -- and it means the
-        panel can be scrolled without tabbing to it first.
+        focused once a panel has been opened over here -- and the panel decides
+        where it lands, because a panel with something interactive in its
+        expanded view wants the keys going there rather than to the frame.
         """
         target = self.query_one(f"#{panel_id}", Panel)
         expanding = not target.has_class("-expanded")
         self._collapse_panels()
-        if expanding:
-            for panel in self.query(Panel):
-                if panel is not target:
-                    panel.add_class("-hidden")
-            target.add_class("-expanded")
-        target.focus()
+        if not expanding:
+            target.focus()
+            return
+
+        for panel in self.query(Panel):
+            if panel is not target:
+                panel.add_class("-hidden")
+        target.expand()
 
     def action_focus_input(self) -> None:
         """The one move that may leave a panel enlarged behind it."""
@@ -563,15 +577,19 @@ class MinusDashboard(App):
         self.set_focus(None)
 
     def on_descendant_focus(self, event) -> None:
-        """Remember the panel to put focus back on when escape leaves the input.
+        """Remember what to put focus back on when escape leaves the input.
 
-        Panels only. Remembering any widget sounds more general and is worse:
-        the last thing focused before the input box is usually a view inside
-        the viewer, and escape would then hand the viewer back the focus it is
-        not supposed to take without being asked for by name.
+        Panels only -- the panel itself, or whatever inside one had the keys,
+        so that stepping out of the input box and back returns you to your
+        place in an expanded panel's list rather than to the frame around it.
+        Remembering any widget at all sounds more general and is worse: the
+        last thing focused before the input box is usually a view inside the
+        viewer, and escape would then hand the viewer back the focus it is not
+        supposed to take without being asked for by name.
         """
-        if isinstance(event.widget, Panel):
-            self._prior_focus = event.widget
+        widget = event.widget
+        if isinstance(widget, Panel) or any(isinstance(node, Panel) for node in widget.ancestors):
+            self._prior_focus = widget
 
     def action_help_quit(self) -> None:
         """Textual binds ctrl+C to this to say how you really quit.
@@ -638,6 +656,35 @@ class MinusDashboard(App):
         # Not echoed anywhere: the conversation view above shows the turn as
         # soon as MINUS writes it to the transcript.
         self.send("say", text=text)
+
+    def on_fact_list_delete(self, event: FactList.Delete) -> None:
+        """The memory panel has asked for facts to be forgotten.
+
+        Over the socket rather than into the database: the store is open on the
+        assistant's side, and two writers to one sqlite file is a race the
+        dashboard has no business starting.
+        """
+        if not self.connected:
+            self.notice("not connected -- MINUS is not running", severity="warning")
+            return
+        self.forget_facts(event.ids)
+
+    @work(thread=True, group="forget")
+    def forget_facts(self, ids: list[str]) -> None:
+        if self.client is None:
+            return
+        try:
+            result = self.client.request("delete_facts", ids=ids)
+        except Exception as exc:
+            self.call_from_thread(self.notice, f"failed to forget: {exc}", "error")
+            self.call_from_thread(self._disconnected, str(exc))
+            return
+
+        self.call_from_thread(self.notice, f"forgot {result.get('deleted', len(ids))} fact(s)")
+        # Redrawn from the store rather than from the assumption that it did
+        # what it was asked, which is also what puts the count in the summary
+        # right.
+        self.call_from_thread(self.refresh_panels)
 
     @work(thread=True, group="send")
     def send(self, command: str, **params: Any) -> None:

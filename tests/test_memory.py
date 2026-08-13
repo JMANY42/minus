@@ -149,5 +149,27 @@ class ConversationMemoryTests(unittest.TestCase):
             self.assertIsNone(result)
 
 
+class RecordingStore:
+    """The fact-store half of a MemoryService, minus the sqlite."""
+
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    def delete_fact(self, fact_id: str) -> None:
+        self.deleted.append(fact_id)
+
+
+class SemanticMemoryTests(unittest.TestCase):
+    def test_forgetting_a_fact_reaches_the_store(self):
+        """Callers ask the memory to forget; only it touches the store."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = RecordingStore()
+            memory = memory_module.MemoryManager(base_dir=Path(temp_dir), store=store)
+
+            memory.delete_fact("fact-1")
+
+            self.assertEqual(store.deleted, ["fact-1"])
+
+
 if __name__ == "__main__":
     unittest.main()

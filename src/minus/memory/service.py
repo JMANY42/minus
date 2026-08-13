@@ -171,6 +171,16 @@ class MemoryService:
         """
         return self._store.get_all_facts(only_active=only_active)
 
+    def delete_fact(self, fact_id: str) -> None:
+        """Forget one fact outright, leaving no history behind it.
+
+        Here for the same reason `all_facts` is: pruning is something a caller
+        asks the memory to do, not something it reaches into the private store
+        for. Superseding is what records that a value changed; this is for
+        facts that should never have been learned at all.
+        """
+        self._store.delete_fact(fact_id)
+
     def close(self) -> None:
         self._store.close()
 

@@ -126,17 +126,37 @@ Panel.-hidden {
     display: none;
 }
 
-Panel #options {
+/* The half of a panel that only exists once it has the column. Composed with
+ * the rest of the panel and hidden here rather than mounted on expansion, so
+ * that expanding is a class change and can hand focus over in the same
+ * breath. */
+Panel #expanded {
     display: none;
+    height: 1fr;
+}
+
+Panel.-expanded #expanded {
+    display: block;
+}
+
+Panel #options {
     color: ansi_bright_black;
 }
 
-Panel.-expanded #options {
-    display: block;
+/* A panel that asked for the whole frame: while it is expanded the summary
+ * stops being laid out, and it is back the moment the panel collapses. */
+Panel.-takeover.-expanded #summary {
+    display: none;
 }
 
 #summary {
     height: auto;
+}
+
+/* The interactive list inside the memory panel. It draws its own window, so
+ * what it needs is the room left over and no scrollbar. */
+#fact-list {
+    height: 1fr;
 }
 
 /* Focus is marked on the bordered pane, not the widget inside it.
