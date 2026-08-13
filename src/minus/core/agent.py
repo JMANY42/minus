@@ -1,18 +1,11 @@
 """The conversation agent: one user turn in, one spoken reply out.
 
-The loop was previously a set of module-level functions that each took the
-conversation object as their first argument -- `build_reply(conversation, ...)`,
-`process_tool_calls(conversation, ...)` -- which is a class written inside out.
-Folding them into methods removes the parameter and makes the state each step
-touches explicit.
-
-The loop itself is unchanged in shape, including the two decisions that are
-easy to mistake for bugs and are not:
-
-  * A generation failure is recorded in the transcript rather than raised, so
-    the next round sees the dead end instead of walking back into it.
-  * A failed tool round does not consume the round budget, so an argument
-    mistake leaves room to recover rather than costing the model its turn.
+What is left here is everything the conversation has that the escalation tier
+does not: the transcript that persists as it grows, the facts recalled from
+memory and folded into the user's turn, and the condense-and-extract work that
+closes a session. The tool loop itself lives in `loop.py`, which the deep tier
+runs too -- see that module for why a failed tool round is free and why running
+out of rounds produces an answer rather than an exception.
 """
 
 from __future__ import annotations
@@ -20,35 +13,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from minus.core.loop import ToolLoop
 from minus.core.messages import Message, Transcript
-from minus.errors import GenerationFailedError, LLMError, ToolError
 from minus.memory.service import MemoryManager
-from minus.prompts import FACTS_MARKER, RETRY_NOTE, SYSTEM_PROMPT
+from minus.prompts import FACTS_MARKER, SYSTEM_PROMPT
 from minus.services.json import pretty_json
 from minus.tools import registry as default_registry
 
 logger = logging.getLogger(__name__)
-
-
-def generation_failure_message(exc: BaseException) -> Message:
-    """Record a failed generation in the transcript.
-
-    Retries inside the client are invisible to later rounds, so a round that
-    burned all its retries would otherwise leave no trace and the next round
-    would regenerate the same dead end.
-    """
-    return Message.system(
-        f"The previous assistant turn could not be generated: {exc} "
-        "Do not repeat that attempt. Either call one of the available tools "
-        "with valid arguments, or answer the user in plain text."
-    )
-
-
-def tool_failure_message(tool_name: str, exc: BaseException) -> str:
-    return (
-        f"Tool execution failed for {tool_name!r}: {exc}. "
-        "Please retry with valid arguments, or answer without the tool."
-    )
 
 
 class Conversation:
@@ -105,83 +77,23 @@ class Conversation:
 
         return Message.user(f"{transcript}\n\n{FACTS_MARKER}\n{pretty_json(facts)}")
 
-    # ---- Tool execution ----
-
-    def _run_tool_call(self, tool_call) -> bool:
-        """Execute one tool call. Returns True if it failed."""
-        try:
-            result = self.tools.dispatch(tool_call.name, tool_call.arguments)
-        # ToolError covers unknown tools, bad arguments and failures inside a
-        # tool body. OSError is kept because a tool may touch the filesystem in
-        # ways the registry cannot wrap. Anything else is a genuine bug.
-        except (ToolError, OSError) as exc:
-            logger.warning("Tool %s failed: %s", tool_call.name, exc)
-            self.transcript.append(
-                Message.tool_result(tool_call.id, tool_failure_message(tool_call.name, exc))
-            )
-            return True
-
-        logger.debug("Tool result for %s:\n%s", tool_call.name, pretty_json(result))
-        self.transcript.append(Message.tool_result(tool_call.id, result))
-        return False
-
-    def _run_tool_calls(self, tool_calls) -> bool:
-        """Execute tool calls in order, stopping at the first failure."""
-        return any(self._run_tool_call(call) for call in tool_calls)
-
-    # ---- One round ----
-
-    def _handle_completion(self, completion) -> tuple[str | None, bool]:
-        """Record the assistant turn. Returns (final_text, tool_round_failed)."""
-        raw_message = completion.choices[0].message
-        message = Message.from_completion(raw_message)
-
-        if not message.tool_calls:
-            # validate_completion guarantees non-blank content when there are
-            # no tool calls, so .strip() is safe here.
-            text = (message.content or "").strip()
-            self.transcript.append(Message.from_completion(raw_message, content=text))
-            return text, False
-
-        self.transcript.append(message)
-        return None, self._run_tool_calls(message.tool_calls)
-
     # ---- Public API ----
 
     def reply(self, transcript: str) -> str:
         """Produce the assistant's spoken reply to one user utterance."""
         self.transcript.append(self._build_user_message(transcript))
 
-        completed_tool_rounds = 0
-        while completed_tool_rounds < self.max_tool_rounds:
-            try:
-                completion = self.model.complete(
-                    self.messages,
-                    system_prompt=self.system_prompt,
-                    tools=self.tools.schemas(),
-                    retry_note=RETRY_NOTE,
-                )
-            except LLMError as exc:
-                # Keep the failure in the transcript and spend a round on it so
-                # the next attempt sees the dead end instead of repeating it.
-                logger.warning("Generation failed this round; recording it. Error: %s", exc)
-                self.transcript.append(generation_failure_message(exc))
-                completed_tool_rounds += 1
-                continue
-
-            response_text, tool_round_failed = self._handle_completion(completion)
-
-            if response_text is not None:
-                return response_text
-
-            # A failed tool round is not charged against the budget: the model
-            # deserves a chance to correct its arguments.
-            if not tool_round_failed:
-                completed_tool_rounds += 1
-
-        raise GenerationFailedError(
-            "Tool call limit reached before the model produced a final response."
-        )
+        # Built per call rather than held as a field: `start_new_conversation`
+        # and the `messages` setter both replace `self.transcript`, and a loop
+        # constructed once would go on appending to the old one.
+        message = ToolLoop(
+            model=self.model,
+            transcript=self.transcript,
+            tools=self.tools,
+            system_prompt=self.system_prompt,
+            max_tool_rounds=self.max_tool_rounds,
+        ).run()
+        return message.content or ""
 
     def post_conversation(self) -> list[dict]:
         """Condense the finished conversation and extract durable facts."""
