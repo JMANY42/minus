@@ -16,17 +16,28 @@ pytest.importorskip("textual")
 from rich.text import Text
 from textual.widgets import Input, RichLog, Static
 
+from minus.config import Settings
+from minus.control.config_control import ConfigController
 from minus.dashboard.app import MinusDashboard
+from minus.dashboard.choices import CHOICES, MODELS, OTHER, STT_MODELS, VOICES, choices_for
 from minus.dashboard.widgets import (
     AgentsPanel,
+    ChoiceList,
     FactList,
+    Heading,
+    ManagementPanel,
     MemoryPanel,
     Panel,
+    Setting,
+    SettingList,
     ViewerPane,
     ascii_bar,
+    build_setting_rows,
     deep_elapsed,
+    describe_change,
     human_bytes,
     render_turn,
+    wrap_indented,
 )
 from minus.services.json import write_json
 
@@ -872,6 +883,728 @@ class TestFactListRendering:
             assert "no facts" in facts.render().plain
 
 
+CONFIG = {
+    "values": {
+        "chat_model": "openai/gpt-oss-20b:nitro",
+        "deep_model": "deepseek/deepseek-v4-flash-0731:nitro",
+        "tts_voice": "am_puck",
+        "tts_speed": 1.0,
+        # The one live setting here with no menu behind it: what the free-text
+        # editor is exercised through, now that the models and the voice open
+        # a list instead.
+        "max_tool_rounds": 7,
+        "stt_model": "small.en",
+        "embedding_dim": 384,
+        "console_log_level": "INFO",
+    },
+    "live": {
+        "chat_model": "openai/gpt-oss-20b:nitro",
+        "deep_model": "deepseek/deepseek-v4-flash-0731:nitro",
+        "tts_voice": "am_puck",
+        "tts_speed": 1.0,
+        "max_tool_rounds": 7,
+    },
+    "restart_required": {"stt_model": "small.en"},
+    "blocked": {"embedding_dim": "The vector dimension is fixed when the table is created."},
+    "not_applicable": {"console_log_level": "There is no console handler under a service."},
+    "secrets": ["openrouter_api_key"],
+}
+
+
+def configure(app, described=CONFIG) -> SettingList:
+    """Fill the management panel as a `refresh_panels` from a live MINUS would."""
+    app.query_one(ManagementPanel).update(described)
+    return app.query_one(SettingList)
+
+
+def names(settings: SettingList) -> list[str]:
+    return [row.name for row in settings.rows if isinstance(row, Setting)]
+
+
+async def change(pilot, name: str) -> SettingList:
+    """Put the cursor on one setting and press enter, whatever that opens."""
+    settings = pilot.app.query_one(SettingList)
+    settings.cursor = settings.index_of(name)
+    await pilot.press("enter")
+    await pilot.pause()
+    return settings
+
+
+class TestSettingRows:
+    """What `get_config` looks like once it is a list."""
+
+    def test_the_live_settings_come_first_and_can_be_edited(self):
+        rows = build_setting_rows(CONFIG)
+
+        first = next(row for row in rows if isinstance(row, Setting))
+        assert first.name == "chat_model"
+        assert first.value == "openai/gpt-oss-20b:nitro"
+        assert first.editable
+
+    def test_a_restart_required_setting_is_still_editable(self):
+        """It is persisted; what it cannot do is take effect now, and it says so."""
+        rows = {row.name: row for row in build_setting_rows(CONFIG) if isinstance(row, Setting)}
+
+        assert rows["stt_model"].editable
+        assert "restart" in rows["stt_model"].note
+
+    def test_a_blocked_setting_carries_its_reason_instead(self):
+        rows = {row.name: row for row in build_setting_rows(CONFIG) if isinstance(row, Setting)}
+
+        assert not rows["embedding_dim"].editable
+        assert rows["embedding_dim"].value == "384"
+        assert "vector dimension" in rows["embedding_dim"].note
+
+    def test_a_secret_is_listed_without_its_value(self):
+        """That it exists is worth showing; what it is, is not ours to show."""
+        rows = {row.name: row for row in build_setting_rows(CONFIG) if isinstance(row, Setting)}
+
+        assert "openrouter_api_key" in rows
+        assert "sk" not in rows["openrouter_api_key"].value
+        assert not rows["openrouter_api_key"].editable
+
+    def test_each_section_is_introduced(self):
+        headings = [row.text for row in build_setting_rows(CONFIG) if isinstance(row, Heading)]
+
+        assert headings == ["live", "restart required", "cannot be changed here"]
+
+    def test_nothing_at_all_is_an_empty_list(self):
+        assert build_setting_rows(None) == []
+
+    def test_every_field_of_config_py_is_listed(self):
+        """The panel is the whole file, or a reader is left wondering what is missing."""
+        described = ConfigController(Settings(), {}).describe()
+
+        listed = {row.name for row in build_setting_rows(described) if isinstance(row, Setting)}
+
+        assert listed == set(Settings.model_fields)
+
+
+class TestDescribeChange:
+    """Three genuinely different answers; saying "done" to all three lies twice."""
+
+    def test_an_applied_change_says_so(self):
+        line, severity = describe_change("tts_voice", {"applied": ["tts_voice"], "persisted": []})
+
+        assert "applied" in line
+        assert severity == "information"
+
+    def test_a_persisted_change_mentions_the_file(self):
+        result = {"applied": ["tts_voice"], "persisted": ["MINUS_TTS_VOICE"]}
+
+        assert ".env" in describe_change("tts_voice", result)[0]
+
+    def test_a_restart_required_change_does_not_claim_to_have_applied(self):
+        line, severity = describe_change("stt_model", {"restart_required": ["stt_model"]})
+
+        assert "restart" in line
+        assert severity == "warning"
+
+    def test_a_refusal_carries_the_reason(self):
+        result = {"rejected": {"embedding_dim": "would invalidate every embedding"}}
+
+        line, severity = describe_change("embedding_dim", result)
+
+        assert "would invalidate every embedding" in line
+        assert severity == "error"
+
+
+class TestManagementPanel:
+    """The expanded panel: config.py, editable, over the socket."""
+
+    async def test_expanding_hands_the_keys_to_the_list(self, app):
+        async with app.run_test() as pilot:
+            configure(pilot.app)
+
+            await pilot.press("g")
+
+            assert pilot.app.focused is pilot.app.query_one(SettingList)
+
+    async def test_it_lists_every_setting_it_was_given(self, app):
+        async with app.run_test() as pilot:
+            settings = configure(pilot.app)
+
+            assert set(names(settings)) == set(CONFIG["values"]) | {"openrouter_api_key"}
+
+    async def test_the_arrows_step_over_the_headings(self, app):
+        """There is nothing to do to a heading, so the cursor never sits on one."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+
+            for _ in range(len(settings.rows) + 2):
+                assert isinstance(settings.rows[settings.cursor], Setting)
+                await pilot.press("down")
+
+    async def test_the_cursor_stops_at_both_ends(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+
+            await pilot.press("up")
+            assert names(settings)[0] == "chat_model"
+            await pilot.press(*(["down"] * (len(settings.rows) + 3)))
+            assert settings.current().name == "openrouter_api_key"
+
+    async def test_enter_opens_the_editor_on_the_value_that_is_set(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+
+            await change(pilot, "max_tool_rounds")
+
+            editor = pilot.app.query_one("#setting-editor", Input)
+            assert pilot.app.focused is editor
+            assert editor.value == "7"
+            assert editor.display
+
+    async def test_submitting_sends_the_new_value(self, connected):
+        async with connected.run_test(size=(120, 40)) as pilot:
+            changed = []
+            pilot.app.apply_setting = lambda name, value: changed.append((name, value))
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "max_tool_rounds")
+
+            pilot.app.query_one("#setting-editor", Input).value = "9"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert changed == [("max_tool_rounds", "9")]
+
+    async def test_the_value_is_not_also_spoken(self, connected):
+        """The app says any submitted Input out loud; this one must not reach it."""
+        sent = []
+
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.send = lambda command, **params: sent.append(command)
+            pilot.app.apply_setting = lambda name, value: None
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "max_tool_rounds")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert sent == []
+
+    async def test_applying_puts_the_editor_away(self, connected):
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.apply_setting = lambda name, value: None
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "max_tool_rounds")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#setting-editor").display
+            assert pilot.app.focused is settings
+
+    async def test_escape_cancels_the_edit_and_leaves_the_panel_open(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "max_tool_rounds")
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#panel-management").has_class("-editing")
+            assert pilot.app.query_one("#panel-management").has_class("-expanded")
+            assert pilot.app.focused is settings
+
+    async def test_a_cancelled_edit_changes_nothing(self, connected):
+        async with connected.run_test(size=(120, 40)) as pilot:
+            changed = []
+            pilot.app.apply_setting = lambda name, value: changed.append((name, value))
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "max_tool_rounds")
+            pilot.app.query_one("#setting-editor", Input).value = "9"
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert changed == []
+
+    async def test_the_next_escape_collapses_the_panel(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await pilot.press("enter")
+
+            await pilot.press("escape")
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#panel-management").has_class("-expanded")
+
+    async def test_the_hotkeys_are_typed_rather_than_fired_while_editing(self, app):
+        """A value is text: `m` in the editor is the letter, not the memory panel."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "max_tool_rounds")
+
+            await pilot.press("m")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#panel-memory").has_class("-expanded")
+            assert pilot.app.query_one("#setting-editor", Input).value.endswith("m")
+
+    async def test_collapsing_while_editing_puts_the_editor_away(self, app):
+        """Hidden with a half-typed value in it, it would come back holding it."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "max_tool_rounds")
+
+            pilot.app.action_expand("panel-management")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#panel-management").has_class("-editing")
+            assert not pilot.app.query_one("#panel-management").has_class("-expanded")
+
+    async def test_enter_on_a_setting_that_cannot_change_says_why(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            said = []
+            pilot.app.notice = lambda line, severity="information": said.append(line)
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            settings.cursor = settings.index_of("embedding_dim")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert any("vector dimension" in line for line in said)
+            assert not pilot.app.query_one("#panel-management").has_class("-editing")
+
+    async def test_it_says_so_when_nothing_is_listening(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            said = []
+            pilot.app.notice = lambda line, severity="information": said.append(line)
+            configure(pilot.app)
+            await pilot.press("g")
+            await pilot.press("enter")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert any("not connected" in line for line in said)
+
+    async def test_a_refresh_keeps_the_cursor_on_the_same_setting(self, app):
+        """Every change repopulates the panel; the cursor must not wander."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await pilot.press("down", "down")
+            held = settings.current().name
+
+            configure(pilot.app)
+
+            assert settings.current().name == held
+
+    async def test_the_summary_shows_what_is_set(self, app):
+        async with app.run_test() as pilot:
+            configure(pilot.app)
+
+            summary = pilot.app.query_one(ManagementPanel).summary()
+
+            assert "openai/gpt-oss-20b:nitro" in summary
+            assert "am_puck" in summary
+            assert "5 live" in summary
+
+    async def test_without_an_assistant_there_is_nothing_to_show(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("g")
+            await pilot.pause()
+
+            assert "no data" in pilot.app.query_one(ManagementPanel).summary()
+            assert "no settings" in pilot.app.query_one(SettingList).render().plain
+
+    async def test_the_hotkeys_still_work_from_inside_the_list(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+
+            await pilot.press("t")
+
+            assert pilot.app.query_one("#panel-tools").has_class("-expanded")
+
+
+class TestChoices:
+    """The menus themselves. Data, but data that goes stale silently."""
+
+    def test_only_the_six_fields_that_name_a_thing_have_one(self):
+        assert set(CHOICES) == {
+            "chat_model",
+            "fact_extraction_model",
+            "deep_model",
+            "tts_voice",
+            "stt_model",
+            "stt_realtime_model",
+        }
+
+    def test_every_menu_is_for_a_real_setting(self):
+        """A typo here would be a menu that never opens."""
+        assert set(CHOICES) <= set(Settings.model_fields)
+
+    def test_the_defaults_config_py_ships_are_offered(self):
+        """Or the menu would not contain the assistant's own starting point."""
+        for name in CHOICES:
+            assert Settings.model_fields[name].default in choices_for(name), name
+
+    def test_the_models_asked_for_are_in_the_list(self):
+        assert "anthropic/claude-sonnet-5" in MODELS
+        assert "anthropic/claude-opus-5" in MODELS
+        assert "meta-llama/llama-4-maverick" in MODELS
+
+    def test_the_voices_are_the_ones_kokoro_carries(self):
+        """Every key of models/voices-v1.0.bin; a name not in it synthesizes nothing."""
+        assert len(VOICES) == 54
+        assert "am_puck" in VOICES
+        assert tuple(sorted(VOICES)) == VOICES
+
+    def test_the_speech_models_are_whisper_sizes(self):
+        assert "tiny.en" in STT_MODELS
+        assert "large-v3-turbo" in STT_MODELS
+        assert len(set(STT_MODELS)) == len(STT_MODELS)
+
+    def test_a_setting_without_a_menu_says_so(self):
+        assert choices_for("relevance_threshold") == ()
+        assert choices_for("not_a_setting") == ()
+
+
+class TestChoiceMenus:
+    """The six settings that name something out of a set open a menu."""
+
+    async def test_a_model_opens_a_menu_rather_than_the_editor(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+
+            await change(pilot, "chat_model")
+
+            menu = pilot.app.query_one(ChoiceList)
+            assert pilot.app.focused is menu
+            assert menu.display
+            assert not pilot.app.query_one("#setting-editor").display
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("chat_model", "anthropic/claude-opus-5"),
+            ("deep_model", "anthropic/claude-sonnet-5"),
+            ("tts_voice", "af_bella"),
+            ("stt_model", "tiny.en"),
+        ],
+    )
+    async def test_each_menu_offers_what_it_should(self, app, name, expected):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+
+            await change(pilot, name)
+
+            assert expected in pilot.app.query_one(ChoiceList).options
+
+    async def test_the_models_asked_for_are_all_there(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+
+            await change(pilot, "chat_model")
+
+            offered = pilot.app.query_one(ChoiceList).options
+            assert "anthropic/claude-sonnet-5" in offered
+            assert "anthropic/claude-opus-5" in offered
+            assert "meta-llama/llama-4-maverick" in offered
+            # And what MINUS is running now, which is the point of a menu.
+            assert "openai/gpt-oss-20b:nitro" in offered
+
+    async def test_it_opens_on_the_value_that_is_set(self, app):
+        """A menu of where you could go, not a list to find yourself in first."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+
+            await change(pilot, "tts_voice")
+
+            menu = pilot.app.query_one(ChoiceList)
+            assert menu.options[menu.cursor] == "am_puck"
+
+    async def test_a_value_of_its_own_is_still_in_the_menu(self, app):
+        """.env may hold any of OpenRouter's four hundred; the menu names five."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            described = {
+                **CONFIG,
+                "values": {**CONFIG["values"], "chat_model": "x-ai/grok-4"},
+                "live": {**CONFIG["live"], "chat_model": "x-ai/grok-4"},
+            }
+            configure(pilot.app, described)
+            await pilot.press("g")
+
+            await change(pilot, "chat_model")
+
+            menu = pilot.app.query_one(ChoiceList)
+            assert menu.options[menu.cursor] == "x-ai/grok-4"
+
+    async def test_choosing_sends_it(self, connected):
+        async with connected.run_test(size=(120, 40)) as pilot:
+            changed = []
+            pilot.app.apply_setting = lambda name, value: changed.append((name, value))
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+
+            await pilot.press("down", "enter")
+            await pilot.pause()
+
+            assert changed == [("tts_voice", "am_santa")]
+
+    async def test_choosing_puts_the_menu_away(self, connected):
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.apply_setting = lambda name, value: None
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#setting-choices").display
+            assert pilot.app.focused is settings
+
+    async def test_escape_cancels_the_menu_and_keeps_the_panel(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "deep_model")
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert not pilot.app.query_one("#setting-choices").display
+            assert pilot.app.query_one("#panel-management").has_class("-expanded")
+            assert pilot.app.focused is settings
+
+    async def test_a_cancelled_menu_changes_nothing(self, connected):
+        async with connected.run_test(size=(120, 40)) as pilot:
+            changed = []
+            pilot.app.apply_setting = lambda name, value: changed.append((name, value))
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+
+            await pilot.press("down", "down", "escape")
+            await pilot.pause()
+
+            assert changed == []
+
+    async def test_the_last_row_opens_the_editor_instead(self, app):
+        """The menu is a shortcut, not a fence."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "chat_model")
+            menu = pilot.app.query_one(ChoiceList)
+            menu.cursor = menu.options.index(OTHER)
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            editor = pilot.app.query_one("#setting-editor", Input)
+            assert pilot.app.focused is editor
+            assert editor.value == "openai/gpt-oss-20b:nitro"
+            assert not pilot.app.query_one("#setting-choices").display
+
+    async def test_typing_another_value_sends_that_one(self, connected):
+        async with connected.run_test(size=(120, 40)) as pilot:
+            changed = []
+            pilot.app.apply_setting = lambda name, value: changed.append((name, value))
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "chat_model")
+            menu = pilot.app.query_one(ChoiceList)
+            menu.cursor = menu.options.index(OTHER)
+            await pilot.press("enter")
+
+            pilot.app.query_one("#setting-editor", Input).value = "x-ai/grok-4"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert changed == [("chat_model", "x-ai/grok-4")]
+
+    async def test_a_threshold_still_takes_typing(self, app):
+        """There is no set of sensible values for one, only a range."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+
+            await change(pilot, "tts_speed")
+
+            assert not pilot.app.query_one("#setting-choices").display
+            assert pilot.app.query_one("#setting-editor").display
+
+    async def test_the_cursor_stops_at_both_ends(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "stt_model")
+            menu = pilot.app.query_one(ChoiceList)
+
+            await pilot.press(*(["up"] * (len(menu.options) + 2)))
+            assert menu.cursor == 0
+            await pilot.press(*(["down"] * (len(menu.options) + 2)))
+            assert menu.cursor == len(menu.options) - 1
+
+
+class TestChoiceListRendering:
+    async def test_it_names_the_setting_it_is_a_menu_for(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+
+            drawn = pilot.app.query_one(ChoiceList).render().plain
+
+            assert "tts_voice" in drawn.splitlines()[0]
+            assert "enter choose" in drawn.splitlines()[-1]
+
+    async def test_the_value_that_is_set_is_marked(self, app):
+        """The star says where you are; the cursor says where you would go."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+            menu = pilot.app.query_one(ChoiceList)
+
+            await pilot.press("down")
+            drawn = [line for line in menu.render().plain.splitlines() if line.strip()]
+
+            assert any(line.startswith("  * am_puck") for line in drawn)
+
+    async def test_it_fills_no_more_than_its_own_height(self, app):
+        """Fifty-four voices in a panel that is twenty rows tall."""
+        async with app.run_test(size=(80, 24)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+            menu = pilot.app.query_one(ChoiceList)
+
+            lines = menu.render().plain.splitlines()
+
+            assert len(lines) == menu.size.height
+            assert all(len(line) <= menu.size.width for line in lines)
+
+    async def test_the_window_follows_the_cursor(self, app):
+        async with app.run_test(size=(80, 24)) as pilot:
+            configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+            menu = pilot.app.query_one(ChoiceList)
+
+            await pilot.press(*(["down"] * (len(menu.options) - 1)))
+            await pilot.pause()
+
+            assert OTHER in menu.render().plain
+            assert "af_alloy" not in menu.render().plain
+
+    async def test_the_list_is_still_visible_behind_it(self, app):
+        """Which setting is being changed stays on screen above the menu."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await change(pilot, "tts_voice")
+
+            assert settings.display
+            assert settings.size.height > 0
+
+
+class TestSettingListRendering:
+    """It draws its own window, so the drawing is worth pinning down."""
+
+    async def test_the_hint_holds_the_bottom_line(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await pilot.pause()
+
+            lines = settings.render().plain.splitlines()
+
+            assert len(lines) == settings.size.height
+            assert "enter edit" in lines[-1]
+
+    async def test_the_row_under_the_cursor_is_written_out_in_full(self, app):
+        """The column is half a terminal wide; a model name is most of that."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            settings.cursor = settings.index_of("deep_model")
+            await pilot.pause()
+
+            detail = " ".join(settings.render().plain.splitlines()[-3:-1])
+
+            assert "deepseek/deepseek-v4-flash-0731:nitro" in detail
+            assert "applies immediately" in detail
+
+    async def test_a_blocked_row_explains_itself_there_too(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            settings.cursor = settings.index_of("console_log_level")
+            await pilot.pause()
+
+            detail = " ".join(settings.render().plain.splitlines()[-3:-1])
+
+            assert "no console handler" in detail
+
+    async def test_no_row_is_folded_onto_a_second_line(self, app):
+        async with app.run_test(size=(80, 24)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await pilot.pause()
+
+            lines = settings.render().plain.splitlines()
+
+            assert len(lines) == settings.size.height
+            assert all(len(line) <= settings.size.width for line in lines)
+
+    async def test_the_window_follows_the_cursor_off_the_bottom(self, app):
+        async with app.run_test(size=(120, 16)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await pilot.press(*(["down"] * len(settings.rows)))
+            await pilot.pause()
+
+            drawn = settings.render().plain
+
+            assert "openrouter_api_key" in drawn
+            assert "chat_model" not in drawn
+
+    async def test_and_back_up_again(self, app):
+        async with app.run_test(size=(120, 16)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+            await pilot.press(*(["down"] * len(settings.rows)))
+            await pilot.press(*(["up"] * len(settings.rows)))
+            await pilot.pause()
+
+            assert "chat_model" in settings.render().plain
+
+    async def test_the_editing_hint_replaces_the_moving_one(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            settings = configure(pilot.app)
+            await pilot.press("g")
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert "esc cancel" in settings.render().plain.splitlines()[-1]
+
+
 class TakeoverPanel(Panel):
     """A panel that wants its expanded view to have the frame to itself."""
 
@@ -1323,6 +2056,57 @@ class TestDeepTimer:
 
             assert "42s" in panel.summary()
             assert "42s" in str(panel.query_one("#summary", Static).content)
+
+
+class TestAgentsPanel:
+    """The question the deep tier is on, in full: it used to be cut at 30."""
+
+    LONG = (
+        "why does the dashboard drop its connection whenever the assistant "
+        "restarts in the middle of a long answer"
+    )
+
+    def thinking(self, question: str) -> dict:
+        return {"deep": {"in_flight": True, "question": question, "started_at": time.time()}}
+
+    def test_wrapping_hangs_every_line_under_the_first(self):
+        wrapped = wrap_indented("one two three four", 10)
+
+        assert wrapped == "  one two\n  three\n  four"
+        assert all(len(line) <= 10 for line in wrapped.splitlines())
+
+    def test_a_word_longer_than_the_column_is_folded_rather_than_dropped(self):
+        assert "".join(wrap_indented("abcdefghij", 6).split()) == "abcdefghij"
+
+    async def test_the_whole_question_is_there(self, app):
+        async with app.run_test() as pilot:
+            panel = pilot.app.query_one(AgentsPanel)
+
+            panel.update(self.thinking(self.LONG))
+            await pilot.pause()
+
+            summary = str(panel.query_one("#summary", Static).content)
+            assert " ".join(summary.split()[4:]) == self.LONG
+            assert len(summary.splitlines()) > 2
+
+    async def test_no_line_is_wider_than_the_panel(self, app):
+        async with app.run_test() as pilot:
+            panel = pilot.app.query_one(AgentsPanel)
+
+            panel.update(self.thinking(self.LONG))
+            await pilot.pause()
+
+            width = panel.content_size.width
+            assert all(len(line) <= width for line in panel.summary().splitlines())
+
+    async def test_a_question_the_assistant_did_not_send_leaves_no_blank_line(self, app):
+        async with app.run_test() as pilot:
+            panel = pilot.app.query_one(AgentsPanel)
+
+            panel.update(self.thinking(""))
+            await pilot.pause()
+
+            assert panel.summary().splitlines() == ["  deep tier: thinking 0s"]
 
 
 class TestPromptPane:

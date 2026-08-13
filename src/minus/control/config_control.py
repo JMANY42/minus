@@ -84,6 +84,13 @@ class ConfigController:
         fields = [name for name in type(self.settings).model_fields if name not in SECRETS]
 
         return {
+            # Every non-secret value in one place, in the order config.py
+            # declares them. The four groups below say what may be *done* with
+            # a field; a reader that wants to show the whole of the
+            # configuration should not have to reassemble it from them -- and
+            # blocked and not-applicable fields have no value in those groups
+            # at all, only a reason.
+            "values": {name: self._value(name) for name in fields},
             "live": {name: self._value(name) for name in fields if name in self.live},
             "restart_required": {
                 name: self._value(name)

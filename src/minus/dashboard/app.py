@@ -26,7 +26,7 @@ from textual.css.query import NoMatches
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
 
-from minus.control.client import ControlClient, NotRunning
+from minus.control.client import ControlClient, ControlError, NotRunning
 from minus.dashboard import service
 from minus.dashboard.tail import (
     ConversationReader,
@@ -46,9 +46,11 @@ from minus.dashboard.widgets import (
     Panel,
     ProgramsPanel,
     PromptPane,
+    SettingList,
     ToolsPanel,
     ViewerPane,
     deep_elapsed,
+    describe_change,
     render_turn,
 )
 from minus.logging_config import CONSOLE_PREFIX
@@ -401,10 +403,18 @@ class MinusDashboard(App):
             notes = self.client.request("list_deep_notes", limit=200)
             conversations = self.client.request("list_conversations", limit=500)
             snapshot = self.client.request("get_status")
+            try:
+                config = self.client.request("get_config")
+            except ControlError:
+                # An assistant with no configuration behind the socket. Not a
+                # disconnect -- every other panel on the screen still works --
+                # so the management panel alone is left saying it has no data.
+                config = None
         except (NotRunning, OSError) as exc:
             self.call_from_thread(self._disconnected, str(exc))
             return
 
+        self.call_from_thread(self._fill, ManagementPanel, config)
         self.call_from_thread(self._fill, ToolsPanel, tools)
         self.call_from_thread(
             self._fill,
@@ -577,6 +587,14 @@ class MinusDashboard(App):
             body.remove_class("-viewer-full")
             return
 
+        management = self.query_one(ManagementPanel)
+        if management.editing():
+            # Before the branch below, which would see only that an Input has
+            # focus and step out to the panel behind it -- leaving the editor
+            # open, and the setting it was opened on unchanged either way.
+            management.close_editor()
+            return
+
         if isinstance(self.focused, Input):
             prior = self._prior_focus
             if prior is not None and prior.focusable:
@@ -609,6 +627,12 @@ class MinusDashboard(App):
         supposed to take without being asked for by name.
         """
         widget = event.widget
+        if isinstance(widget, Input):
+            # Never an input box. Escape's job is to leave one, so returning to
+            # one is the wrong move -- and the management panel's editor is not
+            # laid out at all once it has been left, which is where focus would
+            # then be stranded.
+            return
         if isinstance(widget, Panel) or any(isinstance(node, Panel) for node in widget.ancestors):
             self._prior_focus = widget
 
@@ -705,6 +729,49 @@ class MinusDashboard(App):
         # Redrawn from the store rather than from the assumption that it did
         # what it was asked, which is also what puts the count in the summary
         # right.
+        self.call_from_thread(self.refresh_panels)
+
+    def on_setting_list_refused(self, event: SettingList.Refused) -> None:
+        """Enter on a setting that cannot be changed from here.
+
+        Answered with the reason rather than with nothing: a key that appears
+        to do nothing is indistinguishable from one that is broken.
+        """
+        self.notice(f"{event.name}: {event.reason}", severity="warning")
+
+    def on_management_panel_change(self, event: ManagementPanel.Change) -> None:
+        """A setting has been given a new value in the management panel."""
+        if not self.connected:
+            self.notice("not connected -- MINUS is not running", severity="warning")
+            return
+        self.apply_setting(event.name, event.value)
+
+    @work(thread=True, group="config")
+    def apply_setting(self, name: str, value: str) -> None:
+        """Send one setting, and report what the assistant says it did with it.
+
+        Persisted as well as applied, which is `set_config`'s default: a change
+        made from the dashboard is a change to how MINUS runs, and one that
+        evaporated at the next restart would be the more surprising of the two
+        behaviours.
+        """
+        if self.client is None:
+            return
+        try:
+            result = self.client.request("set_config", values={name: value})
+        except ControlError as exc:
+            # A refusal, not a broken connection: the assistant answered.
+            self.call_from_thread(self.notice, f"{name}: {exc}", "error")
+            return
+        except Exception as exc:
+            self.call_from_thread(self.notice, f"failed to set {name}: {exc}", "error")
+            self.call_from_thread(self._disconnected, str(exc))
+            return
+
+        self.call_from_thread(self.notice, *describe_change(name, result))
+        # Redrawn from what the assistant now reports rather than from the
+        # assumption that it took the value as typed -- it coerces, and a
+        # rejected value must not be left showing as though it had landed.
         self.call_from_thread(self.refresh_panels)
 
     @work(thread=True, group="send")

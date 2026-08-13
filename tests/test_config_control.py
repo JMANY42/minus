@@ -167,6 +167,7 @@ class TestRefusals:
 
         assert "openrouter_api_key" not in described["live"]
         assert "openrouter_api_key" not in described["restart_required"]
+        assert "openrouter_api_key" not in described["values"]
         assert described["secrets"] == sorted(SECRETS)
 
     def test_an_unknown_setting_is_refused(self, wired):
@@ -194,6 +195,36 @@ class TestRefusals:
         assert result["applied"] == ["deep_model"]
         assert "embedding_dim" in result["rejected"]
         assert assistant.thinker.deep_model == "anthropic/claude-opus-5"
+
+
+class TestDescribingEverything:
+    """`values` is what the dashboard's management panel is drawn from."""
+
+    def test_every_field_but_the_secret_carries_its_value(self, wired):
+        controller, _, _, _, _ = wired
+
+        described = controller.describe()
+
+        assert set(described["values"]) == set(Settings.model_fields) - SECRETS
+
+    def test_a_refused_field_still_reports_its_value(self, wired):
+        """Its own group carries the reason and no value; a reader wants both."""
+        controller, _, _, _, settings = wired
+
+        described = controller.describe()
+
+        assert described["values"]["embedding_dim"] == settings.embedding_dim
+        assert described["values"]["console_log_level"] == settings.console_log_level
+
+    def test_the_order_is_the_order_config_py_declares(self, wired):
+        """Which is what groups the panel's rows the way the file reads."""
+        controller, _, _, _, _ = wired
+
+        described = controller.describe()
+
+        assert list(described["values"]) == [
+            name for name in Settings.model_fields if name not in SECRETS
+        ]
 
 
 class TestPersistence:

@@ -126,6 +126,27 @@ Panel.-hidden {
     display: none;
 }
 
+/* The one panel whose summary is not a fixed handful of lines: the deep tier's
+ * question is as long as it is, and the point of showing it is showing all of
+ * it. So it takes the rows its summary needs and the other five split what is
+ * left, up to two fifths of the column -- enough for a spoken question wrapped
+ * at the width of an 80-column screen, and past which it would be squashing
+ * five panels to spare one reader a scroll. A question longer than that scrolls
+ * instead, and `a` still opens it into the whole column. Either way it costs
+ * the other panels nothing except while the tier is actually thinking. */
+#panel-agents {
+    height: auto;
+    max-height: 40%;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+/* Expanded, it is back to being a panel with the column to itself. */
+#panel-agents.-expanded {
+    height: 1fr;
+    max-height: 100%;
+}
+
 /* The half of a panel that only exists once it has the column. Composed with
  * the rest of the panel and hidden here rather than mounted on expansion, so
  * that expanding is a class change and can hand focus over in the same
@@ -157,6 +178,39 @@ Panel.-takeover.-expanded #summary {
  * what it needs is the room left over and no scrollbar. */
 #fact-list {
     height: 1fr;
+}
+
+/* The settings list inside the management panel, on the same terms as the
+ * fact list: it draws its own window and its own footer, so what it wants is
+ * the room that is left and no scrollbar of its own. */
+#setting-list {
+    height: 1fr;
+}
+
+/* The menu of what a setting can be set to. Half the panel while it is open,
+ * against the list's own 1fr, so the row it belongs to is still on screen
+ * above it -- and so neither half needs a height in rows that a short terminal
+ * would then have to be argued with about. */
+#setting-choices {
+    display: none;
+    height: 1fr;
+}
+
+Panel.-choosing #setting-choices {
+    display: block;
+}
+
+/* The editor over a single setting. Not laid out at all until enter opens it,
+ * so the list has the whole panel for as long as nothing is being typed. */
+#setting-editor {
+    display: none;
+    height: 1;
+    border: none;
+    background: ansi_black;
+}
+
+Panel.-editing #setting-editor {
+    display: block;
 }
 
 /* Focus is marked on the bordered pane, not the widget inside it.
