@@ -17,15 +17,12 @@ Three things make that work without the assistant going dead for a minute:
   * The answer comes back in two channels. The short one is spoken; the long
     one goes to a DetailSink and is never read aloud.
 
-WHY THE TOOL LOOP IS DUPLICATED HERE
-------------------------------------
-`Conversation` has one too, and this is deliberately not shared with it. That
-loop carries semantics this tier does not want: a failed tool round does not
-consume the round budget, and a generation failure is recorded into the
-transcript as a turn rather than raised. Both are right for a live conversation
-being persisted to disk and wrong for a detached background job whose only
-output is a queue message. Unifying them would mean parameterising away most of
-what each one does.
+The tool loop itself is not here. It is `loop.py`, shared with `Conversation`,
+and the transcript this tier hands it is built without a memory so that a
+detached background job leaves nothing on disk. What stays this module's own is
+everything around that loop: the one-job-at-a-time flag, the snapshot taken on
+the conversation thread, the two-channel parsing below, and the queue the
+answer leaves by.
 """
 
 from __future__ import annotations
@@ -40,8 +37,8 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import Any
 
-from minus.core.messages import Message
-from minus.errors import ToolError
+from minus.core.loop import ToolLoop
+from minus.core.messages import Message, Transcript
 from minus.prompts import DEEP_SYSTEM_PROMPT
 from minus.services.json import extract_json_object
 
@@ -339,12 +336,25 @@ class DeepThinker:
             )
 
     def _answer(self, question: str, snapshot: list[dict]) -> DeepResult:
-        completion = self._run_tool_loop(self._build_messages(question, snapshot))
-        raw = (completion.choices[0].message.content or "").strip()
-        return self._parse(question, raw)
+        message = ToolLoop(
+            model=self.model,
+            transcript=self._build_transcript(question, snapshot),
+            tools=self.tools,
+            system_prompt=self.system_prompt,
+            max_tool_rounds=self.max_tool_rounds,
+            model_name=self.deep_model,
+            reasoning_effort=self.reasoning_effort,
+        ).run()
+        return self._parse(question, (message.content or "").strip())
 
-    def _build_messages(self, question: str, snapshot: list[dict]) -> list[dict]:
-        messages: list[dict] = []
+    def _build_transcript(self, question: str, snapshot: list[dict]) -> Transcript:
+        """The job's working transcript, built without a memory.
+
+        Nothing here is persisted: this conversation exists for the length of
+        one escalation, and the only part of it anyone keeps is the answer that
+        leaves on the queue.
+        """
+        transcript = Transcript()
 
         recent = self._recent_snapshot()
         if recent:
@@ -355,61 +365,14 @@ class DeepThinker:
             # Full detail never enters the conversation transcript, so without
             # this the tier would forget its own last answer while the fast
             # model still remembers the summary of it.
-            messages.append(
-                Message.system(
-                    f"Your own earlier conclusions in this session:\n\n{prior}"
-                ).to_wire()
+            transcript.append(
+                Message.system(f"Your own earlier conclusions in this session:\n\n{prior}")
             )
 
-        messages.extend(snapshot)
-        messages.append(Message.user(question).to_wire())
-        return messages
-
-    def _run_tool_loop(self, messages: list[dict]) -> Any:
-        schemas = self.tools.schemas() if self.tools else None
-
-        for _ in range(max(self.max_tool_rounds, 1)):
-            completion = self._complete(messages, tools=schemas)
-            message = Message.from_completion(completion.choices[0].message)
-
-            if not message.tool_calls:
-                return completion
-
-            messages.append(message.to_wire())
-            for call in message.tool_calls:
-                messages.append(Message.tool_result(call.id, self._dispatch(call)).to_wire())
-
-        # Out of rounds and still reaching for tools. Ask once more with none
-        # offered so the tier answers from what it has, rather than the caller
-        # getting nothing at all after paying for several rounds.
-        logger.warning(
-            "Deep tier hit its %s-round tool budget; forcing an answer.", self.max_tool_rounds
-        )
-        return self._complete(messages, tools=None)
-
-    def _complete(self, messages: list[dict], *, tools: list[dict] | None) -> Any:
-        return self.model.complete(
-            messages,
-            model=self.deep_model,
-            system_prompt=self.system_prompt,
-            tools=tools,
-            reasoning_effort=self.reasoning_effort,
-        )
-
-    def _dispatch(self, call: Any) -> str:
-        if self.tools is None:
-            # Unreachable in practice -- no schemas are offered when there is no
-            # registry -- but a model that invents a call still gets an answer
-            # it can act on rather than an AttributeError killing the job.
-            return f"Tool {call.name} is not available."
-
-        try:
-            return self.tools.dispatch(call.name, call.arguments)
-        except (ToolError, OSError) as exc:
-            # Same containment as the conversation loop: a bad tool call is
-            # information for the model, not a reason to abandon the answer.
-            logger.warning("Deep tool %s failed: %s", call.name, exc)
-            return f"Tool {call.name} failed: {exc}"
+        for message in snapshot:
+            transcript.append(Message.from_wire(message))
+        transcript.append(Message.user(question))
+        return transcript
 
     # ---- Result handling ----
 
