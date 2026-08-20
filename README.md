@@ -94,6 +94,12 @@ move between things instead: `ctrl+←`/`ctrl+→` switch the view, and
 `ctrl+↑`/`ctrl+↓` page between deep-think notes. Those keep working while the
 input box has focus, which owns the bare arrows for its cursor.
 
+The Linux console does not send a modifier with an arrow key at all — `ctrl+←`
+reaches the dashboard as a plain `←` — so the same two jobs have unmodified
+keys for the tty: `[`/`]` switch the view and `{`/`}` page between notes. Being
+ordinary characters, they are typed rather than obeyed while the input box has
+focus, the same as `1`/`2`/`3`.
+
 Built for the console on the machine itself: sixteen ANSI colours, ASCII
 borders and character meters, because the VT font has no block-drawing glyphs.
 `--unicode` relaxes that over SSH.
