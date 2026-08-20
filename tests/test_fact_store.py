@@ -7,6 +7,8 @@ exercise this logic at all.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from minus.errors import FactStoreError
@@ -21,6 +23,62 @@ def store(tmp_path):
     store = SqliteFactStore(tmp_path / "facts.db", embedder=FakeEmbedder())
     yield store
     store.close()
+
+
+class TestThreadSafety:
+    """The store is opened on one thread and read from others.
+
+    The control socket answers `list_facts` on its own reader thread while the
+    conversation thread owns the connection. sqlite3 refuses that by default,
+    and the failure only appears once a dashboard is actually attached -- so
+    it is worth holding down here rather than discovering it live.
+    """
+
+    def test_reads_from_another_thread(self, store):
+        store.add_fact("favorite_band", "queen")
+        results: list = []
+        errors: list = []
+
+        def read() -> None:
+            try:
+                results.extend(store.get_all_facts())
+            except Exception as exc:  # pragma: no cover - the bug this guards
+                errors.append(exc)
+
+        thread = threading.Thread(target=read)
+        thread.start()
+        thread.join(5)
+
+        assert errors == []
+        assert [fact.value for fact in results] == ["queen"]
+
+    def test_writes_from_several_threads_do_not_corrupt_it(self, store):
+        errors: list = []
+
+        def write(index: int) -> None:
+            try:
+                store.add_fact(f"attribute_{index}", f"value_{index}", multi_valued=True)
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+
+        assert errors == []
+        assert len(store.get_all_facts()) == 8
+
+    def test_a_search_from_another_thread_works(self, store):
+        store.add_fact("chronotype", "night owl")
+        found: list = []
+
+        thread = threading.Thread(target=lambda: found.extend(store.search_facts("sleep")))
+        thread.start()
+        thread.join(5)
+
+        assert isinstance(found, list)
 
 
 class TestAttributeNormalization:

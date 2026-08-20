@@ -17,15 +17,12 @@ Three things make that work without the assistant going dead for a minute:
   * The answer comes back in two channels. The short one is spoken; the long
     one goes to a DetailSink and is never read aloud.
 
-WHY THE TOOL LOOP IS DUPLICATED HERE
-------------------------------------
-`Conversation` has one too, and this is deliberately not shared with it. That
-loop carries semantics this tier does not want: a failed tool round does not
-consume the round budget, and a generation failure is recorded into the
-transcript as a turn rather than raised. Both are right for a live conversation
-being persisted to disk and wrong for a detached background job whose only
-output is a queue message. Unifying them would mean parameterising away most of
-what each one does.
+The tool loop itself is not here. It is `loop.py`, shared with `Conversation`,
+and the transcript this tier hands it is built without a memory so that a
+detached background job leaves nothing on disk. What stays this module's own is
+everything around that loop: the one-job-at-a-time flag, the snapshot taken on
+the conversation thread, the two-channel parsing below, and the queue the
+answer leaves by.
 """
 
 from __future__ import annotations
@@ -40,9 +37,9 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import Any
 
-from minus.core.messages import Message
-from minus.core.prompts import DEEP_SYSTEM_PROMPT
-from minus.errors import ToolError
+from minus.core.loop import ToolLoop
+from minus.core.messages import Message, Transcript
+from minus.prompts import DEEP_SYSTEM_PROMPT
 from minus.services.json import extract_json_object
 
 logger = logging.getLogger(__name__)
@@ -144,6 +141,7 @@ class DeepThinker:
         timeout_seconds: float = 120.0,
         executor: Any | None = None,
         recent_limit: int = 2,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         self.model = model
         self.deep_model = deep_model
@@ -154,6 +152,9 @@ class DeepThinker:
         self.max_tool_rounds = max_tool_rounds
         self.timeout_seconds = timeout_seconds
         self.recent_limit = recent_limit
+        # Fired on both edges of `_busy`, so a dashboard learns that thinking
+        # started without polling. Optional, and never called under the lock.
+        self.on_change = on_change
 
         # Not a `with` block, for the same reason as the TTS chunk executor:
         # __exit__ always waits, and shutdown must be able to abandon a deep
@@ -169,8 +170,50 @@ class DeepThinker:
         self._busy = False
         self._question: str | None = None
         self._started_at = 0.0
+        self._started_at_wall = 0.0
         self._recent: list[DeepResult] = []
         self._snapshot: Callable[[], list[dict]] = list
+
+    # ---- Introspection ----
+
+    def _changed(self) -> None:
+        """Tell whoever is watching that `_busy` flipped.
+
+        Always called outside `self._lock`: the subscriber will most likely
+        ask for `status()`, which takes that same lock. Exceptions are
+        contained for the same reason InterruptBus contains them -- a broken
+        dashboard must not be able to disable escalation.
+        """
+        if self.on_change is None:
+            return
+        try:
+            self.on_change()
+        except Exception:
+            logger.exception("Deep tier state subscriber raised")
+
+    def status(self) -> dict:
+        """What the deep tier is doing, for anything that needs to wait on it.
+
+        Two clocks, because two kinds of reader need different things.
+        `elapsed_seconds` is measured from `_started_at`, a `time.monotonic()`
+        reading that is meaningful only inside this process, and answers the
+        question a one-shot caller asks: how long has this been going?
+
+        A dashboard needs more than that. A snapshot is pushed on state
+        *edges*, so between them a client redrawing once a second has nothing
+        newer to draw and its timer sits still -- which is exactly what it did.
+        `started_at` is a wall-clock reading it can subtract from its own
+        `time.time()` to keep counting between snapshots. Safe because the
+        control channel is a unix socket: the reader is on this machine, and
+        therefore on this clock.
+        """
+        with self._lock:
+            return {
+                "in_flight": self._busy,
+                "question": self._question,
+                "elapsed_seconds": (time.monotonic() - self._started_at if self._busy else None),
+                "started_at": self._started_at_wall if self._busy else None,
+            }
 
     # ---- Wiring ----
 
@@ -234,6 +277,13 @@ class DeepThinker:
             self._busy = True
             self._question = question
             self._started_at = time.monotonic()
+            self._started_at_wall = time.time()
+
+        # Announced before submit(), not after: an inline executor runs the
+        # job on this thread, so a notification after the call would arrive
+        # once the work had already finished and report the two edges in the
+        # wrong order.
+        self._changed()
 
         # Submitted outside the lock. The worker takes the same lock to record
         # its result, so holding it across submit() deadlocks the moment the
@@ -243,6 +293,7 @@ class DeepThinker:
         except Exception:
             with self._lock:
                 self._busy = False
+            self._changed()
             raise
 
         logger.info("Escalated to %s: %s", self.deep_model, question)
@@ -266,6 +317,7 @@ class DeepThinker:
         finally:
             with self._lock:
                 self._busy = False
+            self._changed()
 
         logger.info("Deep tier finished in %.2fs", time.monotonic() - started)
         self._remember(result)
@@ -284,12 +336,25 @@ class DeepThinker:
             )
 
     def _answer(self, question: str, snapshot: list[dict]) -> DeepResult:
-        completion = self._run_tool_loop(self._build_messages(question, snapshot))
-        raw = (completion.choices[0].message.content or "").strip()
-        return self._parse(question, raw)
+        message = ToolLoop(
+            model=self.model,
+            transcript=self._build_transcript(question, snapshot),
+            tools=self.tools,
+            system_prompt=self.system_prompt,
+            max_tool_rounds=self.max_tool_rounds,
+            model_name=self.deep_model,
+            reasoning_effort=self.reasoning_effort,
+        ).run()
+        return self._parse(question, (message.content or "").strip())
 
-    def _build_messages(self, question: str, snapshot: list[dict]) -> list[dict]:
-        messages: list[dict] = []
+    def _build_transcript(self, question: str, snapshot: list[dict]) -> Transcript:
+        """The job's working transcript, built without a memory.
+
+        Nothing here is persisted: this conversation exists for the length of
+        one escalation, and the only part of it anyone keeps is the answer that
+        leaves on the queue.
+        """
+        transcript = Transcript()
 
         recent = self._recent_snapshot()
         if recent:
@@ -300,61 +365,14 @@ class DeepThinker:
             # Full detail never enters the conversation transcript, so without
             # this the tier would forget its own last answer while the fast
             # model still remembers the summary of it.
-            messages.append(
-                Message.system(
-                    f"Your own earlier conclusions in this session:\n\n{prior}"
-                ).to_wire()
+            transcript.append(
+                Message.system(f"Your own earlier conclusions in this session:\n\n{prior}")
             )
 
-        messages.extend(snapshot)
-        messages.append(Message.user(question).to_wire())
-        return messages
-
-    def _run_tool_loop(self, messages: list[dict]) -> Any:
-        schemas = self.tools.schemas() if self.tools else None
-
-        for _ in range(max(self.max_tool_rounds, 1)):
-            completion = self._complete(messages, tools=schemas)
-            message = Message.from_completion(completion.choices[0].message)
-
-            if not message.tool_calls:
-                return completion
-
-            messages.append(message.to_wire())
-            for call in message.tool_calls:
-                messages.append(Message.tool_result(call.id, self._dispatch(call)).to_wire())
-
-        # Out of rounds and still reaching for tools. Ask once more with none
-        # offered so the tier answers from what it has, rather than the caller
-        # getting nothing at all after paying for several rounds.
-        logger.warning(
-            "Deep tier hit its %s-round tool budget; forcing an answer.", self.max_tool_rounds
-        )
-        return self._complete(messages, tools=None)
-
-    def _complete(self, messages: list[dict], *, tools: list[dict] | None) -> Any:
-        return self.model.complete(
-            messages,
-            model=self.deep_model,
-            system_prompt=self.system_prompt,
-            tools=tools,
-            reasoning_effort=self.reasoning_effort,
-        )
-
-    def _dispatch(self, call: Any) -> str:
-        if self.tools is None:
-            # Unreachable in practice -- no schemas are offered when there is no
-            # registry -- but a model that invents a call still gets an answer
-            # it can act on rather than an AttributeError killing the job.
-            return f"Tool {call.name} is not available."
-
-        try:
-            return self.tools.dispatch(call.name, call.arguments)
-        except (ToolError, OSError) as exc:
-            # Same containment as the conversation loop: a bad tool call is
-            # information for the model, not a reason to abandon the answer.
-            logger.warning("Deep tool %s failed: %s", call.name, exc)
-            return f"Tool {call.name} failed: {exc}"
+        for message in snapshot:
+            transcript.append(Message.from_wire(message))
+        transcript.append(Message.user(question))
+        return transcript
 
     # ---- Result handling ----
 

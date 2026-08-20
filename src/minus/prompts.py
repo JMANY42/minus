@@ -7,6 +7,11 @@ but the LLM client needs the memory package. Both `memory/service.py` and
 `memory/condense.py` worked around that with function-local imports and a
 comment explaining the dodge. Keeping prompt text free of behaviour removes
 the cycle instead of hiding it.
+
+It sits at the top level rather than in `core/` for the same reason, one level
+up: `core/agent.py` imports the memory package, and `memory/` imported this
+for the system prompt, so `core` and `memory` each depended on the other.
+Prompt text is wire content that several packages need and none of them owns.
 """
 
 from __future__ import annotations

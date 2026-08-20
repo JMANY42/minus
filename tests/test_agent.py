@@ -1,8 +1,12 @@
-"""Tests for the conversation tool loop.
+"""Tests for the conversation: transcript, fact recall, and closing a session.
 
 Formerly test_conversation.py, which needed fake `openai` and `dotenv` modules
 installed into sys.modules before importing anything. The agent now takes its
-model and tool registry as arguments, so these drive the real loop directly.
+model and tool registry as arguments, so these drive the real thing directly.
+
+The tool loop moved to test_tool_loop.py along with the loop itself. What is
+left here is what `reply` adds on top of it, plus the two ways a conversation
+ends.
 """
 
 from __future__ import annotations
@@ -10,8 +14,7 @@ from __future__ import annotations
 import pytest
 
 import minus.core.agent as agent_module
-from minus.core.prompts import FACTS_MARKER
-from minus.errors import GenerationFailedError
+from minus.prompts import FACTS_MARKER
 from minus.tools.registry import ToolRegistry
 
 from .fakes import FakeChatModel, FakeCompletion, FakeFact, FakeMemory, FakeMessage, FakeToolCall
@@ -33,9 +36,9 @@ def build_conversation(responses, tools=None, memory=None, **kwargs):
     return conversation, model
 
 
-class TestToolLoop:
-    def test_tool_result_feeds_back_into_a_second_turn(self, memory):
-        calls = []
+class TestReply:
+    def test_the_tool_loop_runs_against_the_persisted_transcript(self, memory):
+        """The loop appends through the conversation's own transcript, not a copy."""
         tools = ToolRegistry()
 
         @tools.tool
@@ -45,10 +48,9 @@ class TestToolLoop:
             Args:
                 path: Workspace-relative directory.
             """
-            calls.append(path)
             return "workspace listing"
 
-        conversation, model = build_conversation(
+        conversation, _ = build_conversation(
             [
                 FakeCompletion(
                     FakeMessage(tool_calls=[FakeToolCall("list_workspace_files", '{"path":"."}')])
@@ -59,53 +61,15 @@ class TestToolLoop:
             memory=memory,
         )
 
-        result = conversation.reply("list the workspace")
+        assert conversation.reply("list the workspace") == "I have the workspace listing."
 
-        assert result == "I have the workspace listing."
-        assert calls == ["."]
-        assert len(model.calls) == 2
-        # The tool result is in the transcript the second call sees.
-        roles = [m["role"] for m in model.calls[1]["messages"]]
-        assert "tool" in roles
+        roles = [m["role"] for m in conversation.messages]
+        assert roles == ["user", "assistant", "tool", "assistant"]
+        # Every turn was written through to memory as it landed.
+        assert memory.saved_messages[-1] == conversation.messages
 
-    def test_unknown_tool_is_reported_back_instead_of_crashing(self, memory):
-        conversation, _ = build_conversation(
-            [
-                FakeCompletion(FakeMessage(tool_calls=[FakeToolCall("set_light", "{}")])),
-                FakeCompletion(FakeMessage(content="Sorry, I cannot do that.")),
-            ],
-            memory=memory,
-        )
-
-        assert conversation.reply("turn on the lights") == "Sorry, I cannot do that."
-
-        tool_messages = [m for m in conversation.messages if m["role"] == "tool"]
-        assert len(tool_messages) == 1
-        assert "set_light" in tool_messages[0]["content"]
-
-    def test_a_failed_tool_round_does_not_consume_the_round_budget(self, memory):
-        """A tool error should leave room to recover rather than burning a round."""
-        tools = ToolRegistry()
-
-        @tools.tool
-        def broken() -> str:
-            """Always fails."""
-            raise RuntimeError("nope")
-
-        conversation, _ = build_conversation(
-            [
-                FakeCompletion(FakeMessage(tool_calls=[FakeToolCall("broken", "{}")])),
-                FakeCompletion(FakeMessage(tool_calls=[FakeToolCall("broken", "{}")])),
-                FakeCompletion(FakeMessage(content="Giving up gracefully.")),
-            ],
-            tools=tools,
-            memory=memory,
-            max_tool_rounds=1,
-        )
-
-        assert conversation.reply("do the thing") == "Giving up gracefully."
-
-    def test_exceeding_the_tool_round_budget_raises(self, memory):
+    def test_a_spent_round_budget_answers_rather_than_raising(self, memory):
+        """Exhaustion used to raise, which killed the loop in conversation_loop."""
         tools = ToolRegistry()
 
         @tools.tool
@@ -114,14 +78,17 @@ class TestToolLoop:
             return "ok"
 
         conversation, _ = build_conversation(
-            [FakeCompletion(FakeMessage(tool_calls=[FakeToolCall("noop", "{}")]))] * 4,
+            [
+                FakeCompletion(FakeMessage(tool_calls=[FakeToolCall("noop", "{}")])),
+                FakeCompletion(FakeMessage(tool_calls=[FakeToolCall("noop", "{}")])),
+                FakeCompletion(FakeMessage(content="Here is what I have so far.")),
+            ],
             tools=tools,
             memory=memory,
             max_tool_rounds=2,
         )
 
-        with pytest.raises(GenerationFailedError, match="Tool call limit"):
-            conversation.reply("loop forever")
+        assert conversation.reply("loop forever") == "Here is what I have so far."
 
 
 class TestFactInjection:

@@ -56,6 +56,15 @@ class ToolExecutionError(ToolError):
     """A registered tool raised while running."""
 
 
+class ToolDisabledError(ToolError):
+    """A registered tool was called while switched off for that tier.
+
+    Distinct from `UnknownToolError`: the tool exists and the name is right, so
+    the answer is "not now" rather than "no such thing" -- and a model told the
+    difference is less likely to spend a round guessing at spellings.
+    """
+
+
 class WorkspacePathError(ToolArgumentError):
     """A tool was given a path outside the workspace, or an unusable one."""
 

@@ -20,12 +20,12 @@ from typing import Any
 from uuid import uuid4
 
 from minus.config import Settings
-from minus.core.prompts import SYSTEM_PROMPT
 from minus.memory.condense import condense_conversation
 from minus.memory.extraction import extract_facts_from_conversation
 from minus.memory.facts.store import SqliteFactStore
 from minus.memory.transcript import TranscriptFile
 from minus.paths import condensed_conversations_dir, conversations_dir, semantic_memory_db
+from minus.prompts import SYSTEM_PROMPT
 from minus.services.json import serialize_json
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,12 @@ class MemoryService:
     def __post_init__(self) -> None:
         self.base_dir = Path(self.base_dir)
         self.condensed_base_dir = Path(self.condensed_base_dir)
+        self._open_transcript()
+        self._store = (
+            self.store if self.store is not None else SqliteFactStore(DEFAULT_SEMANTIC_MEMORY_DB)
+        )
+
+    def _open_transcript(self) -> None:
         self.started_at = datetime.now(UTC)
         self._transcript = TranscriptFile(
             directory=self.base_dir,
@@ -69,9 +75,17 @@ class MemoryService:
             started_at=self.started_at,
             system_prompt=self.system_prompt,
         )
-        self._store = (
-            self.store if self.store is not None else SqliteFactStore(DEFAULT_SEMANTIC_MEMORY_DB)
-        )
+
+    def start_new_conversation(self) -> str:
+        """Roll over to a fresh conversation id, file and start time.
+
+        The finished conversation stays on disk untouched; this only stops
+        writing to it. Callers are expected to have condensed and extracted
+        from it first -- see Conversation.start_new_conversation.
+        """
+        self.conversation_id = new_conversation_id()
+        self._open_transcript()
+        return self.conversation_id
 
     @property
     def file_path(self) -> Path:
@@ -156,6 +170,16 @@ class MemoryService:
         touch `_memory_store` directly to log the session's facts.
         """
         return self._store.get_all_facts(only_active=only_active)
+
+    def delete_fact(self, fact_id: str) -> None:
+        """Forget one fact outright, leaving no history behind it.
+
+        Here for the same reason `all_facts` is: pruning is something a caller
+        asks the memory to do, not something it reaches into the private store
+        for. Superseding is what records that a value changed; this is for
+        facts that should never have been learned at all.
+        """
+        self._store.delete_fact(fact_id)
 
     def close(self) -> None:
         self._store.close()

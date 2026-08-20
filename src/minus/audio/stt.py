@@ -9,7 +9,8 @@ edge that `from text_to_speech import request_interrupt` created.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from minus.audio.interrupt import InterruptBus
@@ -53,19 +54,65 @@ class CliTranscriptSource:
 
 
 class MicrophoneTranscriptSource:
-    """RealtimeSTT-backed microphone input with barge-in."""
+    """RealtimeSTT-backed microphone input with barge-in.
 
-    def __init__(self, interrupts: InterruptBus, settings: Any | None = None) -> None:
+    `on_speech` fires when the recorder decides somebody is talking. It is
+    separate from the interrupt bus on purpose, even though both fire from the
+    same two callbacks: barge-in is "stop what you are doing", which anything
+    may ask for, while this is "the microphone can hear a voice", which only
+    the microphone can know. Reporting the phase off the bus meant every
+    interrupt claimed there was speech.
+    """
+
+    def __init__(
+        self,
+        interrupts: InterruptBus,
+        settings: Any | None = None,
+        on_speech: Callable[[], None] | None = None,
+    ) -> None:
         self.interrupts = interrupts
         self.settings = settings
+        self.on_speech = on_speech
+        self._recorder: Any | None = None
+        self._recorder_lock = threading.Lock()
+
+    def stop(self) -> None:
+        """Shut the recorder down. Idempotent, and safe from any thread.
+
+        `__iter__`'s own `finally` only runs when the generator is closed or
+        collected, which stops being reliable the moment something else drives
+        the iteration from a background thread -- that thread is parked inside
+        `recorder.text()` and never reaches the `finally` on its own. Since
+        RealtimeSTT's workers are non-daemon (see below), skipping the shutdown
+        hangs the interpreter at exit, so whoever owns the source needs a way
+        to reach in and stop it.
+
+        The swap-under-lock is what makes a concurrent stop() and a generator
+        teardown safe: exactly one of them gets the recorder.
+        """
+        with self._recorder_lock:
+            recorder, self._recorder = self._recorder, None
+        if recorder is not None:
+            recorder.shutdown()
 
     # These fire on RealtimeSTT's own threads.
-    def _on_voice_activity(self, *args: Any, **kwargs: Any) -> None:
+    def _heard_speech(self) -> None:
         self.interrupts.request()
+        if self.on_speech is None:
+            return
+        try:
+            self.on_speech()
+        except Exception:
+            # A watcher that has gone wrong must not take the microphone with
+            # it, exactly as InterruptBus contains its own subscribers.
+            logger.exception("The speech-onset callback raised")
+
+    def _on_voice_activity(self, *args: Any, **kwargs: Any) -> None:
+        self._heard_speech()
 
     def _on_realtime_update(self, text: str) -> None:
         if text and text.strip():
-            self.interrupts.request()
+            self._heard_speech()
 
     def create_recorder(self) -> Any:
         from RealtimeSTT import AudioToTextRecorder
@@ -100,7 +147,9 @@ class MicrophoneTranscriptSource:
         # the real `daemon` flag False), so without an explicit shutdown() call
         # they keep running after this generator ends and the interpreter hangs
         # at exit waiting for them to finish.
-        recorder = self.create_recorder()
+        with self._recorder_lock:
+            self._recorder = self.create_recorder()
+            recorder = self._recorder
         try:
             while True:
                 text = recorder.text()
@@ -112,4 +161,4 @@ class MicrophoneTranscriptSource:
                     return
                 yield text
         finally:
-            recorder.shutdown()
+            self.stop()

@@ -25,13 +25,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from minus import paths
 
+# Resolved once, at import, rather than left relative. `.env` alone is relative
+# to the working directory, which is fine when you launch from the repo and
+# silently wrong under a systemd unit or from a subdirectory: the API key
+# vanishes and every call comes back 401. The CWD file is kept second so that
+# it still wins where one exists, which preserves today's behaviour.
+_PROJECT_ENV_FILE = paths.project_root() / ".env"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MINUS_",
-        env_file=".env",
+        env_file=(_PROJECT_ENV_FILE, ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
+        # So the dashboard can change a value on a live object and have it
+        # rejected at the setter rather than three seconds later inside a
+        # provider call. No field has a custom validator, so this costs
+        # nothing today and makes `settings.chat_model = 12` an error.
+        validate_assignment=True,
     )
 
     # ---- LLM ----
@@ -64,6 +76,22 @@ class Settings(BaseSettings):
 
     max_retries: int = 3
     max_tool_rounds: int = 7
+
+    # Which tools are switched off, and for which tier: a comma-separated list
+    # of `agent:tool` pairs, e.g. "conversational:escalate,deep:read_workspace_file".
+    # Written by the dashboard's tools panel rather than by hand, and only the
+    # switched-off ones are named -- so a tool a later build adds arrives
+    # switched on rather than missing from a list of everything that was.
+    disabled_tools: str = ""
+
+    # ---- Conversation lifetime ----
+    # How long a silence ends the conversation. On the timeout MINUS condenses
+    # the transcript and extracts durable facts, then starts a fresh
+    # conversation. Without it, that work happens only when the process exits,
+    # so an assistant left running would never learn anything -- and the longer
+    # it ran, the more of one conversation it would try to condense at once.
+    # Set to 0 to disable the rollover and go back to per-process conversations.
+    idle_conversation_seconds: float = 30.0
 
     # ---- Semantic memory ----
     # Calibrated by `minus calibrate`: the midpoint between the direct-match

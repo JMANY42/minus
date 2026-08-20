@@ -20,8 +20,10 @@ this message?" -- never duplicate detection.
 
 from __future__ import annotations
 
+import functools
 import logging
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -51,6 +53,28 @@ _SELECT_COLUMNS = ", ".join(_COLUMNS)
 _SELECT_COLUMNS_F = ", ".join(f"f.{column}" for column in _COLUMNS)
 
 
+def _serialized(method):
+    """Run one caller at a time against the connection.
+
+    The store is opened on the conversation thread and read from others: the
+    control socket answers `list_facts` on its own reader thread, and a
+    dashboard asking what MINUS remembers must not have to wait for the
+    assistant to finish a turn. sqlite3 refuses a connection used from a
+    thread other than the one that made it, so the check is lifted and the
+    serialising this class now owes is done here instead.
+
+    Reentrant, because the public methods call each other -- add_fact goes on
+    to _insert and _mark_superseded.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class SqliteFactStore:
     """A FactStore backed by SQLite with a sqlite-vec embedding index."""
 
@@ -62,7 +86,10 @@ class SqliteFactStore:
         """
         self.db_path = str(db_path)
         self.embedder = embedder or SentenceTransformerEmbedder()
-        self.conn = sqlite3.connect(self.db_path)
+        self._lock = threading.RLock()
+        # See _serialized: the thread check is off because this connection is
+        # deliberately shared, and every entry point takes the lock above.
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
@@ -99,6 +126,7 @@ class SqliteFactStore:
 
     # ---- Writing ----
 
+    @_serialized
     def add_fact(
         self,
         attribute: str,
@@ -190,6 +218,7 @@ class SqliteFactStore:
         )
         self.conn.commit()
 
+    @_serialized
     def supersede_fact(
         self,
         old_fact_id: str,
@@ -215,6 +244,7 @@ class SqliteFactStore:
         self._mark_superseded(old_fact_id, new_id)
         return new_id
 
+    @_serialized
     def delete_fact(self, fact_id: str) -> None:
         """Hard-delete a fact and its embedding.
 
@@ -227,6 +257,7 @@ class SqliteFactStore:
 
     # ---- Reading ----
 
+    @_serialized
     def get_facts_by_attribute(self, attribute: str, only_active: bool = True) -> list[Fact]:
         """Exact-match lookup. The primary path for dedupe and slot-style reads."""
         attribute = normalize_attribute(attribute)
@@ -238,6 +269,7 @@ class SqliteFactStore:
         ).fetchall()
         return [self._row_to_fact(row) for row in rows]
 
+    @_serialized
     def search_facts(self, query: str, top_k: int = 5, only_active: bool = True) -> list[Fact]:
         """Fuzzy semantic search over raw_text, for retrieval only (never dedupe)."""
         active = "f.active = 1 AND " if only_active else ""
@@ -259,6 +291,7 @@ class SqliteFactStore:
             results.append(fact)
         return results
 
+    @_serialized
     def get_all_facts(self, only_active: bool = True) -> list[Fact]:
         active = " WHERE active = 1" if only_active else ""
         rows = self.conn.execute(
@@ -266,6 +299,7 @@ class SqliteFactStore:
         ).fetchall()
         return [self._row_to_fact(row) for row in rows]
 
+    @_serialized
     def get_known_attributes(self, only_active: bool = True) -> list[dict]:
         """Every distinct attribute in use, with its most recent value as an example.
 
@@ -307,6 +341,7 @@ class SqliteFactStore:
             for fact in (self._row_to_fact(row) for row in rows)
         ]
 
+    @_serialized
     def merge_attributes(self, duplicate_attributes: list[str], canonical_attribute: str) -> dict:
         """Reassign facts from near-duplicate attribute names onto one canonical name.
 
@@ -364,6 +399,7 @@ class SqliteFactStore:
             superseded_by=row[9],
         )
 
+    @_serialized
     def close(self) -> None:
         self.conn.close()
 

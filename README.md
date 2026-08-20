@@ -30,30 +30,156 @@ with `MINUS_`-prefixed environment variables — see `src/minus/config.py`.
 ```bash
 minus                  # microphone mode
 minus --no-mic         # type instead of talking
-minus tools            # list the tools the assistant can call
+minus tools            # list each agent's tools, and which are switched off
 minus memory           # interactively prune stored facts
 minus calibrate        # recompute the fact-relevance threshold
 ```
+
+Against an assistant that is already running:
+
+```bash
+minus dash                    # the management dashboard
+minus say "what time is it"   # inject a line, as though it had been spoken
+minus status                  # what it is doing right now
+minus status --watch          # ...and keep printing as that changes
+```
+
+## Dashboard
+
+```bash
+uv sync --extra dashboard
+minus dash            # add --unicode for a terminal emulator rather than a VT
+```
+
+```
+┌───────────────────────────────┬───────────────────────────────┐
+│                               │  MEMORY                   [m] │
+│   viewer            (2/3)     ├───────────────────────────────┤
+│   ← conversation │ log │      │  HARDWARE                 [h] │
+│     deep think →              ├───────────────────────────────┤
+│                               │  TOOLS                    [t] │
+│                               ├───────────────────────────────┤
+├───────────────────────────────┤  EXTERNAL PROGRAMS        [p] │
+│   input             > _       ├───────────────────────────────┤
+├───────────────────────────────┤  AGENTS                   [a] │
+│   console  [c]      (1/3)     ├───────────────────────────────┤
+│   hidden until asked for      │  MANAGEMENT               [g] │
+└───────────────────────────────┴───────────────────────────────┘
+```
+
+It opens holding nothing, so the letter keys are keys rather than typed text.
+`m h t p a g` expands a panel and focuses it, `v` focuses the viewer and `V`
+gives it the whole screen, `tab` walks everything, `enter` expands whatever is
+focused, `i` focuses the input, `s` stops MINUS mid-reply, `e` ends the current
+conversation and opens a fresh one, `c` opens the console, `R` restarts the
+service, and `q` quits **the dashboard, not MINUS**.
+
+`e` is the rollover a silence would eventually do, done now: the conversation
+is condensed, its facts are extracted into the store the next one starts from,
+and the transcript is dropped.
+
+Focus lives in exactly one place: opening a panel takes it off the viewer or
+the console, and pressing `v` or `c` collapses an expanded panel. Pressing the
+key for what you already have puts it back down. The one exception is `i` —
+you can type at the input box with a panel still enlarged behind it.
+
+`escape` walks back out the way you came: it drops fullscreen, then steps out
+of the input box back to the panel it was entered from, then collapses that
+panel, then closes the console, and finally lets go of focus altogether.
+
+The bare arrow keys belong to whatever has focus, so `←`/`→` scroll a wide log
+line sideways and `↑`/`↓` scroll a deep-think note. Both modified with `ctrl`
+move between things instead: `ctrl+←`/`ctrl+→` switch the view, and
+`ctrl+↑`/`ctrl+↓` page between deep-think notes. Those keep working while the
+input box has focus, which owns the bare arrows for its cursor.
+
+Built for the console on the machine itself: sixteen ANSI colours, ASCII
+borders and character meters, because the VT font has no block-drawing glyphs.
+`--unicode` relaxes that over SSH.
+
+It is a separate process and a separate dependency. `minus serve` never
+imports textual. Reads come from the files MINUS already writes, so the log,
+the conversation and the deep-think notes still render with the assistant
+stopped -- only the input box needs the socket.
+
+The console follows the same bargain. `minus serve` redirects its own stdout
+and stderr into `logs/console-*.log` before anything can write to them, which
+is the only way to catch what the C extensions print: they write to the file
+descriptors directly and have never heard of the logging module. Under
+systemd that output went to `/dev/null` and the journal, where the dashboard
+could not reach it.
+
+Three of the six panels do something once they are expanded. `m` lists every
+fact MINUS remembers -- `↑`/`↓` moves, `space` marks, and `d` twice forgets
+what is marked. `t` lists each agent's tools -- `←`/`→` moves between the
+conversational and deep-think agents (and the coding agent, which has none
+yet), and `space` switches the tool under the cursor on or off for that agent
+alone. A tool switched off is no longer offered to that model, and the switch
+is written to `.env` as `MINUS_DISABLED_TOOLS`, so it survives a restart. `g`
+lists every field of `config.py`, changes the ones that can be changed live,
+and says why the rest cannot.
+
+The other two are still scaffolding: they say "nothing here yet", and filling
+one in means returning a list from its `options()`.
+
+## Running as a service
+
+```bash
+minus systemd-unit > ~/.config/systemd/user/minus.service
+systemctl --user daemon-reload
+systemctl --user enable --now minus
+loginctl enable-linger "$USER"     # or it is killed at logout
+```
+
+`minus serve` is the headless mode the unit runs: no console logging, and
+`--no-mic` there means "take input only from the control socket" rather than
+"read stdin", since a service has no stdin worth reading.
+
+The unit is generated rather than tracked, because it has to name this
+checkout and this interpreter. It is a `--user` unit: the assistant's audio
+comes from the login session's PipeWire, which a system service cannot reach.
+
+Stopping is graceful. `systemctl --user stop minus` sends SIGTERM, which ends
+the conversation properly -- condensing it and extracting facts -- rather than
+discarding what the session learned.
+
+### The control socket
+
+A running assistant listens on `$XDG_RUNTIME_DIR/minus/control.sock`
+(newline-delimited JSON; see `src/minus/control/protocol.py`). It doubles as a
+single-instance lock: a second `minus` refuses to start rather than fight the
+first one for the microphone. Pass `--no-control` to run one alongside anyway.
 
 ## Architecture
 
 ```
 src/minus/
-├── cli.py          composition root — the only place that picks implementations
+├── cli.py          argument parsing and one function per subcommand
+├── assembly.py     composition root — the only place that picks implementations
+├── runtime.py      the conversation loop, the deep courier, the idle rollover
 ├── config.py       every tunable value, env-overridable
 ├── paths.py        the single definition of where data lives
-├── core/           protocols, typed messages, prompts, agent loop, deep tier
+├── prompts.py      prompt text; imports nothing but paths, so anything may use it
+├── core/           protocols, typed messages, agent loop, deep tier
 ├── llm/            OpenRouter client + malformed-tool-call retry
 ├── tools/          @tool registry, schema derivation, built-in tools
 ├── memory/         transcripts, condensation, fact extraction, fact store
-├── services/       json helpers, the deep-answer detail sink
+├── services/       json helpers, the deep-answer detail sink, the .env writer
+├── control/        the socket protocol, server, client, live config, systemd
+├── system/         /proc and /sys readers for the hardware panel
+├── dashboard/      the TUI (the only package allowed to import textual)
 └── audio/          interrupt bus, speech-to-text, text-to-speech
 ```
 
 Collaborators are injected rather than imported, and the seams are declared as
 protocols in `core/protocols.py` (`ChatModel`, `TranscriptSource`,
 `SpeechSynthesizer`, `FactStore`, `Embedder`). Swapping a model provider, TTS
-backend or fact store is a change to `cli.py`.
+backend or fact store is a change to `assembly.py`.
+
+The three top-level modules are layered, and only downwards: `cli.py` parses
+arguments and calls into `assembly.py`, which builds the object graph and hands
+it to `runtime.py`, which runs it and constructs none of it. That is what lets
+the tests drive a whole conversation with fakes and no entry point involved.
 
 ### Adding a tool
 
@@ -104,6 +230,11 @@ Minus remembers facts and preferences between sessions:
   comparing the embedding of the message against each fact.
 - When a conversation ends it is condensed, and the LLM extracts durable facts
   from the transcript.
+- A conversation ends after 30 seconds of silence, not when the process does.
+  That timer measures the quiet since MINUS *stopped talking*, so a deep answer
+  that lands two minutes after the question still leaves a full silence to
+  reply into. `MINUS_IDLE_CONVERSATION_SECONDS=0` disables it and goes back to
+  one conversation per run.
 - Facts are structured `(attribute, value)` slots. Dedupe and supersede are
   exact matches on the normalized attribute, not similarity thresholds.
 - Single-valued attributes supersede; multi-valued ones accumulate.
@@ -114,7 +245,7 @@ Known attributes are fed back into the extraction prompt so the model reuses
 ## Development
 
 ```bash
-uv run pytest             # 94 tests, no audio or torch needed
+uv run pytest             # 413 tests, no audio or torch needed
 uv run ruff check .
 uv run ruff format .
 uv run mypy src
@@ -126,7 +257,7 @@ uv run mypy src
 
 - [ ] Play music
 - [ ] Control lights
-- [ ] Build a dedicated MINUS dashboard screen
+- [x] Build a dedicated MINUS dashboard screen
 
 ### General Assistance
 

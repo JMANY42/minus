@@ -1,14 +1,15 @@
 ## New Features
 - Always online
+    - [x] Runs as a systemd --user service (`minus serve`)
     - Always listening
     - When idle, perform background tasks (execute plan)
-- Dashboard
-    - Show current status
-    - Show logs and any info that is helpful
-    - I want the dashboard to be in a similar style to btop
-        - Potential problem: plan on displaying on monitor directly attached to server so only tty colors and no graphics
+- [x] Dashboard (`minus dash`)
+    - [x] Show current status
+    - [x] Show logs and any info that is helpful
+    - [x] btop-style, 16 colours and ASCII borders for the attached VT
+    - Fill in the expanded panels -- each `options()` returns [] today
 - Conversation splitting
-    - Start seperate conversations after pauses
+    - [x] Start seperate conversations after pauses (30s idle, configurable)
     - Allow to jump back into previous conversations
 - Persistant memory
     - Save all conversations

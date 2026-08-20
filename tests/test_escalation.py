@@ -9,6 +9,8 @@ what "already thinking" needs in order to be observable.
 
 from __future__ import annotations
 
+import threading
+import time
 import types
 from queue import Queue
 
@@ -117,6 +119,115 @@ class TestEscalateTool:
         contents = [message["content"] for message in model.calls[0]["messages"]]
         assert "I am refactoring the audio package." in contents
         assert "Where should chunking live?" in contents
+
+
+class TestStatus:
+    """What anything waiting on the deep tier is allowed to see."""
+
+    def test_reports_idle_before_anything_is_asked(self):
+        thinker, _, _ = build_thinker([answer()])
+
+        assert thinker.status() == {
+            "in_flight": False,
+            "question": None,
+            "elapsed_seconds": None,
+            "started_at": None,
+        }
+
+    def test_reports_the_question_while_in_flight(self):
+        thinker, _, _ = build_thinker([answer()], executor=StalledExecutor())
+
+        thinker.escalate("How should the dashboard read status?")
+        status = thinker.status()
+
+        assert status["in_flight"] is True
+        assert status["question"] == "How should the dashboard read status?"
+
+    def test_elapsed_is_a_duration_not_a_timestamp(self):
+        """`_started_at` is monotonic, so it means nothing outside this process."""
+        thinker, _, _ = build_thinker([answer()], executor=StalledExecutor())
+
+        thinker.escalate("Why is this slow?")
+        elapsed = thinker.status()["elapsed_seconds"]
+
+        assert elapsed is not None
+        # A monotonic reading is uptime-sized; a duration measured just now is
+        # not. Anything under a second can only be the latter.
+        assert 0 <= elapsed < 1
+
+    def test_the_start_time_is_a_wall_clock_reading(self):
+        """A watcher subtracts it from its own time.time() to keep counting.
+
+        The elapsed figure beside it is frozen the moment the snapshot is
+        taken, and snapshots are pushed on edges -- so without this the
+        dashboard's timer stopped a second or two into every escalation.
+        """
+        thinker, _, _ = build_thinker([answer()], executor=StalledExecutor())
+
+        thinker.escalate("Why is this slow?")
+        started_at = thinker.status()["started_at"]
+
+        assert started_at is not None
+        assert abs(time.time() - started_at) < 1
+
+    def test_reports_idle_once_the_answer_has_landed(self):
+        thinker, _, results = build_thinker([answer()])
+
+        thinker.escalate("Anything at all")
+        results.get_nowait()
+
+        assert thinker.status()["in_flight"] is False
+        assert thinker.status()["elapsed_seconds"] is None
+
+
+class TestChangeNotifications:
+    """The push half of the deep tier's state, for anything watching."""
+
+    def test_reports_both_edges(self):
+        seen: list[bool] = []
+        thinker, _, results = build_thinker(
+            [answer()], on_change=lambda: seen.append(thinker.status()["in_flight"])
+        )
+
+        thinker.escalate("Something hard")
+        results.get_nowait()
+
+        assert seen == [True, False]
+
+    def test_the_start_is_announced_before_the_finish(self):
+        """An inline executor finishes during submit(); the order must survive."""
+        seen: list[str] = []
+        thinker, _, results = build_thinker(
+            [answer()],
+            on_change=lambda: seen.append("busy" if thinker.status()["in_flight"] else "free"),
+        )
+
+        thinker.escalate("Something hard")
+        results.get_nowait()
+
+        assert seen == ["busy", "free"]
+
+    def test_a_raising_subscriber_does_not_break_escalation(self):
+        def broken() -> None:
+            raise RuntimeError("the dashboard died mid-thought")
+
+        thinker, _, results = build_thinker([answer()], on_change=broken)
+
+        thinker.escalate("Something hard")
+
+        assert results.get_nowait().spoken == "Short spoken line."
+        assert thinker.status()["in_flight"] is False
+
+    def test_nothing_is_announced_when_a_second_question_is_refused(self):
+        seen: list[int] = []
+        thinker, _, _ = build_thinker(
+            [answer()], executor=StalledExecutor(), on_change=lambda: seen.append(1)
+        )
+
+        thinker.escalate("First")
+        thinker.escalate("Second")
+
+        assert len(seen) == 1
 
 
 class TestConversationContext:
@@ -378,7 +489,7 @@ class TestDelivery:
     def test_publishes_detail_speaks_the_summary_and_records_the_turn(self):
         import threading
 
-        from minus.cli import deliver_deep_result
+        from minus.runtime import deliver_deep_result
 
         sink = FakeDetailSink()
         assistant = self._assistant(sink)
@@ -399,7 +510,7 @@ class TestDelivery:
     def test_only_the_summary_reaches_the_transcript(self):
         import threading
 
-        from minus.cli import deliver_deep_result
+        from minus.runtime import deliver_deep_result
 
         assistant = self._assistant(FakeDetailSink())
         result = DeepResult(question="Why?", spoken="Short.", detail="A" * 5000)
@@ -420,8 +531,8 @@ class TestFullLoop:
     """
 
     def test_a_hard_question_is_acked_fast_then_answered_deeply(self):
-        from minus.cli import Assistant, conversation_loop
         from minus.core.agent import Conversation
+        from minus.runtime import Assistant, conversation_loop
 
         model = FakeChatModel(
             [
@@ -465,7 +576,12 @@ class TestFullLoop:
         )
         speaker = FakeSpeaker(token_value=3)
 
-        conversation_loop(["think hard about how memory should be split"], assistant, speaker)
+        conversation_loop(
+            ["think hard about how memory should be split"],
+            assistant,
+            speaker,
+            threading.Lock(),
+        )
 
         spoken = [text for text, _ in speaker.spoken]
         # The quick acknowledgement is spoken first, the deep answer afterwards.
@@ -477,8 +593,8 @@ class TestFullLoop:
         assert model.calls[2]["reasoning_effort"] is None
 
     def test_an_ordinary_turn_never_touches_the_deep_tier(self):
-        from minus.cli import Assistant, conversation_loop
         from minus.core.agent import Conversation
+        from minus.runtime import Assistant, conversation_loop
 
         model = FakeChatModel([FakeCompletion(FakeMessage(content="Just after four."))])
         results: Queue = Queue()
@@ -498,7 +614,7 @@ class TestFullLoop:
         )
         speaker = FakeSpeaker()
 
-        conversation_loop(["what time is it"], assistant, speaker)
+        conversation_loop(["what time is it"], assistant, speaker, threading.Lock())
 
         assert [text for text, _ in speaker.spoken] == ["Just after four."]
         # One call, on the fast tier. This is the property the whole design
@@ -511,7 +627,7 @@ class TestSystemPromptWiring:
     def test_escalation_guidance_is_opt_in(self):
         from pathlib import Path
 
-        from minus.core.prompts import build_system_prompt
+        from minus.prompts import build_system_prompt
 
         plain = build_system_prompt(Path("/tmp/ws"))
         with_escalation = build_system_prompt(Path("/tmp/ws"), can_escalate=True)

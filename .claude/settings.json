@@ -3,5 +3,8 @@
     "deny": [
       "Read(.env)"
     ]
+  },
+  "worktree": {
+    "bgIsolation": "none"
   }
 }
