@@ -168,6 +168,15 @@ class TestLayout:
         async with app.run_test(size=(80, 24)) as pilot:
             assert pilot.app.query_one("#right").size.width > 0
 
+    async def test_the_hint_bar_names_the_bracket_keys_literally(self, app):
+        """The key pair reads as a closing tag to the markup parser Static
+        renders through, so it is escaped in the source and has to come back
+        out as the three characters again."""
+        async with app.run_test() as pilot:
+            rendered = str(pilot.app.query_one("#hints").render())
+
+            assert rendered.startswith("[/] or ctrl+")
+
 
 class TestViewSwitching:
     async def test_starts_on_the_conversation(self, app):
@@ -187,6 +196,31 @@ class TestViewSwitching:
             assert viewer.current == "conversation"
             await pilot.press("ctrl+left")
             assert viewer.current == "deep"
+
+    async def test_the_brackets_cycle_the_views_without_a_modifier(self, app):
+        """The Linux console sends no modifier with an arrow, so ctrl+left never
+        arrives there and the tty needs a key it can actually press."""
+        async with app.run_test() as pilot:
+            viewer = pilot.app.query_one(ViewerPane)
+            pilot.app.set_focus(None)
+
+            await pilot.press("]")
+            assert viewer.current == "log"
+            await pilot.press("]")
+            assert viewer.current == "deep"
+            await pilot.press("[")
+            assert viewer.current == "log"
+
+    async def test_the_brackets_are_typed_while_the_input_has_focus(self, app):
+        """Unlike their ctrl twins: they are characters, and get to be typed."""
+        async with app.run_test() as pilot:
+            pilot.app.query_one("#prompt-input").focus()
+            await pilot.pause()
+
+            await pilot.press("]")
+
+            assert pilot.app.query_one(ViewerPane).current == "conversation"
+            assert pilot.app.query_one("#prompt-input").value == "]"
 
     async def test_the_bare_arrows_are_left_to_the_view(self, app):
         """They scroll a wide log line sideways instead of changing tab."""
@@ -2260,6 +2294,17 @@ class TestDeepNotePaging:
             await pilot.press("ctrl+down")
 
             assert pilot.app.note_index == 1
+
+    async def test_the_braces_page_without_a_modifier(self, app, notes):
+        """The tty's key for it, for the same reason [ and ] exist."""
+        async with app.run_test() as pilot:
+            await pilot.press("3")
+            await pilot.pause()
+
+            await pilot.press("}")
+            assert pilot.app.note_index == 1
+            await pilot.press("{")
+            assert pilot.app.note_index == 0
 
     async def test_the_bare_arrows_no_longer_page(self, app, notes):
         """They belong to the scroller now, which is what makes a long note readable."""
