@@ -33,6 +33,7 @@ minus --no-mic         # type instead of talking
 minus tools            # list each agent's tools, and which are switched off
 minus memory           # interactively prune stored facts
 minus calibrate        # recompute the fact-relevance threshold
+minus google-auth      # connect a Google account for the task/calendar tools
 ```
 
 Against an assistant that is already running:
@@ -149,6 +150,74 @@ A running assistant listens on `$XDG_RUNTIME_DIR/minus/control.sock`
 (newline-delimited JSON; see `src/minus/control/protocol.py`). It doubles as a
 single-instance lock: a second `minus` refuses to start rather than fight the
 first one for the microphone. Pass `--no-control` to run one alongside anyway.
+
+## Google Tasks and Calendar
+
+Minus can add, edit, move and delete both tasks and calendar events by voice
+once a Google account is connected. Nothing is registered until it is, so an
+unconnected install has ten fewer tools rather than ten that fail.
+
+**It asks rather than guesses.** The fields it will not invent are the ones you
+would notice being wrong: a task's title, due date and list; an event's title,
+location, calendar, and whether it is all day or runs between two times. If you
+say "put the dentist in for Tuesday", it asks what time and how long rather than
+inventing an hour-long slot. That is enforced in the tools themselves, not just
+asked for in the prompt — a call missing one of those fields is refused with the
+question to put to you, and the model is told not to call it again until you
+have answered. Saying "there's no due date" or "no location" works too: those
+are answers, and they are recorded as such.
+
+MINUS picks a list or calendar for itself only when there is nothing to choose:
+when you named one, when `.env` names one, or when the account has exactly one
+you can write to. Otherwise it asks. Read-only calendars you subscribe to
+(holidays, birthdays, someone else's shared calendar) are shown when reading and
+never offered as somewhere to put something.
+
+Connecting is a one-time consent round trip through a browser:
+
+1. Create a project at
+   [console.cloud.google.com](https://console.cloud.google.com/projectcreate).
+2. **APIs & Services → Library** — enable both **Google Tasks API** and
+   **Google Calendar API**.
+3. **OAuth consent screen → External.** Add your own Google account under
+   *Audience* as a **Test user**.
+4. **Credentials → Create credentials → OAuth client ID → Desktop app.** Copy
+   the client ID and secret.
+5. Run `minus google-auth`, paste them in, approve in the browser it opens, and
+   let it write the result to `.env`.
+
+That leaves these lines in `.env`:
+
+```bash
+MINUS_GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+MINUS_GOOGLE_CLIENT_SECRET=...
+MINUS_GOOGLE_REFRESH_TOKEN=1//...      # what `minus google-auth` produces
+MINUS_GOOGLE_TASKS_LIST=My Tasks       # optional; stops it asking which list
+MINUS_GOOGLE_CALENDAR=Personal         # optional; stops it asking which calendar
+```
+
+The two optional lines are how you stop being asked every time without MINUS
+ever guessing: naming one is a preference you stated, which is not the same as
+it picking for you. Leave them out on a single-list, single-calendar account —
+there is nothing to choose there, so nothing gets asked.
+
+**Already connected for tasks?** Scopes cannot be added to a grant after the
+fact: a refresh token issued when MINUS only knew about tasks stays a tasks-only
+token, and the calendar tools will tell you so. Enable the Calendar API (step 2)
+and run `minus google-auth` again — it re-approves both and replaces the token.
+
+The refresh token is the only durable part, and it is what the assistant trades
+for an hour-long access token on each run — nothing is written to disk while
+Minus is running, and one token serves both APIs. Two things expire it:
+revoking the app at
+[myaccount.google.com/permissions](https://myaccount.google.com/permissions),
+and leaving the consent screen in **Testing** mode, which expires refresh tokens
+after seven days. Publishing the app on that same screen stops the second one,
+and needs no review while you are its only user. Either way the fix is to run
+`minus google-auth` again.
+
+The tools are conversational-tier only. The deep tier reads files to ground an
+answer; it does not get to put things on your calendar from a background thread.
 
 ## Architecture
 

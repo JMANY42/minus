@@ -69,6 +69,48 @@ class WorkspacePathError(ToolArgumentError):
     """A tool was given a path outside the workspace, or an unusable one."""
 
 
+class ClarificationNeeded(ToolArgumentError):
+    """A tool was called without a fact it is not allowed to invent.
+
+    The distinction from `ToolArgumentError` is who can fix it. Bad arguments
+    are the model's mistake and the model can correct them by trying again; a
+    missing due date or an unnamed calendar is something only the user knows,
+    and retrying can only produce a guess. So this one is turned into an
+    instruction to *ask* rather than an invitation to retry -- see
+    `core/loop.py::tool_failure_message`.
+
+    The message is written as the question to put to the user, because that is
+    what the model is about to say out loud.
+    """
+
+
+# ---- External services ----
+
+
+class ExternalServiceError(MinusError):
+    """A service outside this process refused, or could not be reached."""
+
+
+class GoogleError(ExternalServiceError):
+    """A Google API refused a request or was unreachable.
+
+    One class for Tasks and Calendar rather than one each: they are one grant,
+    one token and one failure mode from a caller's side, and nothing has ever
+    wanted to catch a calendar outage without catching a tasks outage.
+    """
+
+
+class GoogleAuthError(GoogleError):
+    """The stored Google credentials could not be turned into an access token.
+
+    Separate from the API error above because the remedy is different and the
+    user has to perform it: a revoked or expired refresh token is fixed by
+    running `minus google-auth` again, not by retrying the call. The same is
+    true of a grant that predates a scope: a token issued when MINUS only
+    touched tasks cannot read a calendar, and no retry will change that.
+    """
+
+
 # ---- Memory ----
 
 

@@ -84,6 +84,26 @@ class Settings(BaseSettings):
     # switched on rather than missing from a list of everything that was.
     disabled_tools: str = ""
 
+    # ---- Google Tasks ----
+    # The durable half of an OAuth grant. `minus google-auth` performs the
+    # consent round trip once and writes these three; the hour-long access
+    # token they buy is held in memory and never stored. Absent, the five
+    # task tools are simply not registered -- see assembly.build_google_tools.
+    #
+    # MINUS_-prefixed like every other field here rather than bare
+    # GOOGLE_CLIENT_ID: these are this assistant's grant, and a machine that
+    # already exports Google credentials for something else should not have
+    # them silently adopted.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_refresh_token: str = ""
+    # Which list "add milk" means, and which calendar "put it in for Tuesday"
+    # means. Empty is not a default -- it means MINUS asks, unless the account
+    # has only one to choose from. Naming one here is how you stop being asked
+    # every time without MINUS ever guessing. See tools/google_shared.py.
+    google_tasks_list: str = ""
+    google_calendar: str = ""
+
     # ---- Conversation lifetime ----
     # How long a silence ends the conversation. On the timeout MINUS condenses
     # the transcript and extracts durable facts, then starts a fresh

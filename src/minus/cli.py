@@ -20,7 +20,12 @@ import time
 from pathlib import Path
 from queue import Queue
 
-from minus.assembly import build_deep_tools, build_fast_tools, run_assistant
+from minus.assembly import (
+    build_deep_tools,
+    build_fast_tools,
+    build_google_tools,
+    run_assistant,
+)
 from minus.config import Settings, load_settings
 from minus.core.escalation import DeepThinker
 from minus.logging_config import redirect_console, setup_logging
@@ -81,6 +86,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subcommands.add_parser("tools", help="List the tools available to the assistant")
 
+    google = subcommands.add_parser(
+        "google-auth", help="Connect a Google account so the task tools can reach it"
+    )
+    google.add_argument("--client-id", default="", help="OAuth client ID (else .env, else asked)")
+    google.add_argument(
+        "--client-secret", default="", help="OAuth client secret (else .env, else asked)"
+    )
+    google.add_argument(
+        "--write",
+        dest="write",
+        action="store_true",
+        default=None,
+        help="Write the credentials to .env without asking",
+    )
+    google.add_argument(
+        "--no-write",
+        dest="write",
+        action="store_false",
+        help="Only print the credentials, leaving .env alone",
+    )
+
     return parser
 
 
@@ -109,11 +135,15 @@ def run_tools() -> None:
     # tier, because the two do not hold the same set and a flat list could not
     # say which one a tool belonged to.
     thinker = DeepThinker(model=None, deep_model="", results=Queue())
-    policy = build_policy(conversational=build_fast_tools(thinker), deep=build_deep_tools())
+    settings = load_settings()
+    policy = build_policy(
+        conversational=build_fast_tools(thinker, build_google_tools(settings)),
+        deep=build_deep_tools(),
+    )
     thinker.shutdown()
     # The stored switches too: a tool listed as available while .env has it
     # switched off would be the listing lying about the assistant.
-    policy.apply_spec(load_settings().disabled_tools)
+    policy.apply_spec(settings.disabled_tools)
 
     for agent in policy.agents:
         print(f"{agent.title}:")
@@ -273,6 +303,11 @@ def main() -> None:
     if args.command == "tools":
         run_tools()
         return
+
+    if args.command == "google-auth":
+        from minus.scripts.google_auth import run_google_auth
+
+        raise SystemExit(run_google_auth(args.client_id, args.client_secret, write=args.write))
 
     if args.command == "serve":
         run_serve(settings, use_mic=not args.no_mic)

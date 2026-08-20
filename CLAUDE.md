@@ -13,7 +13,7 @@ The venv is already built. Use it directly rather than `uv run` (which re-resolv
 slower here):
 
 ```bash
-.venv/bin/python -m pytest                      # whole suite (~670 tests, seconds)
+.venv/bin/python -m pytest                      # whole suite (~770 tests, seconds)
 .venv/bin/python -m pytest tests/test_agent.py  # one file
 .venv/bin/python -m pytest tests/test_agent.py::test_name
 .venv/bin/python -m pytest -k escalat           # by name
@@ -39,9 +39,11 @@ something you broke — check that your files are the ones reporting:
 the suite passes on a bare core install — keep that guard when adding such a test.
 
 Running it: `minus` (mic), `minus --no-mic` (typed), `minus serve` (headless/systemd),
-`minus dash`, `minus say`, `minus status`, `minus tools`, `minus memory`, `minus calibrate`.
+`minus dash`, `minus say`, `minus status`, `minus tools`, `minus memory`, `minus calibrate`,
+`minus google-auth`.
 
-`.env` holds `OPENROUTER_API_KEY` and any `MINUS_*` overrides; reading it is denied to
+`.env` holds `OPENROUTER_API_KEY`, the three `MINUS_GOOGLE_*` credentials `minus
+google-auth` writes, and any `MINUS_*` overrides; reading it is denied to
 Claude by `.claude/settings.json`. `logs/` and `memory/` are runtime data, gitignored, and
 anchored with a leading slash so they never shadow `src/minus/memory/` (which is code).
 
@@ -118,6 +120,14 @@ an import side effect. The fast tier gets everything registered plus `escalate`;
 tier gets an explicit allowlist (`assembly.DEEP_TOOL_NAMES`), because a background job
 should not inherit tools chosen for a user who is listening.
 
+A tool holding a collaborator cannot be registered at import, so it is built in `assembly.py`
+and attached to the tier's registry there instead: `escalate` needs the thinker, and the ten
+Google tools need the OAuth credentials only `assembly` may read. `build_google_tools` returns
+an empty list when `.env` has none, so an unconnected account leaves the model with fewer tools
+rather than tools that fail — and `build_system_prompt(can_schedule=...)` is threaded off the
+same fact, so the standing scheduling rules are absent rather than talking about a calendar
+nobody connected.
+
 `tools/policy.py::ToolPolicy` groups the per-tier registries under display names for the
 dashboard and turns individual tools on and off. Switches persist as
 `MINUS_DISABLED_TOOLS="conversational:escalate,deep:read_workspace_file"` in `.env` — only
@@ -125,6 +135,31 @@ the *disabled* ones are named, so a tool added by a later build arrives switched
 
 Filesystem tools must route through `tools/workspace.py::resolve_workspace_path`, which
 resolves before checking containment so symlinks out of the workspace are rejected.
+
+## Google tasks and calendar
+
+Two APIs, one grant. `services/google.py::GoogleCredentials` holds the refresh token and the
+access token it buys; `services/google_tasks.py` and `services/google_calendar.py` are thin
+REST wrappers over it, and `tools/google_tasks.py` / `tools/google_calendar.py` hold everything
+model-facing. Scopes are requested together in `minus google-auth` because they cannot be added
+to a grant afterwards — a tasks-only token stays one, which is why a 403 carrying
+`ACCESS_TOKEN_SCOPE_INSUFFICIENT` is rewritten into "run `minus google-auth` again".
+
+**The tools do not guess.** The fields the user owns — a task's title/due/list, an event's
+title/start/end/all-day/location/calendar — are required parameters, so the model cannot omit
+one and have a default chosen quietly. `tools/google_shared.py` holds the rule in one place and
+both families use it: *ambiguous* raises `ClarificationNeeded` (only the user can settle it),
+*not found* raises a plain `ToolArgumentError` carrying the real names (retrying cannot help),
+and *unambiguous* — one calendar, or a name in `.env` — is used without asking, because there
+was nothing to choose. `core/loop.py::tool_failure_message` is what makes it work end to end:
+a `ClarificationNeeded` becomes "ask the user this and do not call the tool again", where every
+other tool failure becomes "retry with valid arguments".
+
+Two conventions worth knowing before editing these. The word `none` in an optional-value field
+(a due date, a location) means "the user said there isn't one", as distinct from `""`, which is
+what an unsure model sends. And `add_google_event` takes `all_day` as a required bool *and*
+checks it against whether `start`/`end` carry times: either half alone is exactly what a guess
+looks like, so a contradiction is a question rather than resolved in favour of one of them.
 
 ## Memory
 

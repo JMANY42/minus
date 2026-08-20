@@ -890,6 +890,7 @@ name = "minus"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "openai" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -924,6 +925,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
     { name = "kokoro-onnx", marker = "extra == 'audio'", specifier = ">=0.5.0" },
     { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' and extra == 'audio'", specifier = ">=12.9" },
     { name = "nvidia-cuda-nvrtc-cu12", marker = "sys_platform == 'linux' and extra == 'audio'", specifier = ">=12.9" },

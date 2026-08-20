@@ -59,16 +59,47 @@ ESCALATION_GUIDANCE = (
 )
 
 
-def build_system_prompt(workspace_root: Path, *, can_escalate: bool = False) -> str:
+SCHEDULING_GUIDANCE = (
+    "You can put things on the user's Google Tasks lists and Google Calendar. "
+    "These tools write to a real account that a real person reads, so a wrong "
+    "value is worse than a missing one -- an appointment invented for the wrong "
+    "hour is a missed appointment. "
+    "For a task, the title, the due date and which list it goes on all come "
+    "from the user. For an event, the title, whether it is all day or runs "
+    "between two times, when it starts, when it ends, where it is, and which "
+    "calendar it goes on all come from the user. "
+    "Ask for anything of that they have not told you, before you call the tool. "
+    "One short question, then wait for the answer -- do not ask and act in the "
+    "same breath. "
+    "Never fill in a value because it seems likely. Do not assume an event "
+    "lasts an hour, do not assume a time of day from a day of the week, do not "
+    "assume something is all day because no time was mentioned, do not assume "
+    "today or tomorrow because a date was not given, and do not pick a list or "
+    "a calendar because it is the obvious one. "
+    "If the user has actually said there is no due date, or no location, pass "
+    'the word "none" for it -- that is different from leaving it out, which '
+    "means you did not ask. "
+    "If a tool comes back asking you to clarify something, that is the tool "
+    "telling you it will not guess either: put the question to the user and "
+    "stop there. Do not call it again with a value you made up."
+)
+
+
+def build_system_prompt(
+    workspace_root: Path, *, can_escalate: bool = False, can_schedule: bool = False
+) -> str:
     """The assistant's standing instructions, bound to a workspace root.
 
     The root is a parameter because it was previously a hard-coded absolute
     path to one developer's home directory, which made the prompt wrong for
     every other checkout.
 
-    `can_escalate` is opt-in rather than always-on because the escalation tool
-    is wired at the composition root. A prompt that advertised a tool the
-    registry does not hold would invite calls that can only fail.
+    `can_escalate` and `can_schedule` are opt-in rather than always-on because
+    both sets of tools are wired at the composition root -- escalation needs
+    the deep tier, and the Google tools need credentials in .env. A prompt that
+    advertised a tool the registry does not hold would invite calls that can
+    only fail, and standing instructions about a calendar nobody connected are
+    just noise in front of every turn.
     """
     base = (
         "You are Minus, a concise helpful voice assistant. "
@@ -90,7 +121,12 @@ def build_system_prompt(workspace_root: Path, *, can_escalate: bool = False) -> 
         # said. Revert this sentence if the weaker wording loses recall.
         "Treat these as reliable background and use them to inform your responses."
     )
-    return f"{base} {ESCALATION_GUIDANCE}" if can_escalate else base
+    sections = [base]
+    if can_escalate:
+        sections.append(ESCALATION_GUIDANCE)
+    if can_schedule:
+        sections.append(SCHEDULING_GUIDANCE)
+    return " ".join(sections)
 
 
 DEEP_SYSTEM_PROMPT = """You are the deep-reasoning tier of a voice assistant named Minus. The fast conversational model has handed you something it could not answer well. You are slower and more capable, and you are expected to actually think.

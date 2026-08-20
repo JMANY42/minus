@@ -63,6 +63,11 @@ from minus.tools.policy import ToolPolicy, UnknownAgentError, build_policy
 # background job should not inherit that by default.
 DEEP_TOOL_NAMES = ("list_workspace_files", "read_workspace_file")
 
+# Deliberately not among them: the Google tools. Reading a file to ground an
+# answer is what the allowlist is for; quietly deleting someone's tasks, or
+# putting an appointment on their calendar, from a background thread minutes
+# after they stopped listening, is not.
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,18 +99,75 @@ def build_tool_policy(assistant: Assistant, settings: Settings | None = None) ->
     return policy
 
 
-def build_fast_tools(thinker: DeepThinker):
-    """Everything registered, plus `escalate`.
+def build_google_tools(settings: Settings) -> list:
+    """The Google tool groups, or an empty list when no account is connected.
+
+    Nothing rather than tools that raise: an unconfigured tool offered to the
+    model is a round trip spent discovering it cannot work, and the model has
+    no way to fix it. Better that the account simply is not there. MINUS
+    without a Google grant genuinely cannot touch anyone's tasks or calendar,
+    and saying nothing is the honest version of that.
+
+    Tasks and Calendar share one `GoogleCredentials` because they are one
+    grant. Two would refresh the same refresh token twice for one boot and
+    would disagree about when it had been revoked.
+
+    Built here because these are credentials, and `assembly` is the only module
+    that reads Settings.
+    """
+    from minus.services.google import GoogleCredentials
+    from minus.services.google_calendar import GoogleCalendarClient
+    from minus.services.google_tasks import GoogleTasksClient
+    from minus.tools.google_calendar import GoogleCalendarTools
+    from minus.tools.google_tasks import GoogleTasksTools
+
+    if not (
+        settings.google_client_id
+        and settings.google_client_secret
+        and settings.google_refresh_token
+    ):
+        logger.info("Google tools are off: no credentials in .env (run `minus google-auth`)")
+        return []
+
+    credentials = GoogleCredentials(
+        settings.google_client_id,
+        settings.google_client_secret,
+        settings.google_refresh_token,
+    )
+    return [
+        GoogleTasksTools(
+            GoogleTasksClient(credentials),
+            default_list=settings.google_tasks_list,
+            timezone=settings.timezone,
+        ),
+        GoogleCalendarTools(
+            GoogleCalendarClient(credentials),
+            default_calendar=settings.google_calendar,
+            timezone=settings.timezone,
+        ),
+    ]
+
+
+def build_fast_tools(thinker: DeepThinker, google_tools: list | None = None):
+    """Everything registered, plus `escalate`, plus whatever needs building.
 
     Deriving the fast tier from the whole registry rather than an allowlist
     means a newly added built-in reaches the conversational model without a
     second edit here -- which is the property that made the registry worth
-    having in the first place.
+    having in the first place. The exceptions are the tools that cannot be
+    registered at import because they hold a collaborator: `escalate` needs the
+    thinker, and the Google tools need credentials. Those are passed in already
+    built rather than built here, because the caller has to know whether they
+    exist for other reasons too -- the system prompt says different things
+    depending.
     """
     from minus.tools import registry
 
     fast = registry.subset(registry.names())
     fast.tool(thinker.escalate)
+
+    for group in google_tools or []:
+        group.register(fast)
     return fast
 
 
@@ -121,7 +183,13 @@ def _conversation_section(assistant: Assistant) -> dict:
 def build_conversation(settings: Settings, state=None) -> Assistant:
     """Construct the model tiers, memory and agent graph."""
     model = OpenRouterClient(settings)
-    system_prompt = build_system_prompt(settings.project_root, can_escalate=True)
+    # Built before the prompt because the prompt depends on whether they exist:
+    # standing instructions about a calendar nobody connected are noise in
+    # front of every turn.
+    google_tools = build_google_tools(settings)
+    system_prompt = build_system_prompt(
+        settings.project_root, can_escalate=True, can_schedule=bool(google_tools)
+    )
 
     memory = MemoryService(
         model=model,
@@ -149,7 +217,7 @@ def build_conversation(settings: Settings, state=None) -> Assistant:
 
     conversation = Conversation(
         model=model,
-        tools=build_fast_tools(thinker),
+        tools=build_fast_tools(thinker, google_tools),
         max_tool_rounds=settings.max_tool_rounds,
         memory=memory,
         system_prompt=system_prompt,

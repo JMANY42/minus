@@ -27,7 +27,17 @@ logger = logging.getLogger(__name__)
 
 # Never leaves the process and never reaches the file from here. The dashboard
 # has no reason to read an API key and no business writing one.
-SECRETS = frozenset({"openrouter_api_key"})
+SECRETS = frozenset(
+    {
+        "openrouter_api_key",
+        # The Google grant is a credential in three parts, and the refresh
+        # token is the half that does not expire. All three are withheld for
+        # the same reason the API key is: a dashboard has no use for them.
+        "google_client_id",
+        "google_client_secret",
+        "google_refresh_token",
+    }
+)
 
 # Not "restart required" -- changing either of these invalidates data that
 # already exists, and a restart does not undo that. The vec0 table's dimension

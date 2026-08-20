@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from minus.core.messages import Message, Transcript
-from minus.errors import GenerationFailedError, LLMError, ToolError
+from minus.errors import ClarificationNeeded, GenerationFailedError, LLMError, ToolError
 from minus.prompts import RETRY_NOTE
 from minus.services.json import pretty_json
 
@@ -66,6 +66,22 @@ def generation_failure_message(exc: BaseException) -> Message:
 
 
 def tool_failure_message(tool_name: str, exc: BaseException) -> str:
+    """What the model is told when a tool call did not go through.
+
+    Two kinds, and the difference is who can fix it. The default is a
+    correction the model can make itself, so it is invited to try again. A
+    `ClarificationNeeded` is not: the tool is missing something only the user
+    knows, and every retry the model makes on its own can only be a guess. So
+    that one is turned into an instruction to stop and ask -- and to *stay*
+    stopped, because a model told merely to "ask" will often ask and then call
+    the tool again in the same turn, answering its own question.
+    """
+    if isinstance(exc, ClarificationNeeded):
+        return (
+            f"{exc} Ask the user this now, in one short question, and wait for their "
+            f"answer. Do not call {tool_name!r} again in this turn, do not guess a "
+            "value, and do not use a default."
+        )
     return (
         f"Tool execution failed for {tool_name!r}: {exc}. "
         "Please retry with valid arguments, or answer without the tool."
