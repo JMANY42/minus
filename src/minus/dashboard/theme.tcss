@@ -180,6 +180,12 @@ Panel.-takeover.-expanded #summary {
     height: 1fr;
 }
 
+/* The tools list inside the tools panel, on the same terms as the fact list:
+ * its own window, its own tab bar and footer, and no scrollbar. */
+#tool-list {
+    height: 1fr;
+}
+
 /* The settings list inside the management panel, on the same terms as the
  * fact list: it draws its own window and its own footer, so what it wants is
  * the room that is left and no scrollbar of its own. */

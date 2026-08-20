@@ -47,6 +47,7 @@ from minus.dashboard.widgets import (
     ProgramsPanel,
     PromptPane,
     SettingList,
+    ToolList,
     ToolsPanel,
     ViewerPane,
     deep_elapsed,
@@ -729,6 +730,41 @@ class MinusDashboard(App):
         # Redrawn from the store rather than from the assumption that it did
         # what it was asked, which is also what puts the count in the summary
         # right.
+        self.call_from_thread(self.refresh_panels)
+
+    def on_tool_list_toggle(self, event: ToolList.Toggle) -> None:
+        """The tools panel has switched one agent's tool on or off."""
+        if not self.connected:
+            self.notice("not connected -- MINUS is not running", severity="warning")
+            # Redrawn from what the assistant actually has, which puts the
+            # checkbox the list flipped optimistically back where it was.
+            self.query_one(ToolsPanel).redraw()
+            return
+        self.switch_tool(event.agent, event.tool, event.enabled)
+
+    @work(thread=True, group="tools")
+    def switch_tool(self, agent: str, tool: str, enabled: bool) -> None:
+        if self.client is None:
+            return
+        try:
+            result = self.client.request(
+                "set_tool_enabled", agent=agent, tool=tool, enabled=enabled
+            )
+        except ControlError as exc:
+            # A refusal, not a broken connection: the assistant answered.
+            self.call_from_thread(self.notice, f"{tool}: {exc}", "error")
+            self.call_from_thread(self.refresh_panels)
+            return
+        except Exception as exc:
+            self.call_from_thread(self.notice, f"failed to switch {tool}: {exc}", "error")
+            self.call_from_thread(self._disconnected, str(exc))
+            return
+
+        state = "on" if enabled else "off"
+        saved = "" if result.get("persisted") else " (this run only)"
+        self.call_from_thread(self.notice, f"{agent}: {tool} switched {state}{saved}")
+        # From what the assistant now reports rather than from the assumption
+        # that it did as it was told -- the same bargain apply_setting strikes.
         self.call_from_thread(self.refresh_panels)
 
     def on_setting_list_refused(self, event: SettingList.Refused) -> None:

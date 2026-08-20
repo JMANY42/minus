@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     max_retries: int = 3
     max_tool_rounds: int = 7
 
+    # Which tools are switched off, and for which tier: a comma-separated list
+    # of `agent:tool` pairs, e.g. "conversational:escalate,deep:read_workspace_file".
+    # Written by the dashboard's tools panel rather than by hand, and only the
+    # switched-off ones are named -- so a tool a later build adds arrives
+    # switched on rather than missing from a list of everything that was.
+    disabled_tools: str = ""
+
     # ---- Conversation lifetime ----
     # How long a silence ends the conversation. On the timeout MINUS condenses
     # the transcript and extracts durable facts, then starts a fresh

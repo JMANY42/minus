@@ -30,6 +30,8 @@ from minus.dashboard.widgets import (
     Panel,
     Setting,
     SettingList,
+    ToolList,
+    ToolsPanel,
     ViewerPane,
     ascii_bar,
     build_setting_rows,
@@ -542,7 +544,7 @@ class TestOneFocusAtATime:
 
             await pilot.press("t")
 
-            assert pilot.app.focused.id == "panel-tools"
+            assert focus_within(pilot.app, "panel-tools")
             assert not pilot.app.query_one("#console").has_pseudo_class("focus-within")
 
     async def test_v_collapses_an_expanded_panel(self, app):
@@ -881,6 +883,293 @@ class TestFactListRendering:
             await pilot.pause()
 
             assert "no facts" in facts.render().plain
+
+
+AGENTS = [
+    {
+        "key": "conversational",
+        "title": "conversational",
+        "note": "",
+        "tools": [
+            {"name": "escalate", "description": "Think harder.", "enabled": True},
+            {"name": "get_current_time", "description": "What time it is.", "enabled": True},
+            {"name": "read_workspace_file", "description": "Read a file.", "enabled": False},
+        ],
+    },
+    {
+        "key": "deep",
+        "title": "deep think",
+        "note": "",
+        "tools": [{"name": "read_workspace_file", "description": "Read a file.", "enabled": True}],
+    },
+    {"key": "coding", "title": "coding", "note": "not implemented yet", "tools": []},
+]
+
+
+def equip(app, agents=AGENTS) -> ToolList:
+    """Fill the tools panel as a `refresh_panels` from a live MINUS would."""
+    app.query_one(ToolsPanel).update(agents)
+    return app.query_one(ToolList)
+
+
+class TestToolsPanel:
+    """The tools panel's own keys: an agent per tab, a switch per tool."""
+
+    async def test_it_opens_on_the_conversational_agent(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert tools.agent()["key"] == "conversational"
+            assert pilot.app.focused is tools
+
+    async def test_right_moves_to_the_deep_agent(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("right")
+            await pilot.pause()
+
+            assert tools.agent()["key"] == "deep"
+            assert "read_workspace_file" in tools.render().plain
+
+    async def test_left_wraps_round_to_the_coding_agent(self, app):
+        """The tabs cycle, exactly as the viewer's do."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("left")
+            await pilot.pause()
+
+            assert tools.agent()["key"] == "coding"
+
+    async def test_the_agent_with_no_tools_says_why(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("left")
+            await pilot.pause()
+
+            assert "not implemented yet" in tools.render().plain
+
+    async def test_the_arrows_do_not_reach_the_viewer(self, app):
+        """The list owns all four, which is what keeps them off the pane behind."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            equip(pilot.app)
+            await pilot.press("t")
+            viewer = pilot.app.query_one(ViewerPane)
+            before = viewer.index
+
+            await pilot.press("left", "right", "up", "down")
+            await pilot.pause()
+
+            assert viewer.index == before
+
+    async def test_space_switches_the_tool_under_the_cursor_off(self, connected):
+        switched = []
+
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.switch_tool = lambda *args: switched.append(args)
+            equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("space")
+            await pilot.pause()
+
+            assert switched == [("conversational", "escalate", False)]
+
+    async def test_space_switches_a_switched_off_tool_back_on(self, connected):
+        switched = []
+
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.switch_tool = lambda *args: switched.append(args)
+            equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("down", "down", "space")
+            await pilot.pause()
+
+            assert switched == [("conversational", "read_workspace_file", True)]
+
+    async def test_it_switches_the_tool_of_the_agent_that_is_showing(self, connected):
+        """The same tool is in both tiers, and the two are switched separately."""
+        switched = []
+
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.switch_tool = lambda *args: switched.append(args)
+            equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("right", "space")
+            await pilot.pause()
+
+            assert switched == [("deep", "read_workspace_file", False)]
+
+    async def test_the_checkbox_flips_without_waiting_for_the_socket(self, connected):
+        """A key that looked dead until a round trip came back would read as broken."""
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.switch_tool = lambda *args: None
+            tools = equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("space")
+            await pilot.pause()
+
+            assert tools.current()["enabled"] is False
+
+    async def test_an_agent_with_no_tools_has_nothing_to_switch(self, connected):
+        switched = []
+
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.switch_tool = lambda *args: switched.append(args)
+            equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("left", "space")
+            await pilot.pause()
+
+            assert switched == []
+
+    async def test_it_says_so_when_nothing_is_listening(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            said = []
+            pilot.app.notice = lambda line, severity="information": said.append(line)
+            tools = equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("space")
+            await pilot.pause()
+
+            assert any("not connected" in line for line in said)
+            # And the optimistic flip is put back, since nothing took it.
+            assert tools.current()["enabled"] is True
+
+    async def test_a_refresh_keeps_the_reader_where_they_were(self, app):
+        """Panels are repopulated after every toggle, and on their own."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+            await pilot.press("right")
+
+            equip(pilot.app)
+            await pilot.pause()
+
+            assert tools.agent()["key"] == "deep"
+
+    async def test_the_hotkeys_still_work_from_inside_the_list(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            equip(pilot.app)
+            await pilot.press("t")
+
+            await pilot.press("m")
+
+            assert pilot.app.query_one("#panel-memory").has_class("-expanded")
+            assert not pilot.app.query_one("#panel-tools").has_class("-expanded")
+
+
+class TestToolsPanelRendering:
+    async def test_the_summary_counts_what_is_actually_on(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            equip(pilot.app)
+
+            summary = pilot.app.query_one(ToolsPanel).summary()
+
+            assert "2/3 on" in summary
+            assert "not implemented yet" in summary
+
+    async def test_without_an_assistant_there_is_nothing_to_show(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert "no data" in pilot.app.query_one(ToolsPanel).summary()
+            assert "no data" in pilot.app.query_one(ToolList).render().plain
+
+    async def test_the_tab_bar_shouts_the_agent_that_is_showing(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+            await pilot.pause()
+
+            header = tools.render().plain.splitlines()[0]
+
+            assert "CONVERSATIONAL" in header
+            assert "deep think" in header
+
+    async def test_a_narrow_panel_still_says_which_agent_is_showing(self, app):
+        """Cropping the full bar would drop the far tab -- where the reader is."""
+        async with app.run_test(size=(60, 20)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+            await pilot.press("left")
+            await pilot.pause()
+
+            header = tools.render().plain.splitlines()[0]
+
+            assert "CODING" in header
+            assert "(3/3)" in header
+
+    async def test_the_footer_holds_the_bottom_line(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+            await pilot.pause()
+
+            lines = tools.render().plain.splitlines()
+
+            assert len(lines) == tools.size.height
+            assert "space on/off" in lines[-1]
+
+    async def test_the_cursor_row_is_written_out_underneath(self, app):
+        """The rows are names alone; the description has to go somewhere."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+            await pilot.pause()
+
+            lines = tools.render().plain.splitlines()
+
+            assert "Think harder." in lines[-3]
+
+    async def test_a_long_row_is_cropped_rather_than_folded(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(
+                pilot.app,
+                [
+                    {
+                        "key": "conversational",
+                        "title": "conversational",
+                        "note": "",
+                        "tools": [{"name": "x" * 300, "description": "y " * 300, "enabled": True}],
+                    }
+                ],
+            )
+            await pilot.press("t")
+            await pilot.pause()
+
+            lines = tools.render().plain.splitlines()
+
+            assert all(len(line) <= tools.size.width for line in lines)
+            assert "space on/off" in lines[-1]
+
+    async def test_an_older_assistant_sends_a_flat_list(self, app):
+        """It answered with the conversational tier's tools and nothing else."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(
+                pilot.app,
+                [{"name": "get_current_time", "description": "What time it is."}],
+            )
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert tools.agent()["key"] == "conversational"
+            assert tools.current()["enabled"] is True
+            assert "1/1 on" in pilot.app.query_one(ToolsPanel).summary()
 
 
 CONFIG = {

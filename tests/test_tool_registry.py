@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from minus.errors import ToolArgumentError, ToolExecutionError, UnknownToolError, WorkspacePathError
+from minus.errors import (
+    ToolArgumentError,
+    ToolDisabledError,
+    ToolExecutionError,
+    UnknownToolError,
+    WorkspacePathError,
+)
 from minus.tools.registry import ToolRegistry
 from minus.tools.schema import split_docstring
 from minus.tools.workspace import resolve_workspace_path
@@ -247,3 +253,93 @@ class TestSubset:
         assert schema["name"] == "escalate"
         assert "self" not in schema["parameters"]["properties"]
         assert schema["parameters"]["required"] == ["question"]
+
+
+def _two_tools() -> ToolRegistry:
+    registry = ToolRegistry()
+
+    @registry.tool
+    def alpha() -> str:
+        """Alpha tool."""
+        return "a"
+
+    @registry.tool
+    def beta() -> str:
+        """Beta tool."""
+        return "b"
+
+    return registry
+
+
+class TestSwitchingToolsOff:
+    """The dashboard's tools panel, at the level the registry sees it."""
+
+    def test_a_switched_off_tool_is_not_offered_to_the_model(self):
+        registry = _two_tools()
+
+        registry.set_enabled("beta", False)
+
+        assert [schema["function"]["name"] for schema in registry.schemas()] == ["alpha"]
+
+    def test_it_is_still_registered_so_it_can_come_back(self):
+        registry = _two_tools()
+        registry.set_enabled("beta", False)
+
+        assert "beta" in registry
+        assert registry.names() == ["alpha", "beta"]
+        assert registry.enabled("beta") is False
+
+    def test_switching_it_back_on_restores_it(self):
+        registry = _two_tools()
+        registry.set_enabled("beta", False)
+
+        registry.set_enabled("beta", True)
+
+        assert registry.enabled("beta") is True
+        assert len(registry.schemas()) == 2
+
+    def test_calling_a_switched_off_tool_is_refused(self):
+        """A model that invents the call gets an answer it can act on."""
+        registry = _two_tools()
+        registry.set_enabled("beta", False)
+
+        with pytest.raises(ToolDisabledError):
+            registry.dispatch("beta")
+
+    def test_switching_an_unknown_tool_fails_loudly(self):
+        with pytest.raises(UnknownToolError):
+            _two_tools().set_enabled("gamma", False)
+
+    def test_describe_lists_every_tool_with_its_switch(self):
+        registry = _two_tools()
+        registry.set_enabled("beta", False)
+
+        described = registry.describe()
+
+        assert [tool["name"] for tool in described] == ["alpha", "beta"]
+        assert [tool["enabled"] for tool in described] == [True, False]
+        assert described[0]["description"] == "Alpha tool."
+
+    def test_set_disabled_is_the_whole_state_at_once(self):
+        """Applying a stored spec cannot leave something off that it omits."""
+        registry = _two_tools()
+        registry.set_enabled("alpha", False)
+
+        registry.set_disabled(["beta"])
+
+        assert registry.disabled == ["beta"]
+
+    def test_set_disabled_rejects_a_name_that_is_not_registered(self):
+        with pytest.raises(UnknownToolError):
+            _two_tools().set_disabled(["gamma"])
+
+    def test_a_subset_inherits_the_switch_but_not_the_switching(self):
+        """One Tool object, two tiers: switching it in one must not move the other."""
+        registry = _two_tools()
+        registry.set_enabled("beta", False)
+
+        scoped = registry.subset(["alpha", "beta"])
+        scoped.set_enabled("beta", True)
+
+        assert scoped.enabled("beta") is True
+        assert registry.enabled("beta") is False

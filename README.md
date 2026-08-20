@@ -30,7 +30,7 @@ with `MINUS_`-prefixed environment variables — see `src/minus/config.py`.
 ```bash
 minus                  # microphone mode
 minus --no-mic         # type instead of talking
-minus tools            # list the tools the assistant can call
+minus tools            # list each agent's tools, and which are switched off
 minus memory           # interactively prune stored facts
 minus calibrate        # recompute the fact-relevance threshold
 ```
@@ -109,8 +109,18 @@ descriptors directly and have never heard of the logging module. Under
 systemd that output went to `/dev/null` and the journal, where the dashboard
 could not reach it.
 
-The expanded panels are scaffolding: each one says "nothing here yet", and
-filling one in means returning a list from its `options()`.
+Three of the six panels do something once they are expanded. `m` lists every
+fact MINUS remembers -- `↑`/`↓` moves, `space` marks, and `d` twice forgets
+what is marked. `t` lists each agent's tools -- `←`/`→` moves between the
+conversational and deep-think agents (and the coding agent, which has none
+yet), and `space` switches the tool under the cursor on or off for that agent
+alone. A tool switched off is no longer offered to that model, and the switch
+is written to `.env` as `MINUS_DISABLED_TOOLS`, so it survives a restart. `g`
+lists every field of `config.py`, changes the ones that can be changed live,
+and says why the rest cannot.
+
+The other two are still scaffolding: they say "nothing here yet", and filling
+one in means returning a list from its `options()`.
 
 ## Running as a service
 

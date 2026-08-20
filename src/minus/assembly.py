@@ -41,6 +41,7 @@ from minus.control.state import HEARING, RuntimeState
 from minus.core.agent import Conversation
 from minus.core.escalation import DeepThinker
 from minus.core.sources import MergedTranscriptSource
+from minus.errors import ToolError
 from minus.llm.client import OpenRouterClient
 from minus.memory.service import MemoryService
 from minus.paths import control_socket, conversations_dir, deep_notes_dir, project_root
@@ -54,6 +55,7 @@ from minus.runtime import (
 )
 from minus.services.detail import FileDetailSink
 from minus.services.json import read_json
+from minus.tools.policy import ToolPolicy, UnknownAgentError, build_policy
 
 # What the deep tier is allowed to touch from its background thread. An
 # explicit allowlist rather than "everything the fast model has": the fast
@@ -69,6 +71,27 @@ def build_deep_tools():
     from minus.tools import registry
 
     return registry.subset(DEEP_TOOL_NAMES)
+
+
+def build_tool_policy(assistant: Assistant, settings: Settings | None = None) -> ToolPolicy:
+    """The tiers' registries, gathered under the names a dashboard shows them by.
+
+    Read off the assembled graph rather than built alongside it, so there is
+    still exactly one place each registry is created and this cannot drift into
+    describing a toolset nobody is actually using. The coding agent has no
+    registry because there is no coding tier; it is listed anyway, with the
+    reason, so the panel has the shape it will keep.
+
+    `settings` is applied on the way out, which is what makes a tool switched
+    off from the dashboard yesterday still switched off today.
+    """
+    policy = build_policy(
+        conversational=assistant.conversation.tools,
+        deep=getattr(assistant.thinker, "tools", None),
+    )
+    if settings is not None:
+        policy.apply_spec(settings.disabled_tools)
+    return policy
 
 
 def build_fast_tools(thinker: DeepThinker):
@@ -177,7 +200,7 @@ def _newest(directory: Path, limit: int) -> list[Path]:
 
 
 def build_config_controller(
-    assistant: Assistant, speaker, source, settings: Settings
+    assistant: Assistant, speaker, source, settings: Settings, policy: ToolPolicy | None = None
 ) -> ConfigController:
     """Which settings apply live, and what each one actually writes.
 
@@ -209,6 +232,19 @@ def build_config_controller(
     def set_log_level(value: Any) -> None:
         logging.getLogger().setLevel(value)
         settings.log_level = value
+
+    def set_disabled_tools(value: Any) -> None:
+        """Apply a whole disabled-tools spec to the registries.
+
+        Live because the registries are read per turn: `ToolLoop` asks for
+        schemas at the start of each one, so a tool switched off here is gone
+        from the next thing the model is offered. Idempotent, which matters
+        because the tools panel has usually applied its own change to the
+        registry already and is only passing through here to have it written.
+        """
+        if policy is not None:
+            policy.apply_spec(value)
+        settings.disabled_tools = value
 
     table: dict[str, Callable[[Any], None]] = {
         # Read per call from the Settings object the client holds.
@@ -255,6 +291,7 @@ def build_config_controller(
             on(source, "idle_timeout"), on_settings("idle_conversation_seconds")
         ),
         "log_level": set_log_level,
+        "disabled_tools": set_disabled_tools,
     }
 
     return ConfigController(
@@ -265,7 +302,7 @@ def build_config_controller(
 
 
 def build_control_handlers(
-    assistant: Assistant, source, interrupts, state, config=None, floor=None
+    assistant: Assistant, source, interrupts, state, config=None, floor=None, policy=None
 ) -> dict:
     """What the control socket is allowed to ask of a running assistant.
 
@@ -276,9 +313,11 @@ def build_control_handlers(
     `floor` must be the lock the conversation loop holds, or a command that
     touches the transcript can run while a turn is being spoken into it. A
     fresh one is made when it is absent so this stays callable with the four
-    collaborators a test cares about.
+    collaborators a test cares about. `policy` is derived from the assistant on
+    the same terms, and for the same reason.
     """
     floor = floor if floor is not None else threading.Lock()
+    policy = policy if policy is not None else build_tool_policy(assistant)
 
     def say(params: dict) -> dict:
         text = params.get("text")
@@ -331,6 +370,35 @@ def build_control_handlers(
             assistant.memory.delete_fact(str(fact_id))
         return {"deleted": len(ids)}
 
+    def set_tool_enabled(params: dict) -> dict:
+        """Switch one tool on or off for one agent.
+
+        Persisted through the configuration controller rather than written
+        here, so a toggle made from the dashboard survives a restart on exactly
+        the terms every other change from the dashboard does -- and so there is
+        still only one thing that writes .env.
+        """
+        agent = params.get("agent")
+        tool = params.get("tool")
+        enabled = params.get("enabled")
+        if not isinstance(agent, str) or not isinstance(tool, str):
+            raise ProtocolError("agent and tool must be strings", BAD_PARAMS)
+        if not isinstance(enabled, bool):
+            raise ProtocolError("enabled must be true or false", BAD_PARAMS)
+
+        try:
+            result = policy.set_enabled(agent, tool, enabled)
+        except (UnknownAgentError, ToolError) as exc:
+            raise ProtocolError(str(exc), BAD_PARAMS) from exc
+
+        if config is not None:
+            outcome = config.apply({"disabled_tools": result.pop("spec")}, persist=True)
+            result["persisted"] = bool(outcome.get("persisted"))
+        else:
+            result.pop("spec")
+            result["persisted"] = False
+        return result
+
     def get_config(params: dict) -> dict:
         if config is None:
             raise ProtocolError("Configuration is not available", BAD_PARAMS)
@@ -358,13 +426,12 @@ def build_control_handlers(
         "say": say,
         "interrupt": lambda params: {"generation": interrupts.request()},
         "end_conversation": end_conversation,
-        "list_tools": lambda params: [
-            {
-                "name": schema["function"]["name"],
-                "description": schema["function"]["description"],
-            }
-            for schema in assistant.conversation.tools.schemas()
-        ],
+        # Grouped by the agent that may call them, and every agent is listed --
+        # including the coding tier, which has no tools because it does not
+        # exist yet. A flat list could not say which tier a tool belonged to,
+        # and the two tiers do not hold the same set.
+        "list_tools": lambda params: policy.describe(),
+        "set_tool_enabled": set_tool_enabled,
         "list_facts": lambda params: [
             _fact_summary(fact) for fact in assistant.memory.all_facts()[: limit_of(params)]
         ],
@@ -446,6 +513,11 @@ def run_assistant(
     )
     state.provide("conversation", lambda: _conversation_section(assistant))
 
+    # Built here rather than inside the handlers so that the stored spec is
+    # applied to the registries before the first turn, and so the config
+    # controller and the control socket are talking about the same object.
+    policy = build_tool_policy(assistant, settings)
+
     server = None
     if control:
         server = ControlServer(
@@ -455,8 +527,9 @@ def run_assistant(
                 source,
                 interrupts,
                 state,
-                build_config_controller(assistant, voice, source, settings),
+                build_config_controller(assistant, voice, source, settings, policy),
                 floor=floor,
+                policy=policy,
             ),
             state=state,
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import textwrap
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -113,6 +114,21 @@ def crop(line: Text, width: int, pad: bool = False) -> Text:
     return line
 
 
+def tab_bar(titles: Sequence[str], index: int) -> str:
+    """`←  a │ B │ c  →`: the selected one shouted, the arrows saying how to move.
+
+    The viewer's tabs and the tools panel's agents are the same thing said
+    twice -- one row of names with one of them current, moved between with left
+    and right -- so they are drawn by the same function. Uppercase rather than
+    a colour because it survives the sixteen the console has and reads the same
+    on a panel that is not focused.
+    """
+    labels = [
+        f" {title.upper()} " if at == index else f" {title} " for at, title in enumerate(titles)
+    ]
+    return "←" + "│".join(labels) + "→"
+
+
 def human_bytes(count: float) -> str:
     for unit in ("B", "K", "M", "G", "T"):
         if count < 1024:
@@ -203,11 +219,8 @@ class ViewerPane(Vertical):
         getattr(view, f"scroll_{direction}")(animate=False)
 
     def refresh_tabs(self) -> None:
-        labels = []
-        for index, view in enumerate(self.VIEWS):
-            title = self.TITLES[view]
-            labels.append(f" {title.upper()} " if index == self.index else f" {title} ")
-        self.query_one("#viewer-tabs", Static).update("←" + "│".join(labels) + "→")
+        titles = [self.TITLES[view] for view in self.VIEWS]
+        self.query_one("#viewer-tabs", Static).update(tab_bar(titles, self.index))
 
 
 class PromptPane(Vertical):
@@ -573,19 +586,276 @@ class HardwarePanel(Panel):
         return "\n".join(lines)
 
 
+def tool_agents(data: Any) -> list[dict]:
+    """`list_tools` as the panel wants it, whatever shape it arrived in.
+
+    The command answers with one entry per agent now. It used to answer with a
+    flat list of the conversational tier's tools, and an assistant running an
+    older build still does -- so that shape is lifted into a single agent here
+    rather than left to draw an empty panel against a MINUS that is in fact
+    working perfectly well.
+    """
+    if not data:
+        return []
+    first = data[0]
+    if isinstance(first, dict) and "tools" in first:
+        return list(data)
+    return [
+        {
+            "key": "conversational",
+            "title": "conversational",
+            "note": "",
+            # An older assistant has no notion of a tool being switched off, so
+            # everything it lists is on.
+            "tools": [{**tool, "enabled": tool.get("enabled", True)} for tool in data],
+        }
+    ]
+
+
+class ToolList(Widget, can_focus=True):
+    """One agent's tools at a time, each with a switch.
+
+    The third list built on the pattern FactList set -- its own window, its own
+    cursor, its own footer -- and the first with a second axis: left and right
+    move between agents, up and down between that agent's tools. Owning all
+    four outright is what keeps the arrows from reaching the viewer behind it,
+    and drawing its own window is what lets it keep the cursor on screen
+    without a scroller.
+
+    A checkbox here means what a checkbox usually means and not what the fact
+    list's means: `[x]` is a tool the agent may call, `[ ]` one that has been
+    switched off. The fact list marks rows for an action still to come; there
+    is no such pending state here, because space *is* the action.
+
+    An agent with no tools is still an agent: the coding tier is drawn with the
+    reason its list is empty rather than left out of the tab bar until it
+    exists, so the shape of this panel does not change when it arrives.
+    """
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("up,k", "move(-1)", "up", show=False),
+        Binding("down,j", "move(1)", "down", show=False),
+        Binding("left", "cycle_agent(-1)", "prev agent", show=False),
+        Binding("right", "cycle_agent(1)", "next agent", show=False),
+        Binding("space", "switch", "on/off", show=False),
+        # No `h`/`l` beside the arrows, tempting as the vi pair is: a focused
+        # widget's bindings beat the app's, and `h` is how the hardware panel
+        # is opened. The same trap FactList documents for `a`.
+    ]
+
+    HINT = "  ↑↓ move · ←→ agent · space on/off"
+    # The tab bar at the top.
+    HEADER_LINES = 1
+    # Two lines saying what the tool under the cursor does, then the hint.
+    # Fixed, so the number of rows the window holds does not change as the
+    # cursor moves.
+    FOOTER_LINES = 3
+
+    class Toggle(Message):
+        """The user has switched one agent's tool on or off."""
+
+        def __init__(self, agent: str, tool: str, enabled: bool) -> None:
+            self.agent = agent
+            self.tool = tool
+            self.enabled = enabled
+            super().__init__()
+
+    def __init__(self) -> None:
+        super().__init__(id="tool-list")
+        self.agents: list[dict] = []
+        self.agent_index = 0
+        self.cursor = 0
+        self.top = 0
+
+    # ---- Contents ----
+
+    def set_agents(self, agents: list[dict]) -> None:
+        """Take a fresh `list_tools` without losing the reader's place in it.
+
+        By name on both axes, not by index: the panel is repopulated after
+        every toggle, and a list that renumbered itself under the cursor would
+        move it to a different tool each time one was switched.
+
+        Copied rather than held: `action_toggle` flips a checkbox before the
+        socket has answered, and doing that to the panel's own data would leave
+        the panel unable to put it back when the answer never came.
+        """
+        held_agent = self.agent().get("key")
+        held_tool = (self.current() or {}).get("name")
+
+        self.agents = [
+            {**agent, "tools": [dict(tool) for tool in agent.get("tools") or []]}
+            for agent in agents
+        ]
+        self.agent_index = self._index_of_agent(held_agent)
+        self.cursor = self._index_of_tool(held_tool)
+        self.refresh()
+
+    def _index_of_agent(self, key: str | None) -> int:
+        for index, agent in enumerate(self.agents):
+            if agent.get("key") == key:
+                return index
+        return min(self.agent_index, max(len(self.agents) - 1, 0))
+
+    def _index_of_tool(self, name: str | None) -> int:
+        for index, tool in enumerate(self.tools):
+            if tool.get("name") == name:
+                return index
+        return max(0, min(self.cursor, len(self.tools) - 1))
+
+    def agent(self) -> dict:
+        if 0 <= self.agent_index < len(self.agents):
+            return self.agents[self.agent_index]
+        return {}
+
+    @property
+    def tools(self) -> list[dict]:
+        return self.agent().get("tools") or []
+
+    def current(self) -> dict | None:
+        tools = self.tools
+        if 0 <= self.cursor < len(tools):
+            return tools[self.cursor]
+        return None
+
+    # ---- Keys ----
+
+    def action_move(self, step: int) -> None:
+        self.cursor = max(0, min(self.cursor + step, len(self.tools) - 1))
+        self.refresh()
+
+    def action_cycle_agent(self, step: int) -> None:
+        """Left and right, wrapping -- the viewer's tabs behave the same way."""
+        if not self.agents:
+            return
+        self.agent_index = (self.agent_index + step) % len(self.agents)
+        self.cursor = 0
+        self.top = 0
+        self.refresh()
+
+    def action_switch(self) -> None:
+        """Not `action_toggle`: DOMNode already has one, for toggling a reactive."""
+        tool = self.current()
+        if tool is None:
+            return
+        enabled = not tool.get("enabled", True)
+        # Flipped here as well as sent: the round trip goes over a socket and
+        # comes back as a whole fresh list, and a checkbox that waited for that
+        # would read as a key that did nothing. The refresh is still what
+        # settles it -- if the assistant refused, the next redraw says so.
+        tool["enabled"] = enabled
+        self.refresh()
+        self.post_message(self.Toggle(self.agent().get("key", ""), tool.get("name", ""), enabled))
+
+    # ---- Drawing ----
+
+    def render(self) -> Text:
+        height = max(1, self.size.height - self.HEADER_LINES - self.FOOTER_LINES)
+        # Nudged rather than recomputed, so moving the cursor one row does not
+        # jump the whole list. Same arithmetic as SettingList's.
+        self.top = max(0, min(self.top, len(self.tools) - height, self.cursor))
+        if self.cursor >= self.top + height:
+            self.top = self.cursor - height + 1
+
+        lines = [crop(Text(self.header(), style="bold"), self.size.width)]
+        shown = range(self.top, min(self.top + height, len(self.tools)))
+        rows = [self.row(index) for index in shown]
+        if not rows:
+            rows.append(crop(Text(f"  {self.empty()}", style="bright_black"), self.size.width))
+        lines += rows
+        lines.extend([Text()] * (height - len(rows)))
+
+        lines.extend(self.detail())
+        lines.append(crop(Text(self.HINT, style="bright_black"), self.size.width))
+        return Text("\n").join(lines)
+
+    def header(self) -> str:
+        if not self.agents:
+            return "  --"
+
+        titles = [agent.get("title", agent.get("key", "?")) for agent in self.agents]
+        full = tab_bar(titles, self.agent_index)
+        if len(full) <= self.size.width:
+            return full
+        # Too narrow for every name at once. Cropping the full bar is the wrong
+        # answer, because the name it drops first is the last one -- so a
+        # reader who arrowed to the far tab would be looking at a bar that no
+        # longer says where they are. The one showing is the one that matters;
+        # the count says how many others there are to move to.
+        return f"← {titles[self.agent_index].upper()} ({self.agent_index + 1}/{len(titles)}) →"
+
+    def empty(self) -> str:
+        """Why this agent has no rows. Its own reason where it gave one."""
+        if not self.agents:
+            return "no data"
+        return self.agent().get("note") or "no tools"
+
+    def row(self, index: int) -> Text:
+        tool = self.tools[index]
+        checkbox = "[x]" if tool.get("enabled", True) else "[ ]"
+        line = f" {checkbox} {tool.get('name', '?')}"
+        return crop(Text(line, style=self.row_style(index)), self.size.width, pad=True)
+
+    def row_style(self, index: int) -> str:
+        if index == self.cursor:
+            return "black on yellow"
+        # Switched off, and drawn switched off: the checkbox says it, but a
+        # dimmed row says it from across the screen.
+        return "" if self.tools[index].get("enabled", True) else "bright_black"
+
+    def detail(self) -> list[Text]:
+        """What the tool under the cursor does, over two lines.
+
+        The rows are names alone, which is what makes them readable in half a
+        terminal; this is where the description they leave out goes.
+        """
+        tool = self.current()
+        text = f"{tool.get('name', '')} -- {tool.get('description', '')}" if tool else ""
+        wrapped = textwrap.wrap(text, max(self.size.width - 2, 1))[:2]
+        wrapped += [""] * (2 - len(wrapped))
+        return [crop(Text(f" {line}", style="bright_black"), self.size.width) for line in wrapped]
+
+
 class ToolsPanel(Panel):
+    """What each agent may call, and which of those are switched on.
+
+    Takeover, like the management panel: the summary is one line per agent, and
+    the expanded view says all of it again with room to act on it.
+    """
+
     title = "tools"
     hotkey = "t"
+    takeover = True
 
     def __init__(self) -> None:
         super().__init__("panel-tools")
 
+    def compose_expanded(self) -> ComposeResult:
+        yield ToolList()
+
+    def interactive(self) -> Widget | None:
+        return self.query_one(ToolList)
+
+    def redraw_expanded(self) -> None:
+        self.query_one(ToolList).set_agents(tool_agents(self.data))
+
     def summary(self) -> str:
-        tools = self.data or []
-        if not tools:
+        agents = tool_agents(self.data)
+        if not agents:
             return "  no data"
-        lines = [f"  {len(tools)} tools"]
-        lines.extend(f"  {tool['name']}" for tool in tools)
+
+        lines = []
+        for agent in agents:
+            tools = agent.get("tools") or []
+            title = agent.get("title", agent.get("key", "?"))
+            if not tools:
+                lines.append(f"  {title:<15} {agent.get('note') or 'no tools'}")
+                continue
+            off = sum(1 for tool in tools if not tool.get("enabled", True))
+            # The count that is not simply len(): a panel that said "4 tools"
+            # while one of them was switched off would be describing the
+            # registry rather than what the agent can actually do.
+            lines.append(f"  {title:<15} {len(tools) - off}/{len(tools)} on")
         return "\n".join(lines)
 
 

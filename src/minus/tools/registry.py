@@ -31,7 +31,12 @@ from typing import Any
 
 from pydantic import ValidationError, create_model
 
-from minus.errors import ToolArgumentError, ToolExecutionError, UnknownToolError
+from minus.errors import (
+    ToolArgumentError,
+    ToolDisabledError,
+    ToolExecutionError,
+    UnknownToolError,
+)
 from minus.services.json import JSONDecodeError, parse_json, serialize_json
 from minus.tools.schema import build_parameters_schema, build_tool_schema
 
@@ -58,10 +63,23 @@ class Tool:
 
 
 class ToolRegistry:
-    """A named collection of tools, with schema generation and dispatch."""
+    """A named collection of tools, with schema generation and dispatch.
+
+    A registry also holds which of its tools are switched off. That lives here
+    rather than on `Tool` because the same `read_workspace_file` object is
+    shared by every tier that was given it -- see `subset` -- and switching it
+    off for the deep tier must not take it away from the conversation. A
+    registry is the smallest thing that is per-tier, so it is where the switch
+    belongs.
+
+    Disabling hides a tool rather than removing it: it is still registered,
+    still listed by `names()`, and still there to be switched back on. What
+    changes is that it is no longer offered to the model and no longer runs.
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._disabled: set[str] = set()
 
     def tool(
         self,
@@ -104,6 +122,7 @@ class ToolRegistry:
         return len(self._tools)
 
     def names(self) -> list[str]:
+        """Every registered tool, switched on or not."""
         return sorted(self._tools)
 
     def get(self, name: str) -> Tool:
@@ -114,9 +133,71 @@ class ToolRegistry:
                 f"Unknown tool: {name}. Available tools: {', '.join(self.names()) or 'none'}"
             ) from None
 
+    def enabled(self, name: str) -> bool:
+        self.get(name)
+        return name not in self._disabled
+
+    @property
+    def disabled(self) -> list[str]:
+        """The switched-off tools, sorted. Only ever names that are registered."""
+        return sorted(self._disabled & set(self._tools))
+
+    def active_names(self) -> list[str]:
+        return [name for name in self.names() if name not in self._disabled]
+
     def schemas(self) -> list[dict]:
-        """Every tool's schema, in the array shape the chat API expects."""
-        return [self._tools[name].schema for name in self.names()]
+        """Every enabled tool's schema, in the array shape the chat API expects.
+
+        The enabled ones only: this is what the model is told it can call, and
+        offering a tool that `dispatch` would then refuse would be inviting a
+        failure rather than preventing one.
+        """
+        return [self._tools[name].schema for name in self.active_names()]
+
+    def describe(self) -> list[dict]:
+        """Every tool, whether it is on, and what it does.
+
+        For a reader rather than for a model: `schemas()` is deliberately
+        missing the switched-off ones, so anything offering to switch them back
+        on has to ask for the whole list somewhere.
+        """
+        return [
+            {
+                "name": name,
+                "description": self._tools[name].schema["function"].get("description", ""),
+                "enabled": name not in self._disabled,
+            }
+            for name in self.names()
+        ]
+
+    # ---- Switching tools on and off ----
+
+    def set_enabled(self, name: str, enabled: bool) -> None:
+        """Switch one tool on or off for this registry.
+
+        Raises UnknownToolError for a name that is not registered, so a stale
+        instruction -- a disabled tool named in .env that has since been
+        deleted, a typo over the control socket -- is answered rather than
+        remembered as a disablement of nothing.
+        """
+        self.get(name)
+        if enabled:
+            self._disabled.discard(name)
+        else:
+            self._disabled.add(name)
+
+    def set_disabled(self, names: Iterable[str]) -> None:
+        """Switch off exactly these, and switch everything else on.
+
+        The whole state in one call, which is what makes a stored list of
+        disabled tools authoritative: applying it can never leave something
+        switched off that the list no longer mentions.
+        """
+        wanted = set(names)
+        unknown = wanted - set(self._tools)
+        if unknown:
+            raise UnknownToolError(f"Unknown tool(s): {', '.join(sorted(unknown))}")
+        self._disabled = wanted
 
     def subset(self, names: Iterable[str]) -> ToolRegistry:
         """A new registry holding only `names`, sharing this one's Tools.
@@ -133,6 +214,10 @@ class ToolRegistry:
         scoped = ToolRegistry()
         for name in names:
             scoped._tools[name] = self.get(name)
+        # Carried over, then owned separately: a tool switched off where it was
+        # taken from arrives switched off, and switching it on here leaves the
+        # source registry alone.
+        scoped._disabled = self._disabled & set(scoped._tools)
         return scoped
 
     # ---- Dispatch ----
@@ -145,6 +230,13 @@ class ToolRegistry:
         which the previous handlers each did by hand, inconsistently.
         """
         tool = self.get(name)
+        if name in self._disabled:
+            # Not offered in `schemas()`, so this is a model calling something
+            # it was never told about -- or one that was switched off between
+            # the schemas being sent and the call coming back. Refused as a
+            # tool error, which the loop turns into a result the model can read
+            # and act on rather than an exception that ends the turn.
+            raise ToolDisabledError(f"Tool {name!r} is switched off and cannot be called.")
         arguments = tool.validate(_parse_arguments(raw_arguments, name))
 
         try:

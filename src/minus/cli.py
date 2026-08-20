@@ -20,11 +20,12 @@ import time
 from pathlib import Path
 from queue import Queue
 
-from minus.assembly import build_fast_tools, run_assistant
+from minus.assembly import build_deep_tools, build_fast_tools, run_assistant
 from minus.config import Settings, load_settings
 from minus.core.escalation import DeepThinker
 from minus.logging_config import redirect_console, setup_logging
 from minus.paths import control_socket, project_root, semantic_memory_db
+from minus.tools.policy import build_policy
 
 logger = logging.getLogger(__name__)
 
@@ -104,19 +105,30 @@ def run_memory_tui(args) -> None:
 
 def run_tools() -> None:
     # Built through the same tiering the assistant uses, so `escalate` is
-    # listed rather than being invisible until it is called.
+    # listed rather than being invisible until it is called -- and grouped by
+    # tier, because the two do not hold the same set and a flat list could not
+    # say which one a tool belonged to.
     thinker = DeepThinker(model=None, deep_model="", results=Queue())
-    fast_tools = build_fast_tools(thinker)
+    policy = build_policy(conversational=build_fast_tools(thinker), deep=build_deep_tools())
     thinker.shutdown()
+    # The stored switches too: a tool listed as available while .env has it
+    # switched off would be the listing lying about the assistant.
+    policy.apply_spec(load_settings().disabled_tools)
 
-    for schema in fast_tools.schemas():
-        function = schema["function"]
-        required = set(function["parameters"].get("required", []))
-        params = ", ".join(
-            name if name in required else f"{name}?"
-            for name in function["parameters"]["properties"]
-        )
-        print(f"{function['name']}({params})\n    {function['description']}")
+    for agent in policy.agents:
+        print(f"{agent.title}:")
+        if agent.registry is None:
+            print(f"    ({agent.note})")
+            continue
+        for name in agent.registry.names():
+            schema = agent.registry.get(name).schema["function"]
+            required = set(schema["parameters"].get("required", []))
+            params = ", ".join(
+                argument if argument in required else f"{argument}?"
+                for argument in schema["parameters"]["properties"]
+            )
+            state = "" if agent.registry.enabled(name) else "  [off]"
+            print(f"    {name}({params}){state}\n        {schema['description']}")
 
 
 def _describe(snapshot: dict) -> str:
