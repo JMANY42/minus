@@ -314,7 +314,7 @@ Known attributes are fed back into the extraction prompt so the model reuses
 ## Development
 
 ```bash
-uv run pytest             # 413 tests, no audio or torch needed
+uv run pytest             # all the tests, no audio or torch needed
 uv run ruff check .
 uv run ruff format .
 uv run mypy src
@@ -330,7 +330,7 @@ uv run mypy src
 
 ### General Assistance
 
-- [ ] Create calendar events and tasks
+- [x] Create calendar events and tasks
 - [ ] Set reminders
 - [ ] Set alarms
 
