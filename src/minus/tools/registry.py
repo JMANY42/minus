@@ -51,6 +51,13 @@ class Tool:
     func: Callable[..., Any]
     schema: dict
     validator: Any
+    # Where a reader files this tool: "google calendar", or "google/sheets" for
+    # a nested one. Declared at registration beside everything else about the
+    # tool, so there is no second list of what belongs where to fall out of
+    # date when a tool is added. Empty means uncategorised, which is a real
+    # answer -- `get_current_time` belongs under no heading -- and the
+    # dashboard draws those loose rather than inventing a "misc" folder.
+    category: str = ""
 
     def validate(self, arguments: dict) -> dict:
         try:
@@ -87,6 +94,7 @@ class ToolRegistry:
         *,
         name: str | None = None,
         description: str | None = None,
+        category: str = "",
     ) -> Any:
         """Register a function as a tool. Usable bare or with arguments."""
 
@@ -101,6 +109,7 @@ class ToolRegistry:
                 func=target,
                 schema=build_tool_schema(target, tool_name, description),
                 validator=_argument_validator(target, tool_name),
+                category=normalize_category(category),
             )
             logger.debug(
                 "Registered tool %s with parameters %s",
@@ -166,6 +175,7 @@ class ToolRegistry:
                 "name": name,
                 "description": self._tools[name].schema["function"].get("description", ""),
                 "enabled": name not in self._disabled,
+                "category": self._tools[name].category,
             }
             for name in self.names()
         ]
@@ -247,6 +257,17 @@ class ToolRegistry:
             raise ToolExecutionError(f"Tool {name!r} failed: {exc}") from exc
 
         return result if isinstance(result, str) else serialize_json(result, ensure_ascii=False)
+
+
+def normalize_category(category: str) -> str:
+    """`" Google / Calendar "` as `"google/calendar"`.
+
+    Categories are typed by hand at each registration site and compared by the
+    dashboard when it groups them, so two spellings of the same heading would
+    draw two folders. Cased and spaced once here rather than at every reader.
+    """
+    parts = [part.strip().lower() for part in (category or "").split("/")]
+    return "/".join(part for part in parts if part)
 
 
 def _argument_validator(func: Callable[..., Any], name: str) -> Any:

@@ -1172,6 +1172,251 @@ class TestToolsPanelRendering:
             assert "1/1 on" in pilot.app.query_one(ToolsPanel).summary()
 
 
+FOLDERED = [
+    {
+        "key": "conversational",
+        "title": "conversational",
+        "note": "",
+        "tools": [
+            {"name": "escalate", "description": "Think harder.", "enabled": True},
+            {
+                "name": "add_google_event",
+                "description": "Add an event.",
+                "enabled": True,
+                "category": "google calendar",
+            },
+            {
+                "name": "delete_google_event",
+                "description": "Delete an event.",
+                "enabled": False,
+                "category": "google calendar",
+            },
+            {
+                "name": "read_workspace_file",
+                "description": "Read a file.",
+                "enabled": True,
+                "category": "files",
+            },
+        ],
+    },
+    {
+        "key": "deep",
+        "title": "deep think",
+        "note": "",
+        "tools": [
+            {
+                "name": "read_workspace_file",
+                "description": "Read a file.",
+                "enabled": True,
+                "category": "files",
+            }
+        ],
+    },
+]
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+class TestToolFolders:
+    """The categories a tool registers with, drawn as folders that fold."""
+
+    async def test_tools_are_grouped_under_their_category(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert [row.key for row in tools.rows] == [
+                "folder:files",
+                "tool:read_workspace_file",
+                "folder:google calendar",
+                "tool:add_google_event",
+                "tool:delete_google_event",
+                # Uncategorised, so under no heading -- and last, where it
+                # cannot read as belonging to the folder above it.
+                "tool:escalate",
+            ]
+
+    async def test_a_folder_says_how_many_of_its_tools_are_on(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert "google calendar  1/2 on" in tools.render().plain
+
+    async def test_a_folder_indents_what_is_inside_it(self, app):
+        """The indent is what says the row belongs to the heading above it."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+            await pilot.pause()
+
+            drawn = tools.render().plain.splitlines()
+            folder = next(line for line in drawn if "▾ files" in line)
+            inside = next(line for line in drawn if "read_workspace_file" in line)
+            loose = next(line for line in drawn if "escalate" in line and "[" in line)
+
+            assert _indent(inside) > _indent(folder)
+            # And the uncategorised one is not indented at all: it is in no
+            # folder, so it hangs at the left with the headings.
+            assert _indent(loose) == _indent(folder)
+
+    async def test_space_closes_the_folder_under_the_cursor(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+
+            await pilot.press("space")
+            await pilot.pause()
+
+            assert "read_workspace_file" not in tools.render().plain
+            assert "▸ files" in tools.render().plain
+
+    async def test_space_opens_it_again(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+
+            await pilot.press("space", "space")
+            await pilot.pause()
+
+            assert "read_workspace_file" in tools.render().plain
+
+    async def test_tab_folds_it_too(self, app):
+        """Tab is the screen's focus key, and the list takes it while focused."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+
+            await pilot.press("tab")
+            await pilot.pause()
+
+            assert "read_workspace_file" not in tools.render().plain
+            assert pilot.app.focused is tools
+
+    async def test_tab_on_a_tool_closes_the_folder_holding_it(self, app):
+        """And leaves the cursor on the heading, not on a row no longer drawn."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+
+            await pilot.press("down", "tab")
+            await pilot.pause()
+
+            assert "read_workspace_file" not in tools.render().plain
+            assert tools.current_row().key == "folder:files"
+
+    async def test_tab_on_an_uncategorised_tool_has_nothing_to_fold(self, app):
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+            await pilot.press("down", "down", "down", "down", "down")
+            await pilot.pause()
+            assert tools.current()["name"] == "escalate"
+
+            await pilot.press("tab")
+            await pilot.pause()
+
+            assert tools.current()["name"] == "escalate"
+
+    async def test_a_folder_row_has_no_switch(self, connected):
+        """Space means fold on a heading, so nothing is sent for one."""
+        switched = []
+
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.switch_tool = lambda *args: switched.append(args)
+            equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+
+            await pilot.press("space")
+            await pilot.pause()
+
+            assert switched == []
+
+    async def test_a_tool_inside_a_folder_still_switches(self, connected):
+        switched = []
+
+        async with connected.run_test(size=(120, 40)) as pilot:
+            pilot.app.switch_tool = lambda *args: switched.append(args)
+            equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+
+            await pilot.press("down", "space")
+            await pilot.pause()
+
+            assert switched == [("conversational", "read_workspace_file", False)]
+
+    async def test_a_closed_folder_stays_closed_across_a_refresh(self, app):
+        """Panels are repopulated after every toggle and on their own timer."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+            await pilot.press("space")
+
+            equip(pilot.app, FOLDERED)
+            await pilot.pause()
+
+            assert "read_workspace_file" not in tools.render().plain
+            assert tools.current_row().key == "folder:files"
+
+    async def test_folding_is_per_agent(self, app):
+        """The same folder is in both tiers; closing one leaves the other open."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app, FOLDERED)
+            await pilot.press("t")
+            await pilot.press("space")
+
+            await pilot.press("right")
+            await pilot.pause()
+
+            assert "read_workspace_file" in tools.render().plain
+
+    async def test_a_list_longer_than_the_panel_scrolls(self, app):
+        """The window follows the cursor rather than running off the bottom."""
+        many = [
+            {
+                "key": "conversational",
+                "title": "conversational",
+                "note": "",
+                "tools": [
+                    {
+                        "name": f"tool_{index:02d}",
+                        "description": "A tool.",
+                        "enabled": True,
+                        "category": "google calendar",
+                    }
+                    for index in range(40)
+                ],
+            }
+        ]
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            tools = equip(pilot.app, many)
+            await pilot.press("t")
+            await pilot.pause()
+            assert "tool_39" not in tools.render().plain
+
+            await pilot.press(*(["down"] * 40))
+            await pilot.pause()
+
+            drawn = tools.render().plain
+            assert "tool_39" in drawn
+            assert "tool_00" not in drawn
+            assert len(drawn.splitlines()) == tools.size.height
+
+    async def test_an_agent_listing_no_categories_draws_no_folders(self, app):
+        """The panel before there were categories, and an older assistant now."""
+        async with app.run_test(size=(120, 40)) as pilot:
+            tools = equip(pilot.app)
+            await pilot.press("t")
+            await pilot.pause()
+
+            assert all(not row.is_folder for row in tools.rows)
+
+
 CONFIG = {
     "values": {
         "chat_model": "openai/gpt-oss-20b:nitro",
