@@ -320,6 +320,37 @@ class TestSwitchingToolsOff:
         assert [tool["enabled"] for tool in described] == [True, False]
         assert described[0]["description"] == "Alpha tool."
 
+    def test_a_tool_is_described_under_the_category_it_registered_with(self):
+        """What the dashboard folders by, and the only place it is written."""
+        registry = ToolRegistry()
+
+        @registry.tool(category="  Google / Calendar ")
+        def add_event() -> str:
+            """Add an event."""
+            return "ok"
+
+        @registry.tool
+        def get_current_time() -> str:
+            """What time it is."""
+            return "now"
+
+        described = {tool["name"]: tool["category"] for tool in registry.describe()}
+
+        # Cased and spaced once, so two spellings of one heading cannot draw
+        # two folders. An uncategorised tool says so with an empty string
+        # rather than being filed under a guess.
+        assert described == {"add_event": "google/calendar", "get_current_time": ""}
+
+    def test_a_tool_keeps_its_category_in_a_tier_it_was_given_to(self):
+        registry = ToolRegistry()
+
+        @registry.tool(category="files")
+        def read_file() -> str:
+            """Read a file."""
+            return "ok"
+
+        assert registry.subset(["read_file"]).describe()[0]["category"] == "files"
+
     def test_set_disabled_is_the_whole_state_at_once(self):
         """Applying a stored spec cannot leave something off that it omits."""
         registry = _two_tools()

@@ -11,8 +11,11 @@ from minus.tools.workspace import display_path, resolve_workspace_path
 # it and tell the model plainly that it received a prefix.
 MAX_FILE_CHARS = 20_000
 
+# The heading these two are filed under in the dashboard's tool list.
+CATEGORY = "files"
 
-@registry.tool
+
+@registry.tool(category=CATEGORY)
 def list_workspace_files(path: str = ".") -> dict:
     """List files and folders inside a workspace-relative directory.
 
@@ -34,7 +37,7 @@ def list_workspace_files(path: str = ".") -> dict:
     return {"path": display_path(directory), "entries": entries}
 
 
-@registry.tool
+@registry.tool(category=CATEGORY)
 def read_workspace_file(path: str) -> dict:
     """Read a workspace-relative file and return its contents.
 

@@ -128,6 +128,13 @@ rather than tools that fail — and `build_system_prompt(can_schedule=...)` is t
 same fact, so the standing scheduling rules are absent rather than talking about a calendar
 nobody connected.
 
+A tool may also declare a `category` (`@registry.tool(category="google calendar")`, or
+`registry.tool(tool, category=CATEGORY)` for a constructed one). It rides along on `Tool`,
+comes back out of `describe()`, and is what the dashboard's tool list folders by --
+`"google/sheets"` nests, `""` means no folder and the tool is drawn loose. Declared at the
+registration site for the same reason the schema is derived there: a separate table of what
+belongs where is a second place to forget.
+
 `tools/policy.py::ToolPolicy` groups the per-tier registries under display names for the
 dashboard and turns individual tools on and off. Switches persist as
 `MINUS_DISABLED_TOOLS="conversational:escalate,deep:read_workspace_file"` in `.env` — only

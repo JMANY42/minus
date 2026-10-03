@@ -92,6 +92,18 @@ class MinusDashboard(App):
         # the view keys above.
         Binding("ctrl+up", "cycle_note(-1)", "prev note", priority=True, show=False),
         Binding("ctrl+down", "cycle_note(1)", "next note", priority=True, show=False),
+        # The bracket pairs do the same two jobs without a modifier, because on
+        # the Linux console -- the machine this dashboard was built for -- the
+        # kernel does not encode ctrl with an arrow at all: ctrl+left arrives
+        # as a bare left, indistinguishable from scrolling, so the four
+        # bindings above are dead there and only reachable over SSH from a
+        # terminal that sends the modified sequences. Deliberately not
+        # priority, unlike their ctrl twins: these are printable characters,
+        # and the input box has to keep them for typing. Same trade as 1/2/3.
+        Binding("[", "cycle_view(-1)", "prev view", show=False),
+        Binding("]", "cycle_view(1)", "next view", show=False),
+        Binding("{", "cycle_note(-1)", "prev note", show=False),
+        Binding("}", "cycle_note(1)", "next note", show=False),
         # With focus nowhere -- how the dashboard opens, and where escape puts
         # you back -- there is no view to leave the bare arrows to, so the app
         # scrolls the showing one on their behalf.
@@ -166,8 +178,11 @@ class MinusDashboard(App):
             for pane in ("#viewer", "#prompt", "#console"):
                 self.query_one(pane).styles.border = ("solid", "ansi_bright_black")
 
+        # The backslash escapes the opening bracket: "[/]" is a closing tag to
+        # the markup parser Static renders through, and an unmatched one is an
+        # error rather than the two characters the key is called by.
         self.query_one("#hints", Static).update(
-            "ctrl+←/→ view · arrows scroll · v/V viewer · m h t p a g panels "
+            "\\[/] or ctrl+←/→ view · arrows scroll · v/V viewer · m h t p a g panels "
             "· enter expand · i input "
             "· esc back · s stop · e end conversation · c console · R restart minus "
             "· q quit"
@@ -281,7 +296,8 @@ class MinusDashboard(App):
             note = notes[self.note_index]
             body.update(
                 f"{note.title}\n{note.created_at}"
-                f"   ({self.note_index + 1}/{len(notes)}, ctrl+↑/↓ to move)\n\n{note.detail}"
+                f"   ({self.note_index + 1}/{len(notes)}, {{/}} or ctrl+↑/↓ to move)"
+                f"\n\n{note.detail}"
             )
             # Back to the top, or a short note opens scrolled to wherever the
             # last long one was left.

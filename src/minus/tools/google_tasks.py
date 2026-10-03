@@ -49,6 +49,9 @@ _DUE_SUFFIX = "T00:00:00.000Z"
 
 SETTING = "MINUS_GOOGLE_TASKS_LIST"
 
+# The heading these five are filed under in the dashboard's tool list.
+CATEGORY = "google tasks"
+
 COMPLETED = "completed"
 NEEDS_ACTION = "needsAction"
 _STATUSES = {
@@ -91,7 +94,7 @@ class GoogleTasksTools:
             self.move_google_task,
             self.delete_google_task,
         ):
-            registry.tool(tool)
+            registry.tool(tool, category=CATEGORY)
 
     # ---- Tools ----
 

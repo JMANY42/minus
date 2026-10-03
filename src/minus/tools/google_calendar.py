@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 SETTING = "MINUS_GOOGLE_CALENDAR"
 
+# The heading these five are filed under in the dashboard's tool list.
+CATEGORY = "google calendar"
+
 # Calendars an event can be created on. The rest of `calendarList` is
 # subscriptions the account can read and not write.
 WRITABLE_ROLES = frozenset({"owner", "writer"})
@@ -85,7 +88,7 @@ class GoogleCalendarTools:
             self.move_google_event,
             self.delete_google_event,
         ):
-            registry.tool(tool)
+            registry.tool(tool, category=CATEGORY)
 
     # ---- Tools ----
 

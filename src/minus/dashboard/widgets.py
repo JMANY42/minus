@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import textwrap
 import time
-from collections.abc import Sequence
+from collections.abc import Container, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -612,15 +612,137 @@ def tool_agents(data: Any) -> list[dict]:
     ]
 
 
+@dataclass(frozen=True)
+class ToolRow:
+    """One drawn line of the tools list: a folder heading, or a tool.
+
+    The list is drawn from a flat sequence of these rather than walked as a
+    tree, because the cursor, the window and the keys all count rows on screen
+    -- a tree would have to be walked again on every keypress to answer "what
+    is the cursor on".
+
+    `key` is what survives a refresh. The panel is repopulated after every
+    toggle; a folder keeps its path and a tool keeps its name, so the reader
+    stays on the row they were on rather than on whatever is now third.
+    """
+
+    key: str
+    depth: int
+    label: str
+    # Folders only: the full path ("google/sheets"), whether it is open, and
+    # how many of the tools anywhere below it are switched on.
+    path: str = ""
+    expanded: bool = False
+    on: int = 0
+    total: int = 0
+    # Tools only. Its absence is what makes a row a folder.
+    tool: dict | None = None
+
+    @property
+    def is_folder(self) -> bool:
+        return self.tool is None
+
+
+def group_tools(tools: Sequence[dict]) -> dict:
+    """A flat `list_tools` as the nested folders its categories name.
+
+    The tree is built from the category strings alone -- "google/sheets" is two
+    deep, "" is no folder at all -- so a tool registered under a heading nobody
+    has used before draws its folder without anything here being told about it.
+    """
+    root: dict = {"folders": {}, "tools": []}
+    for tool in tools:
+        node = root
+        for part in category_parts(tool):
+            node = node["folders"].setdefault(part, {"folders": {}, "tools": []})
+        node["tools"].append(tool)
+    return root
+
+
+def category_parts(tool: dict) -> list[str]:
+    """`"google/sheets"` as `["google", "sheets"]`; uncategorised as `[]`.
+
+    Tolerant of a missing key as well as an empty one: an assistant on an older
+    build lists tools with no category at all, and those belong loose rather
+    than in a folder named after nothing.
+    """
+    return [part for part in (tool.get("category") or "").split("/") if part]
+
+
+def count_tools(node: dict) -> tuple[int, int]:
+    """How many tools are switched on under a folder, and how many there are."""
+    on = sum(1 for tool in node["tools"] if tool.get("enabled", True))
+    total = len(node["tools"])
+    for child in node["folders"].values():
+        child_on, child_total = count_tools(child)
+        on += child_on
+        total += child_total
+    return on, total
+
+
+def tool_rows(tools: Sequence[dict], folded: Container[str] = ()) -> list[ToolRow]:
+    """The tree flattened to the rows that are actually on screen.
+
+    Closed is what is remembered rather than open, so a folder arriving in a
+    later build is open the first time it is seen instead of hidden behind a
+    set of names written before it existed.
+    """
+    rows: list[ToolRow] = []
+
+    def walk(node: dict, path: str, depth: int) -> None:
+        for name in sorted(node["folders"]):
+            child = node["folders"][name]
+            child_path = f"{path}/{name}" if path else name
+            on, total = count_tools(child)
+            expanded = child_path not in folded
+            rows.append(
+                ToolRow(
+                    key=f"folder:{child_path}",
+                    depth=depth,
+                    label=name,
+                    path=child_path,
+                    expanded=expanded,
+                    on=on,
+                    total=total,
+                )
+            )
+            if expanded:
+                walk(child, child_path, depth + 1)
+
+        # The loose ones after the folders at every level: a tool with no
+        # category belongs under no heading, and drawn above them it would read
+        # as belonging to the first one.
+        for tool in node["tools"]:
+            rows.append(
+                ToolRow(
+                    key=f"tool:{tool.get('name', '')}",
+                    depth=depth,
+                    label=tool.get("name", "?"),
+                    tool=tool,
+                )
+            )
+
+    walk(group_tools(tools), "", 0)
+    return rows
+
+
 class ToolList(Widget, can_focus=True):
-    """One agent's tools at a time, each with a switch.
+    """One agent's tools at a time, foldered by category, each with a switch.
 
     The third list built on the pattern FactList set -- its own window, its own
     cursor, its own footer -- and the first with a second axis: left and right
-    move between agents, up and down between that agent's tools. Owning all
+    move between agents, up and down between that agent's rows. Owning all
     four outright is what keeps the arrows from reaching the viewer behind it,
     and drawing its own window is what lets it keep the cursor on screen
     without a scroller.
+
+    The rows are a tree flattened by `tool_rows`: a category is a folder, a
+    nested category is a folder inside one, and an uncategorised tool sits
+    loose at the bottom. Ten Google tools in one flat alphabetical list buried
+    the two that were not Google's; a heading that can be closed is what gives
+    a reader back the shape of what the agent can do. Which folders are closed
+    is held per agent and only here -- it is how one reader is looking at the
+    list, not something the assistant has any business storing.
 
     A checkbox here means what a checkbox usually means and not what the fact
     list's means: `[x]` is a tool the agent may call, `[ ]` one that has been
@@ -638,18 +760,29 @@ class ToolList(Widget, can_focus=True):
         Binding("left", "cycle_agent(-1)", "prev agent", show=False),
         Binding("right", "cycle_agent(1)", "next agent", show=False),
         Binding("space", "switch", "on/off", show=False),
+        # Tab is the screen's focus-next key, but a focused widget's bindings
+        # are looked at first and the screen's is not a priority one, so this
+        # takes it while the list has focus and gives it back on escape.
+        Binding("tab", "fold", "fold", show=False),
         # No `h`/`l` beside the arrows, tempting as the vi pair is: a focused
         # widget's bindings beat the app's, and `h` is how the hardware panel
         # is opened. The same trap FactList documents for `a`.
     ]
 
-    HINT = "  ↑↓ move · ←→ agent · space on/off"
+    # Four keys in 38 columns, which is what the panel is at an 80-wide
+    # terminal. The arrows are paired rather than named separately because the
+    # tab bar above already shows what ←→ moves between.
+    HINT = "  ↑↓ ←→ move · space on/off · tab fold"
     # The tab bar at the top.
     HEADER_LINES = 1
-    # Two lines saying what the tool under the cursor does, then the hint.
+    # Two lines saying what the row under the cursor is, then the hint.
     # Fixed, so the number of rows the window holds does not change as the
     # cursor moves.
     FOOTER_LINES = 3
+    # How far a folder's contents sit in from the folder. Two columns is
+    # exactly the width of the `[x] ` a tool row starts with, so a nested tool
+    # lines its checkbox up under the heading's name.
+    INDENT = "  "
 
     class Toggle(Message):
         """The user has switched one agent's tool on or off."""
@@ -666,29 +799,31 @@ class ToolList(Widget, can_focus=True):
         self.agent_index = 0
         self.cursor = 0
         self.top = 0
+        # Agent key -> the folders that agent's list has closed.
+        self.folded_paths: dict[str, set[str]] = {}
 
     # ---- Contents ----
 
     def set_agents(self, agents: list[dict]) -> None:
         """Take a fresh `list_tools` without losing the reader's place in it.
 
-        By name on both axes, not by index: the panel is repopulated after
+        By row key on both axes, not by index: the panel is repopulated after
         every toggle, and a list that renumbered itself under the cursor would
         move it to a different tool each time one was switched.
 
-        Copied rather than held: `action_toggle` flips a checkbox before the
+        Copied rather than held: `action_switch` flips a checkbox before the
         socket has answered, and doing that to the panel's own data would leave
         the panel unable to put it back when the answer never came.
         """
         held_agent = self.agent().get("key")
-        held_tool = (self.current() or {}).get("name")
+        held_row = (self.current_row() or ToolRow(key="", depth=0, label="")).key
 
         self.agents = [
             {**agent, "tools": [dict(tool) for tool in agent.get("tools") or []]}
             for agent in agents
         ]
         self.agent_index = self._index_of_agent(held_agent)
-        self.cursor = self._index_of_tool(held_tool)
+        self.cursor = self._index_of_row(held_row)
         self.refresh()
 
     def _index_of_agent(self, key: str | None) -> int:
@@ -697,11 +832,12 @@ class ToolList(Widget, can_focus=True):
                 return index
         return min(self.agent_index, max(len(self.agents) - 1, 0))
 
-    def _index_of_tool(self, name: str | None) -> int:
-        for index, tool in enumerate(self.tools):
-            if tool.get("name") == name:
+    def _index_of_row(self, key: str | None) -> int:
+        rows = self.rows
+        for index, row in enumerate(rows):
+            if row.key == key:
                 return index
-        return max(0, min(self.cursor, len(self.tools) - 1))
+        return max(0, min(self.cursor, len(rows) - 1))
 
     def agent(self) -> dict:
         if 0 <= self.agent_index < len(self.agents):
@@ -712,16 +848,33 @@ class ToolList(Widget, can_focus=True):
     def tools(self) -> list[dict]:
         return self.agent().get("tools") or []
 
-    def current(self) -> dict | None:
-        tools = self.tools
-        if 0 <= self.cursor < len(tools):
-            return tools[self.cursor]
+    @property
+    def folded(self) -> set[str]:
+        """The folders the agent on screen has closed, created on first ask."""
+        return self.folded_paths.setdefault(self.agent().get("key", ""), set())
+
+    @property
+    def rows(self) -> list[ToolRow]:
+        """Rebuilt rather than cached: the counts on a folder row move whenever
+        a tool under it is switched, and a cache would have to be invalidated
+        from `action_switch`, from the socket's refresh, and from folding."""
+        return tool_rows(self.tools, self.folded)
+
+    def current_row(self) -> ToolRow | None:
+        rows = self.rows
+        if 0 <= self.cursor < len(rows):
+            return rows[self.cursor]
         return None
+
+    def current(self) -> dict | None:
+        """The tool under the cursor, or None -- including on a folder row."""
+        row = self.current_row()
+        return row.tool if row is not None else None
 
     # ---- Keys ----
 
     def action_move(self, step: int) -> None:
-        self.cursor = max(0, min(self.cursor + step, len(self.tools) - 1))
+        self.cursor = max(0, min(self.cursor + step, len(self.rows) - 1))
         self.refresh()
 
     def action_cycle_agent(self, step: int) -> None:
@@ -734,10 +887,21 @@ class ToolList(Widget, can_focus=True):
         self.refresh()
 
     def action_switch(self) -> None:
-        """Not `action_toggle`: DOMNode already has one, for toggling a reactive."""
-        tool = self.current()
-        if tool is None:
+        """Not `action_toggle`: DOMNode already has one, for toggling a reactive.
+
+        One key doing two things, because the row under the cursor says which:
+        a folder opens and closes, a tool goes on and off. There is no reading
+        of a folder row on which "switch it off" means anything, so nothing is
+        lost by overloading the key, and a reader gets one key to press.
+        """
+        row = self.current_row()
+        if row is None:
             return
+        if row.is_folder:
+            self.fold(row.path, row.expanded)
+            return
+
+        tool = row.tool or {}
         enabled = not tool.get("enabled", True)
         # Flipped here as well as sent: the round trip goes over a socket and
         # comes back as a whole fresh list, and a checkbox that waited for that
@@ -747,23 +911,57 @@ class ToolList(Widget, can_focus=True):
         self.refresh()
         self.post_message(self.Toggle(self.agent().get("key", ""), tool.get("name", ""), enabled))
 
+    def action_fold(self) -> None:
+        """Tab: open or close the folder the cursor is on, or the one it is in.
+
+        Acting on the parent from a tool row rather than doing nothing there:
+        tab on a leaf is how a reader closes the folder they have finished
+        reading, and it leaves the cursor on the heading they closed.
+        """
+        row = self.current_row()
+        if row is None:
+            return
+        if row.is_folder:
+            self.fold(row.path, row.expanded)
+            return
+
+        parts = category_parts(row.tool or {})
+        if parts:
+            self.fold("/".join(parts), True)
+
+    def fold(self, path: str, folded: bool) -> None:
+        """Close or open one folder, leaving the cursor on its heading.
+
+        On the heading and not where the cursor was: closing a folder from
+        inside it would otherwise leave the cursor on a row that is no longer
+        drawn, and the reader looking at a highlight somewhere else entirely.
+        """
+        if folded:
+            self.folded.add(path)
+        else:
+            self.folded.discard(path)
+        self.cursor = self._index_of_row(f"folder:{path}")
+        self.refresh()
+
     # ---- Drawing ----
 
     def render(self) -> Text:
+        rows = self.rows
         height = max(1, self.size.height - self.HEADER_LINES - self.FOOTER_LINES)
         # Nudged rather than recomputed, so moving the cursor one row does not
-        # jump the whole list. Same arithmetic as SettingList's.
-        self.top = max(0, min(self.top, len(self.tools) - height, self.cursor))
+        # jump the whole list. Same arithmetic as SettingList's -- and what
+        # makes a list longer than the panel scroll rather than run off it.
+        self.top = max(0, min(self.top, len(rows) - height, self.cursor))
         if self.cursor >= self.top + height:
             self.top = self.cursor - height + 1
 
         lines = [crop(Text(self.header(), style="bold"), self.size.width)]
-        shown = range(self.top, min(self.top + height, len(self.tools)))
-        rows = [self.row(index) for index in shown]
-        if not rows:
-            rows.append(crop(Text(f"  {self.empty()}", style="bright_black"), self.size.width))
-        lines += rows
-        lines.extend([Text()] * (height - len(rows)))
+        shown = range(self.top, min(self.top + height, len(rows)))
+        drawn = [self.row(rows[index], index) for index in shown]
+        if not drawn:
+            drawn.append(crop(Text(f"  {self.empty()}", style="bright_black"), self.size.width))
+        lines += drawn
+        lines.extend([Text()] * (height - len(drawn)))
 
         lines.extend(self.detail())
         lines.append(crop(Text(self.HINT, style="bright_black"), self.size.width))
@@ -790,27 +988,46 @@ class ToolList(Widget, can_focus=True):
             return "no data"
         return self.agent().get("note") or "no tools"
 
-    def row(self, index: int) -> Text:
-        tool = self.tools[index]
-        checkbox = "[x]" if tool.get("enabled", True) else "[ ]"
-        line = f" {checkbox} {tool.get('name', '?')}"
-        return crop(Text(line, style=self.row_style(index)), self.size.width, pad=True)
+    def row(self, row: ToolRow, index: int) -> Text:
+        indent = self.INDENT * row.depth
+        if row.is_folder:
+            # The triangle says which way the key will move it. The count is
+            # the same one the summary gives per agent, asked of a folder:
+            # "4/5 on" is a heading a reader can act on without opening it.
+            marker = "▾" if row.expanded else "▸"
+            line = f" {indent}{marker} {row.label}  {row.on}/{row.total} on"
+        else:
+            checkbox = "[x]" if (row.tool or {}).get("enabled", True) else "[ ]"
+            line = f" {indent}{checkbox} {row.label}"
+        return crop(Text(line, style=self.row_style(row, index)), self.size.width, pad=True)
 
-    def row_style(self, index: int) -> str:
+    def row_style(self, row: ToolRow, index: int) -> str:
         if index == self.cursor:
             return "black on yellow"
+        if row.is_folder:
+            # A folder is a heading, so it is drawn as one -- and dimmed only
+            # when everything under it is off, which is the folder-sized
+            # version of what a dimmed tool row says.
+            return "bold" if row.on else "bold bright_black"
         # Switched off, and drawn switched off: the checkbox says it, but a
         # dimmed row says it from across the screen.
-        return "" if self.tools[index].get("enabled", True) else "bright_black"
+        return "" if (row.tool or {}).get("enabled", True) else "bright_black"
 
     def detail(self) -> list[Text]:
-        """What the tool under the cursor does, over two lines.
+        """What the row under the cursor is, over two lines.
 
         The rows are names alone, which is what makes them readable in half a
-        terminal; this is where the description they leave out goes.
+        terminal; this is where the description they leave out goes. A folder
+        has no description to give, so it says what is in it instead.
         """
-        tool = self.current()
-        text = f"{tool.get('name', '')} -- {tool.get('description', '')}" if tool else ""
+        row = self.current_row()
+        if row is None:
+            text = ""
+        elif row.is_folder:
+            text = f"{row.path} -- {row.total} tools, {row.on} on"
+        else:
+            tool = row.tool or {}
+            text = f"{tool.get('name', '')} -- {tool.get('description', '')}"
         wrapped = textwrap.wrap(text, max(self.size.width - 2, 1))[:2]
         wrapped += [""] * (2 - len(wrapped))
         return [crop(Text(f" {line}", style="bright_black"), self.size.width) for line in wrapped]

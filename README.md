@@ -94,6 +94,12 @@ move between things instead: `ctrl+←`/`ctrl+→` switch the view, and
 `ctrl+↑`/`ctrl+↓` page between deep-think notes. Those keep working while the
 input box has focus, which owns the bare arrows for its cursor.
 
+The Linux console does not send a modifier with an arrow key at all — `ctrl+←`
+reaches the dashboard as a plain `←` — so the same two jobs have unmodified
+keys for the tty: `[`/`]` switch the view and `{`/`}` page between notes. Being
+ordinary characters, they are typed rather than obeyed while the input box has
+focus, the same as `1`/`2`/`3`.
+
 Built for the console on the machine itself: sixteen ANSI colours, ASCII
 borders and character meters, because the VT font has no block-drawing glyphs.
 `--unicode` relaxes that over SSH.
@@ -112,13 +118,15 @@ could not reach it.
 
 Three of the six panels do something once they are expanded. `m` lists every
 fact MINUS remembers -- `↑`/`↓` moves, `space` marks, and `d` twice forgets
-what is marked. `t` lists each agent's tools -- `←`/`→` moves between the
-conversational and deep-think agents (and the coding agent, which has none
-yet), and `space` switches the tool under the cursor on or off for that agent
-alone. A tool switched off is no longer offered to that model, and the switch
-is written to `.env` as `MINUS_DISABLED_TOOLS`, so it survives a restart. `g`
-lists every field of `config.py`, changes the ones that can be changed live,
-and says why the rest cannot.
+what is marked. `t` lists each agent's tools, grouped into folders by
+category -- `←`/`→` moves between the conversational and deep-think agents
+(and the coding agent, which has none yet), `space` or `tab` opens and closes
+the folder under the cursor, and `space` switches the tool under the cursor on
+or off for that agent alone. Tools that belong to no category sit loose at the
+bottom of the list. A tool switched off is no longer offered to that
+model, and the switch is written to `.env` as `MINUS_DISABLED_TOOLS`, so it
+survives a restart. `g` lists every field of `config.py`, changes the ones
+that can be changed live, and says why the rest cannot.
 
 The other two are still scaffolding: they say "nothing here yet", and filling
 one in means returning a list from its `options()`.
