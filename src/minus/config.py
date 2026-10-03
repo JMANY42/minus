@@ -19,8 +19,9 @@ rather than duplicating the layout knowledge.
 from __future__ import annotations
 
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from minus import paths
@@ -41,8 +42,8 @@ class Settings(BaseSettings):
         extra="ignore",
         # So the dashboard can change a value on a live object and have it
         # rejected at the setter rather than three seconds later inside a
-        # provider call. No field has a custom validator, so this costs
-        # nothing today and makes `settings.chat_model = 12` an error.
+        # provider call. It also runs the field validators below, so a bad
+        # timezone is refused on a live write as it is at startup.
         validate_assignment=True,
     )
 
@@ -104,6 +105,12 @@ class Settings(BaseSettings):
     google_tasks_list: str = ""
     google_calendar: str = ""
 
+    # ---- Alarm ----
+    # The CLI the `set_alarm` tool runs: a full path, or a bare name looked up
+    # on PATH. Defaults to where `cargo install` puts it -- see paths.py for
+    # why a bare `alarm` is not the default.
+    alarm_command: str = Field(default_factory=lambda: str(paths.alarm_command()))
+
     # ---- Conversation lifetime ----
     # How long a silence ends the conversation. On the timeout MINUS condenses
     # the transcript and extracts durable facts, then starts a fresh
@@ -139,11 +146,30 @@ class Settings(BaseSettings):
     stt_device: str = "cuda"
 
     # ---- Misc ----
+    # An IANA Area/Location name. The user's own zone: what "7am" means to the
+    # alarm and the Google tools when nobody names a place.
     timezone: str = "America/Chicago"
     log_level: str = "DEBUG"
     console_log_level: str = "INFO"
     # Runs kept in logs/ before the oldest are pruned. Previously unbounded.
     log_retention: int = 30
+
+    @field_validator("timezone")
+    @classmethod
+    def _iana_timezone(cls, value: str) -> str:
+        """Refuse a zone the tz database does not know, e.g. "Americas/Dallas".
+
+        Checked here rather than where it is used, because the places that use
+        it hand it on -- to Google, to the alarm CLI -- and each would fail in
+        its own way, long after startup, in the middle of a request.
+        """
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(
+                f"{value!r} is not an IANA timezone; use Area/Location, e.g. America/Chicago"
+            ) from exc
+        return value
 
     @property
     def project_root(self) -> Path:

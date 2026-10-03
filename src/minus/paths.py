@@ -84,3 +84,13 @@ def deep_notes_dir() -> Path:
     text so a dashboard can render it without going through TTS.
     """
     return memory_dir() / "deep_notes"
+
+
+def alarm_command() -> Path:
+    """Where `cargo install` puts the `alarm` CLI.
+
+    A full path rather than a bare name looked up on PATH: ~/.cargo/bin is on
+    an interactive shell's PATH but not on the systemd user manager's, so a
+    bare `alarm` works from a terminal and fails under `minus serve`.
+    """
+    return Path.home() / ".cargo" / "bin" / "alarm"

@@ -148,7 +148,14 @@ def build_google_tools(settings: Settings) -> list:
     ]
 
 
-def build_fast_tools(thinker: DeepThinker, google_tools: list | None = None):
+def build_alarm_tools(settings: Settings):
+    """The alarm tool, pointed at the configured `alarm` command."""
+    from minus.tools.alarm import AlarmTools
+
+    return AlarmTools(settings.alarm_command, timezone=settings.timezone)
+
+
+def build_fast_tools(thinker: DeepThinker, tool_groups: list | None = None):
     """Everything registered, plus `escalate`, plus whatever needs building.
 
     Deriving the fast tier from the whole registry rather than an allowlist
@@ -156,17 +163,17 @@ def build_fast_tools(thinker: DeepThinker, google_tools: list | None = None):
     second edit here -- which is the property that made the registry worth
     having in the first place. The exceptions are the tools that cannot be
     registered at import because they hold a collaborator: `escalate` needs the
-    thinker, and the Google tools need credentials. Those are passed in already
-    built rather than built here, because the caller has to know whether they
-    exist for other reasons too -- the system prompt says different things
-    depending.
+    thinker, the Google tools need credentials, and the alarm needs its command
+    from Settings. Those groups are passed in already built rather than built
+    here, because the caller has to know whether they exist for other reasons
+    too -- the system prompt says different things depending on the Google ones.
     """
     from minus.tools import registry
 
     fast = registry.subset(registry.names())
     fast.tool(thinker.escalate)
 
-    for group in google_tools or []:
+    for group in tool_groups or []:
         group.register(fast)
     return fast
 
@@ -217,7 +224,7 @@ def build_conversation(settings: Settings, state=None) -> Assistant:
 
     conversation = Conversation(
         model=model,
-        tools=build_fast_tools(thinker, google_tools),
+        tools=build_fast_tools(thinker, [*google_tools, build_alarm_tools(settings)]),
         max_tool_rounds=settings.max_tool_rounds,
         memory=memory,
         system_prompt=system_prompt,
