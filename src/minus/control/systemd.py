@@ -20,6 +20,15 @@ UNIT_NAME = "minus.service"
 # redundant: the first is what makes a relative `.env` resolve, the second is
 # what makes paths.py agree with it no matter where the interpreter came from.
 #
+# EnvironmentFile points at the same .env that Settings reads, which looks
+# redundant but is not. pydantic-settings lets a real environment variable beat
+# .env, and the user manager's environment is sticky: a key exported in a shell
+# and swept in by `import-environment` (or dbus-update-activation-environment
+# at login) outlives any edit to .env and every restart, so a rotated API key
+# silently never takes effect. A unit's own environment overrides the
+# manager's, so loading .env here makes the file win again. The `-` keeps a
+# checkout with no .env yet startable.
+#
 # TimeoutStopSec is generous because a graceful stop is not instant -- SIGTERM
 # ends the conversation, which condenses the transcript and asks the model to
 # extract facts from it. Cutting that short is exactly the data loss the
@@ -35,6 +44,7 @@ Wants=pipewire.service pipewire-pulse.service
 Type=simple
 WorkingDirectory={root}
 Environment=MINUS_PROJECT_ROOT={root}
+EnvironmentFile=-{root}/.env
 ExecStart={python} serve
 Restart=on-failure
 RestartSec=5

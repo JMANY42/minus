@@ -21,6 +21,12 @@ class TestUnitFile:
         assert "WorkingDirectory=/srv/minus" in unit
         assert "Environment=MINUS_PROJECT_ROOT=/srv/minus" in unit
 
+    def test_loads_dotenv_so_it_beats_the_user_managers_environment(self):
+        """A stale key imported into the user manager would otherwise shadow .env."""
+        unit = render_unit("/opt/venv/bin/minus", "/srv/minus")
+
+        assert "EnvironmentFile=-/srv/minus/.env" in unit
+
     def test_leaves_no_placeholders_behind(self):
         unit = render_unit("/opt/venv/bin/minus", "/srv/minus")
 
