@@ -21,6 +21,7 @@ from pathlib import Path
 from queue import Queue
 
 from minus.assembly import (
+    build_alarm_tools,
     build_deep_tools,
     build_fast_tools,
     build_google_tools,
@@ -137,7 +138,9 @@ def run_tools() -> None:
     thinker = DeepThinker(model=None, deep_model="", results=Queue())
     settings = load_settings()
     policy = build_policy(
-        conversational=build_fast_tools(thinker, build_google_tools(settings)),
+        conversational=build_fast_tools(
+            thinker, [*build_google_tools(settings), build_alarm_tools(settings)]
+        ),
         deep=build_deep_tools(),
     )
     thinker.shutdown()
