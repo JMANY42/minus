@@ -48,9 +48,19 @@ class Settings(BaseSettings):
     )
 
     # ---- LLM ----
-    openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
+    openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY", repr=False)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     app_title: str = "Minus"
+
+    # Any OpenAI-compatible provider can be pointed at here, which is what makes
+    # a direct DeepSeek key usable: set MINUS_LLM_BASE_URL=https://api.deepseek.com/v1
+    # and MINUS_LLM_API_KEY=sk-... and the OpenRouter fields above are ignored.
+    llm_base_url: str = ""
+    # repr=False on the credentials here and below: a traceback, a log line
+    # that formats settings, or a `print(settings)` in a debugging session must
+    # not be the thing that writes a key to disk. The values stay reachable for
+    # the code that needs them; only the printed form omits them.
+    llm_api_key: str = Field(default="", repr=False)
 
     # Two tiers. `chat_model` is chosen for latency: it carries the whole
     # conversation and must answer "what time is it?" fast enough to feel
@@ -96,14 +106,103 @@ class Settings(BaseSettings):
     # already exports Google credentials for something else should not have
     # them silently adopted.
     google_client_id: str = ""
-    google_client_secret: str = ""
-    google_refresh_token: str = ""
+    google_client_secret: str = Field(default="", repr=False)
+    google_refresh_token: str = Field(default="", repr=False)
     # Which list "add milk" means, and which calendar "put it in for Tuesday"
     # means. Empty is not a default -- it means MINUS asks, unless the account
     # has only one to choose from. Naming one here is how you stop being asked
     # every time without MINUS ever guessing. See tools/google_shared.py.
     google_tasks_list: str = ""
     google_calendar: str = ""
+
+    # ---- Triage: qBittorrent in, verdict out ----
+    # ---- VPN (AirVPN) ----
+    # MINUS can bring the tunnel up itself. AirVPN's own suite is the client:
+    # bluetit is the daemon and goldcrest is what talks to it, so no raw
+    # OpenVPN config is involved. Empty `vpn_interface` is discovered from the
+    # route after a successful connect rather than guessed.
+    vpn_provider: str = "airvpn"
+    vpn_client_command: str = "goldcrest"
+    vpn_interface: str = ""
+    vpn_autoconnect: bool = True
+    vpn_connect_timeout: float = 120.0
+    # On Arch the current login session does not pick up a freshly added
+    # `airvpn` group until the user logs in again. Falling back to a
+    # passwordless `sudo -n -g airvpn` (one sudoers line) makes the harness work
+    # in that window; direct invocation is always tried first.
+    vpn_use_sudo_fallback: bool = True
+    airvpn_username: str = ""
+    airvpn_password: str = Field(default="", repr=False)
+    # A server name or a country/continent ISO code. Empty asks AirVPN to pick
+    # the best-scoring server, which is the least surprising default.
+    airvpn_server: str = ""
+    airvpn_country: str = ""
+    airvpn_vpn_type: str = "wireguard"
+    airvpn_network_lock: bool = True
+    require_vpn_for_triage: bool = True
+
+    # Empty means the triage tools are not registered at all: an unconfigured
+    # tool is a round trip spent discovering it cannot work. Set the Web UI URL
+    # (e.g. http://127.0.0.1:8080) to turn them on.
+    qbittorrent_url: str = ""
+    qbittorrent_username: str = ""
+    qbittorrent_password: str = Field(default="", repr=False)
+    # The WebUI the harness starts when nothing is listening. 127.0.0.1 is not
+    # configurable: a torrent client's WebUI on a public interface is a remote
+    # code execution surface, not a convenience.
+    qbittorrent_webui_port: int = 8080
+    qbittorrent_command: str = "qbittorrent-nox"
+    # qBittorrent performs the download, so per-user routing cannot be proven
+    # from inside MINUS. This names the device qBittorrent must bind to
+    # (its Network Interface setting); empty leaves the check off.
+    qbittorrent_vpn_interface: str = ""
+    qbittorrent_incoming_dir: Path = Field(default_factory=paths.quarantine_incoming_dir)
+    qbittorrent_listen_port: int = 0
+    triage_quarantine_dir: Path = Field(default_factory=paths.quarantine_dir)
+    triage_library_dir: Path = Field(default_factory=paths.library_dir)
+    # Deliberately generous but finite: a 4K remux is ~50 GiB, and a pipeline
+    # that will happily copy an unbounded amount is a foot-gun on /home.
+    triage_max_bytes: int = 5 * 1024**3
+    # A `clean` verdict requires a detonation. The dry-run runner never provides
+    # one, so leaving this on means "static-only is never clean" -- which is the
+    # honest default.
+    triage_require_detonation: bool = True
+    # A malicious verdict deletes the staged payload at once; the verdict record
+    # (hash, reasons, file names) is kept as evidence, never the bytes.
+    triage_delete_malicious: bool = True
+    # add -> wait for completion -> stage -> scan, as one tool call. The wait is
+    # bounded: a torrent that never finishes is reported, not retried forever.
+    triage_auto_flow: bool = True
+    triage_download_timeout: float = 3600.0
+    triage_poll_seconds: float = 5.0
+    # The agent reads code-shaped files before anything is released. This is
+    # advisory to the deterministic verdict -- it can escalate, never clear --
+    # but a malicious read deletes the payload, which is what turns "quarantined
+    # until checked" into "quarantined until the model has looked at it".
+    triage_model_review: bool = True
+    triage_model_review_max_bytes: int = 256 * 1024
+    # Empty uses the conversational model; naming a cheaper or stronger one is
+    # allowed without touching code.
+    triage_model_review_model: str = ""
+
+    # ---- Windows detonation sandbox ----
+    # An immutable qcow2 base image plus a per-run overlay. Everything empty by
+    # default: the sandbox is off until a base image exists and pywinrm is
+    # installed (`uv sync --extra windows`, `minus vm-image`).
+    windows_qemu: str = "qemu-system-x86_64"
+    windows_base_image: str = ""
+    windows_work_dir: str = ""
+    windows_winrm_user: str = "minus"
+    windows_winrm_password: str = Field(default="", repr=False)
+    windows_cpus: int = 4
+    windows_memory_mb: int = 6144
+    windows_boot_timeout: float = 420.0
+    windows_guest_timeout: float = 180.0
+    windows_max_artifact_bytes: int = 64 * 1024**2
+    windows_min_free_bytes: int = 20 * 1024**3
+    windows_iso: str = ""
+    windows_virtio_iso: str = ""
+    windows_sysmon_zip: str = ""
 
     # ---- Alarm ----
     # The CLI the `set_alarm` tool runs: a full path, or a bare name looked up
@@ -153,6 +252,11 @@ class Settings(BaseSettings):
     console_log_level: str = "INFO"
     # Runs kept in logs/ before the oldest are pruned. Previously unbounded.
     log_retention: int = 30
+
+    # Lua plugins under plugins/. Off by default: lupa runs Lua in-process with
+    # no instruction or memory limit, so a plugin directory is code you would
+    # run. Turn it on deliberately (MINUS_PLUGINS_ENABLED=true).
+    plugins_enabled: bool = False
 
     @field_validator("timezone")
     @classmethod
