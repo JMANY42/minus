@@ -76,9 +76,7 @@ def _inspect_zip(
 
         if len(members) > max_members:
             flags.add("too-many-zip-members")
-            notes.append(
-                f"archive has {len(members)} members; inspected the first {max_members}"
-            )
+            notes.append(f"archive has {len(members)} members; inspected the first {max_members}")
             members = members[:max_members]
 
         expanded = 0

@@ -29,12 +29,38 @@ MZ_MAGIC = b"MZ"
 PE_SIGNATURE = b"PE\0\0"
 
 EXECUTABLE_SUFFIXES = {
-    ".exe", ".dll", ".scr", ".com", ".pif", ".cpl", ".ocx", ".sys", ".drv", ".msi",
+    ".exe",
+    ".dll",
+    ".scr",
+    ".com",
+    ".pif",
+    ".cpl",
+    ".ocx",
+    ".sys",
+    ".drv",
+    ".msi",
 }
 SCRIPT_SUFFIXES = {".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".hta", ".jar"}
 DOCUMENT_SUFFIXES = {
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf", ".txt", ".jpg",
-    ".jpeg", ".png", ".mp4", ".mkv", ".avi", ".mov", ".zip", ".rar", ".7z",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".rtf",
+    ".txt",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".zip",
+    ".rar",
+    ".7z",
 }
 MACRO_SUFFIXES = {".docm", ".xlsm", ".pptm", ".dotm", ".xlam"}
 
@@ -271,8 +297,7 @@ def inspect(path: Path, relative: str | None = None) -> FileReport:
         if not pe["signed"]:
             flags.append("unsigned-pe")
         packed = any(
-            section["entropy"] >= 7.5 and section["raw_size"] > 4096
-            for section in pe["sections"]
+            section["entropy"] >= 7.5 and section["raw_size"] > 4096 for section in pe["sections"]
         )
         if packed:
             flags.append("packed-section")

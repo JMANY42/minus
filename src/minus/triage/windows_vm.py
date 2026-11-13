@@ -286,8 +286,7 @@ class WindowsVmRunner:
             chunk = base64.b64encode(data[start : start + CHUNK_BYTES]).decode("ascii")
             if index == 0:
                 script = (
-                    f"[IO.File]::WriteAllBytes('{escaped}', "
-                    f"[Convert]::FromBase64String('{chunk}'))"
+                    f"[IO.File]::WriteAllBytes('{escaped}', [Convert]::FromBase64String('{chunk}'))"
                 )
             else:
                 size = len(data[start : start + CHUNK_BYTES])

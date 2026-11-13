@@ -74,8 +74,9 @@ class FakeWebUi:
                 self._record(raw)
                 if self.path == LOGIN_PATH:
                     if owner.accepted is None:
-                        self._send("" if owner.login_status == 204 else "Ok.",
-                                   status=owner.login_status)
+                        self._send(
+                            "" if owner.login_status == 204 else "Ok.", status=owner.login_status
+                        )
                         return
                     form = parse_qs(raw.decode("utf-8"))
                     pair = (
