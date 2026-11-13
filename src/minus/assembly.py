@@ -45,6 +45,7 @@ from minus.errors import ToolError
 from minus.llm.client import OpenRouterClient
 from minus.memory.service import MemoryService
 from minus.paths import control_socket, conversations_dir, deep_notes_dir, project_root
+from minus.plugins import LuaPluginHost, lua_available
 from minus.prompts import build_system_prompt
 from minus.runtime import (
     Assistant,
@@ -155,7 +156,94 @@ def build_alarm_tools(settings: Settings):
     return AlarmTools(settings.alarm_command, timezone=settings.timezone)
 
 
-def build_fast_tools(thinker: DeepThinker, tool_groups: list | None = None):
+def build_triage_pipeline(settings: Settings):
+    """The configured torrent pipeline, or None when qBittorrent is unset.
+
+    One builder for both the model-facing tool group and the harness, so the
+    VPN gate, sandbox choice and quarantine paths cannot drift between them.
+    """
+    from minus.services.qbittorrent import QBittorrentClient
+    from minus.triage.pipeline import TriagePipeline
+    from minus.triage.sandbox import DryRunRunner
+
+    if not settings.qbittorrent_url:
+        logger.info("Triage is off: MINUS_QBITTORRENT_URL is not set")
+        return None
+
+    reviewer = None
+    if settings.triage_model_review:
+        from minus.llm.client import OpenRouterClient
+        from minus.triage.review import ModelReviewer
+
+        # No key is not a reason to fail to start -- the MCP server and the
+        # harness must still expose the rest of the tool surface. The reviewer
+        # stays attached with no model, which reports `unavailable` and keeps
+        # promotion closed rather than silently skipping the check.
+        has_key = bool(settings.llm_api_key or settings.openrouter_api_key)
+        model = OpenRouterClient(settings) if has_key else None
+        reviewer = ModelReviewer(
+            model,
+            model_name=settings.triage_model_review_model or settings.chat_model,
+            max_total_bytes=settings.triage_model_review_max_bytes,
+        )
+
+    sandbox: Any = DryRunRunner()
+    if settings.windows_base_image:
+        # The runner reports its own unavailability, so a half-configured guest
+        # degrades to needs_review with a reason instead of refusing to start.
+        from minus.triage.windows_vm import runner_from_settings
+
+        sandbox = runner_from_settings(settings)
+
+    return TriagePipeline(
+        quarantine=settings.triage_quarantine_dir,
+        library=settings.triage_library_dir,
+        client=QBittorrentClient(
+            settings.qbittorrent_url,
+            settings.qbittorrent_username,
+            settings.qbittorrent_password,
+        ),
+        max_bytes=settings.triage_max_bytes,
+        require_detonation=settings.triage_require_detonation,
+        sandbox=sandbox,
+        vpn_interface=settings.vpn_interface,
+        qbittorrent_vpn_interface=settings.qbittorrent_vpn_interface,
+        require_vpn=settings.require_vpn_for_triage,
+        delete_malicious=settings.triage_delete_malicious,
+        reviewer=reviewer,
+        download_timeout=settings.triage_download_timeout,
+        poll_seconds=settings.triage_poll_seconds,
+    )
+
+
+def build_triage_tools(settings: Settings) -> list:
+    """The torrent-triage group, or an empty list when qBittorrent is unset.
+
+    Gated on `MINUS_QBITTORRENT_URL` for the same reason the Google tools are
+    gated on credentials: every flow in this group starts at the torrent list,
+    so with no client there is nothing to offer the model but a failure. The
+    static and verdict halves stay reachable through the pipeline directly.
+    """
+    from minus.tools.triage import TriageTools
+
+    pipeline = build_triage_pipeline(settings)
+    return [] if pipeline is None else [TriageTools(pipeline)]
+
+
+def build_vpn_tools(settings: Settings) -> list:
+    """AirVPN controls, but only once an account is named.
+
+    Registering a connect tool with no credentials would spend a round trip
+    discovering that, exactly like the Google group.
+    """
+    from minus.tools.vpn import VpnTools
+
+    if not settings.airvpn_username:
+        return []
+    return [VpnTools(settings)]
+
+
+def build_fast_tools(thinker: DeepThinker, tool_groups: list | None = None, plugins=None):
     """Everything registered, plus `escalate`, plus whatever needs building.
 
     Deriving the fast tier from the whole registry rather than an allowlist
@@ -175,6 +263,12 @@ def build_fast_tools(thinker: DeepThinker, tool_groups: list | None = None):
 
     for group in tool_groups or []:
         group.register(fast)
+
+    if plugins is not None:
+        # Last, so a plugin cannot take over a built-in by declaring its name
+        # (`LuaPluginHost.reload` refuses that collision) and so anything that
+        # lists the tier sees the plugins alongside it.
+        plugins.register(fast)
     return fast
 
 
@@ -222,9 +316,23 @@ def build_conversation(settings: Settings, state=None) -> Assistant:
     if state is not None:
         state.provide("deep", thinker.status)
 
+    # One host for the process, held on the Assistant so the control socket can
+    # reload plugins on a running assistant. Absent lupa, `LuaPluginHost` still
+    # exists and registers nothing.
+    plugin_host = LuaPluginHost() if settings.plugins_enabled and lua_available() else None
+
     conversation = Conversation(
         model=model,
-        tools=build_fast_tools(thinker, [*google_tools, build_alarm_tools(settings)]),
+        tools=build_fast_tools(
+            thinker,
+            [
+                *google_tools,
+                build_alarm_tools(settings),
+                *build_triage_tools(settings),
+                *build_vpn_tools(settings),
+            ],
+            plugins=plugin_host,
+        ),
         max_tool_rounds=settings.max_tool_rounds,
         memory=memory,
         system_prompt=system_prompt,
@@ -240,6 +348,7 @@ def build_conversation(settings: Settings, state=None) -> Assistant:
         thinker=thinker,
         results=results,
         details=FileDetailSink(),
+        plugins=plugin_host,
     )
 
 
@@ -275,7 +384,13 @@ def _newest(directory: Path, limit: int) -> list[Path]:
 
 
 def build_config_controller(
-    assistant: Assistant, speaker, source, settings: Settings, policy: ToolPolicy | None = None
+    assistant: Assistant,
+    speaker,
+    source,
+    settings: Settings,
+    policy: ToolPolicy | None = None,
+    *,
+    tts_live: bool = True,
 ) -> ConfigController:
     """Which settings apply live, and what each one actually writes.
 
@@ -369,6 +484,18 @@ def build_config_controller(
         "disabled_tools": set_disabled_tools,
     }
 
+    if not tts_live:
+        # A console speaker has no voice to change; reporting the TTS fields as
+        # live would be a lie the dashboard would repeat.
+        for name in (
+            "tts_voice",
+            "tts_speed",
+            "tts_lang",
+            "tts_chunk_max_chars",
+            "tts_first_chunk_max_chars",
+        ):
+            table.pop(name, None)
+
     return ConfigController(
         settings,
         {name: LiveField(name, apply) for name, apply in table.items()},
@@ -377,7 +504,14 @@ def build_config_controller(
 
 
 def build_control_handlers(
-    assistant: Assistant, source, interrupts, state, config=None, floor=None, policy=None
+    assistant: Assistant,
+    source,
+    interrupts,
+    state,
+    config=None,
+    floor=None,
+    policy=None,
+    plugins=None,
 ) -> dict:
     """What the control socket is allowed to ask of a running assistant.
 
@@ -487,6 +621,18 @@ def build_control_handlers(
             raise ProtocolError("values must be a non-empty object", BAD_PARAMS)
         return config.apply(values, persist=bool(params.get("persist", True)))
 
+    def reload_plugins(params: dict) -> dict:
+        """Re-read plugins/ and make the registry match it.
+
+        The reload semantics live in the host: new plugins are added, changed
+        ones are swapped including their schema, deleted ones are unregistered,
+        and a plugin that fails to compile is reported rather than taking the
+        running assistant down.
+        """
+        if plugins is None:
+            raise ProtocolError("Plugins are not enabled for this assistant", BAD_PARAMS)
+        return plugins.reload()
+
     return {
         "get_config": get_config,
         "set_config": set_config,
@@ -524,6 +670,7 @@ def build_control_handlers(
         "list_agents": lambda params: [],
         "list_programs": lambda params: [],
         "shutdown": lambda params: _shutdown(source),
+        "reload_plugins": reload_plugins,
     }
 
 
@@ -539,10 +686,10 @@ def run_assistant(
     *,
     control: bool = True,
     interactive: bool = True,
+    text_only: bool = False,
 ) -> None:
     from minus.audio.interrupt import InterruptBus, barge_in_on_sigint
     from minus.audio.stt import CliTranscriptSource, MicrophoneTranscriptSource
-    from minus.audio.tts import KokoroSpeaker
 
     # One bus shared by input and output: the recognizer publishes barge-in,
     # the speaker consumes it. Neither knows the other exists.
@@ -551,7 +698,17 @@ def run_assistant(
 
     # The inner one is kept: live TTS config writes to it directly, because
     # ObservedSpeaker forwards attribute reads and would swallow the writes.
-    voice = KokoroSpeaker(interrupts, settings)
+    # `--no-audio` must not import PortAudio or Kokoro at all: on a box without
+    # them this is the only way to run a real conversation.
+    voice: Any
+    if text_only:
+        from minus.audio.console import ConsoleSpeaker
+
+        voice = ConsoleSpeaker(interrupts)
+    else:
+        from minus.audio.tts import KokoroSpeaker
+
+        voice = KokoroSpeaker(interrupts, settings)
     # Wrapped once rather than at each `speak()` call site: the courier speaks
     # too, and one decorator covers both callers and any future third.
     speaker = ObservedSpeaker(voice, state)
@@ -602,9 +759,12 @@ def run_assistant(
                 source,
                 interrupts,
                 state,
-                build_config_controller(assistant, voice, source, settings, policy),
+                build_config_controller(
+                    assistant, voice, source, settings, policy, tts_live=not text_only
+                ),
                 floor=floor,
                 policy=policy,
+                plugins=assistant.plugins,
             ),
             state=state,
         )

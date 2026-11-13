@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "minus": {
+      "type": "stdio",
+      "command": ".venv/bin/python",
+      "args": ["-m", "minus.mcp"]
+    }
+  }
+}

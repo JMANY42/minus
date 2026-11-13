@@ -1,0 +1,168 @@
+/* A quiet dark surface, separators rather than borders.
+ *
+ * The dashboard's stylesheet restricts itself to ansi_* names because it is
+ * built for a Linux VT. The harness is a Textual-only view, so it can use hex
+ * and get the neutral greys the console would flatten anyway. There are no
+ * box-drawing characters here on purpose: vertical space belongs to the
+ * transcript, and a border around every pane spends four rows saying nothing.
+ */
+
+Screen {
+    layout: vertical;
+    background: #0b0d10;
+    color: #c9d0da;
+}
+
+#topbar {
+    height: 1;
+    padding: 0 1;
+    background: #101319;
+    color: #c9d0da;
+}
+
+#body {
+    height: 1fr;
+}
+
+#left {
+    width: 22;
+    padding: 0 1;
+    background: #0e1116;
+    border-right: solid #1d222a;
+}
+
+#center {
+    width: 1fr;
+    padding: 0 1;
+    background: #0b0d10;
+}
+
+#right {
+    width: 28;
+    padding: 0 1;
+    background: #0e1116;
+    border-left: solid #1d222a;
+}
+
+.rail-title {
+    height: 1;
+    color: #687386;
+    text-style: bold;
+}
+
+#conversation {
+    height: 1fr;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+}
+
+#activity {
+    height: 1fr;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+}
+
+#alerts {
+    height: auto;
+    max-height: 10;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+}
+
+#mode-list {
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+#mode-list > .option-list--option {
+    padding: 0 1;
+    color: #9aa4b2;
+}
+
+#mode-list > .option-list--option-highlighted {
+    color: #e8edf5;
+    background: #1b2230;
+    text-style: bold;
+}
+
+#mode-list:focus {
+    border: none;
+    background-tint: transparent;
+}
+
+#mode-list:focus > .option-list--option-highlighted {
+    color: #f8fafc;
+    background: #243247;
+}
+
+#bottom {
+    height: 3;
+    padding: 0 1;
+    background: #101319;
+    border-top: solid #1d222a;
+}
+
+#prompt {
+    height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #e8edf5;
+}
+
+#prompt:focus {
+    border: none;
+    background-tint: transparent;
+}
+
+#hints {
+    height: 1;
+    color: #5f6b7c;
+}
+
+/* Approval is the one modal, so it may have a border: it is a distinct
+ * decision, not another pane in the flow. */
+ApprovalScreen {
+    align: center middle;
+    background: #05070a;
+}
+
+#approval {
+    width: 68;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    background: #12161d;
+    border: solid #2a323e;
+}
+
+.approval-kicker {
+    height: 1;
+    color: #fb7185;
+    text-style: bold;
+}
+
+#approval-action {
+    height: auto;
+    color: #f8fafc;
+    text-style: bold;
+}
+
+#approval-detail {
+    height: auto;
+    margin-top: 1;
+    color: #9aa4b2;
+}
+
+#approval-buttons {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+
+#approval-buttons Button {
+    min-width: 9;
+    margin-left: 1;
+}

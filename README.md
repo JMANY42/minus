@@ -15,6 +15,7 @@ persistent semantic memory, speech in and speech out.
 
 ```bash
 uv sync                                          # core + dev tooling
+uv sync --extra harness                          # the interactive `minus` surface
 uv sync --extra audio --extra embeddings         # everything, incl. mic/TTS
 ```
 
@@ -28,13 +29,20 @@ with `MINUS_`-prefixed environment variables — see `src/minus/config.py`.
 ## Run
 
 ```bash
-minus                  # microphone mode
-minus --no-mic         # type instead of talking
+minus                  # the harness: chat, code, download, vpn, sys
+minus voice            # the original microphone assistant
+minus voice --no-mic   # type instead of talking
 minus tools            # list each agent's tools, and which are switched off
 minus memory           # interactively prune stored facts
 minus calibrate        # recompute the fact-relevance threshold
 minus google-auth      # connect a Google account for the task/calendar tools
 ```
+
+The harness is the default surface. Type a line to talk to the agent, or use a
+slash command: `/mode code`, `/download <magnet>`, `/vpn connect`, `/triage
+<hash>`, `/doctor`, `/help`. The left rail switches modes; the right rail shows
+tool activity and any quarantine alert. `minus serve` remains the headless
+service.
 
 Against an assistant that is already running:
 
@@ -44,6 +52,52 @@ minus say "what time is it"   # inject a line, as though it had been spoken
 minus status                  # what it is doing right now
 minus status --watch          # ...and keep printing as that changes
 ```
+
+## Torrents, VPN and quarantine
+
+MINUS does not search index sites. You give it a magnet or a `.torrent` URL;
+qBittorrent downloads it into `quarantine/incoming`; the pipeline copies the
+finished content into `quarantine/<hash>/`, inspects it, asks the agent model to
+read any code-shaped files, and records a verdict. Only a `clean` verdict can be
+promoted into `library/`.
+
+```bash
+minus qbt setup                # start qBittorrent, loopback WebUI, quarantine paths
+minus qbt status               # version, speeds and recent torrents
+minus vpn status               # provider, interface, route, triage gate
+minus vpn connect              # AirVPN through bluetit/goldcrest
+minus vpn disconnect
+minus triage ingest 'magnet:?xt=urn:btih:...'
+minus triage scan <hash>       # static + model review (+ detonation if configured)
+minus triage verdict <hash>
+minus triage promote <hash>    # refused unless the verdict is clean
+```
+
+Configuration lives in `.env` (0600, gitignored): `MINUS_AIRVPN_USERNAME`,
+`MINUS_AIRVPN_PASSWORD`, `MINUS_QBITTORRENT_URL`,
+`MINUS_QBITTORRENT_PASSWORD`, and the `MINUS_TRIAGE_*` knobs. The AirVPN
+password is never returned by the control socket, logged, or included in an
+error string.
+
+A malicious verdict deletes the staged payload immediately, writes a 0600
+record under `quarantine/rejected/` (hash, reasons, file names — never bytes),
+and returns an `ALERT` the harness shows. Promotion stays refused for anything
+that is not `clean`; `clean` requires a detonation that observed nothing and a
+model review that did not escalate.
+
+## MCP server
+
+Every portable tool MINUS builds is also available to any Model Context
+Protocol client:
+
+```bash
+minus mcp                       # or: minus-mcp / python -m minus.mcp
+```
+
+The repository ships `.mcp.json`; point a client at it or at the same
+command/args. The server is stdlib-only, speaks newline-delimited JSON-RPC over
+stdio, and exposes the built-in, alarm, triage, VPN and (when configured)
+Google groups. See `docs/MCP.md` for the protocol surface and safety boundary.
 
 ## Dashboard
 
