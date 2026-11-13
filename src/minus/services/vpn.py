@@ -343,6 +343,55 @@ def connect(settings: Any) -> TunnelStatus:
         last = tunnel_status(settings)
 
 
+def bind_downloads(settings: Any, snapshot: TunnelStatus) -> dict:
+    """Make a just-connected tunnel the path qBittorrent must use.
+
+    The preflight refuses a fetch when qBittorrent is bound to anything other
+    than the named device, so a successful connect has to carry that name the
+    rest of the way: persist it for the next start, then apply it to the
+    running client. A binding failure is reported rather than raised -- the
+    tunnel is up, and the preflight will still refuse the fetch until the
+    client agrees.
+    """
+    changes: dict[str, str] = {}
+    if not settings.vpn_interface:
+        settings.vpn_interface = snapshot.interface
+        changes["MINUS_VPN_INTERFACE"] = snapshot.interface
+    if not settings.qbittorrent_vpn_interface:
+        settings.qbittorrent_vpn_interface = snapshot.interface
+        changes["MINUS_QBITTORRENT_VPN_INTERFACE"] = snapshot.interface
+
+    if changes:
+        from minus.paths import project_root
+        from minus.services.env_file import update_env_file
+
+        try:
+            update_env_file(project_root() / ".env", changes, allowed=frozenset(changes))
+        except OSError as exc:
+            logger.warning("Could not persist VPN interface to .env: %s", exc)
+
+    if not getattr(settings, "qbittorrent_url", ""):
+        return {
+            "bound": False,
+            "interface": snapshot.interface,
+            "reason": "qBittorrent is not configured",
+        }
+
+    try:
+        from minus.scripts.qbt import apply_preferences, ensure_running
+
+        client = ensure_running(settings)
+        try:
+            apply_preferences(client, settings, snapshot.interface)
+        finally:
+            client.close()
+    except Exception as exc:
+        logger.warning("Could not bind qBittorrent to %s: %s", snapshot.interface, exc)
+        return {"bound": False, "interface": snapshot.interface, "error": str(exc)}
+
+    return {"bound": True, "interface": snapshot.interface}
+
+
 def disconnect(settings: Any) -> dict:
     """Ask AirVPN to tear the tunnel down; report both the exit and the output."""
     argv = [*_resolve_command(settings), "--disconnect"]

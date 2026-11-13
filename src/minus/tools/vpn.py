@@ -59,9 +59,15 @@ class VpnTools:
             if current.healthy:
                 return f"VPN already up on {current.interface}."
             snapshot = vpn_service.connect(self.settings)
+            binding = vpn_service.bind_downloads(self.settings, snapshot)
         except VpnError as exc:
             raise ToolExecutionError(str(exc)) from exc
-        return f"VPN connected on {snapshot.interface}; traffic leaves through it."
+        suffix = ""
+        if binding.get("bound"):
+            suffix = " qBittorrent is bound to it."
+        elif binding.get("error"):
+            suffix = f" qBittorrent binding failed: {binding['error']}"
+        return f"VPN connected on {snapshot.interface}; traffic leaves through it.{suffix}"
 
     def vpn_disconnect(self) -> dict:
         """Disconnect AirVPN and report the client's exit and output."""

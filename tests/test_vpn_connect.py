@@ -274,6 +274,77 @@ def test_tools_register_under_the_vpn_category():
     assert {category for _tool, category in registry.registered} == {"vpn"}
 
 
+def test_bind_downloads_persists_the_interface_and_applies_it(tmp_path, monkeypatch):
+    written: dict[str, str] = {}
+    applied: dict[str, str] = {}
+
+    def fake_update(_path, updates, allowed=None):
+        written.update(updates)
+        return list(updates)
+
+    class FakeClient:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("minus.services.env_file.update_env_file", fake_update)
+    monkeypatch.setattr("minus.paths.project_root", lambda: tmp_path)
+    monkeypatch.setattr("minus.scripts.qbt.ensure_running", lambda _settings: FakeClient())
+    monkeypatch.setattr(
+        "minus.scripts.qbt.apply_preferences",
+        lambda _client, _settings, interface: applied.setdefault("interface", interface),
+    )
+    settings = Settings(
+        vpn_interface="",
+        qbittorrent_vpn_interface="",
+        qbittorrent_url="http://127.0.0.1:8080",
+    )
+
+    result = vpn.bind_downloads(settings, HEALTHY)
+
+    assert result == {"bound": True, "interface": "tun0"}
+    assert written == {
+        "MINUS_VPN_INTERFACE": "tun0",
+        "MINUS_QBITTORRENT_VPN_INTERFACE": "tun0",
+    }
+    assert applied["interface"] == "tun0"
+    assert settings.vpn_interface == "tun0"
+    assert settings.qbittorrent_vpn_interface == "tun0"
+
+
+def test_bind_downloads_without_qbittorrent_reports_why(tmp_path, monkeypatch):
+    monkeypatch.setattr("minus.services.env_file.update_env_file", lambda *a, **k: [])
+    monkeypatch.setattr("minus.paths.project_root", lambda: tmp_path)
+    settings = Settings(
+        vpn_interface="",
+        qbittorrent_vpn_interface="",
+        qbittorrent_url="",
+    )
+
+    result = vpn.bind_downloads(settings, HEALTHY)
+
+    assert result["bound"] is False
+    assert "not configured" in result["reason"]
+
+
+def test_bind_downloads_reports_a_failed_bind(tmp_path, monkeypatch):
+    monkeypatch.setattr("minus.services.env_file.update_env_file", lambda *a, **k: [])
+    monkeypatch.setattr("minus.paths.project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "minus.scripts.qbt.ensure_running",
+        lambda _settings: (_ for _ in ()).throw(RuntimeError("webui down")),
+    )
+    settings = Settings(
+        vpn_interface="tun0",
+        qbittorrent_vpn_interface="tun0",
+        qbittorrent_url="http://127.0.0.1:8080",
+    )
+
+    result = vpn.bind_downloads(settings, HEALTHY)
+
+    assert result["bound"] is False
+    assert "webui down" in result["error"]
+
+
 def test_vpn_status_reports_the_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(vpn, "tunnel_status", _healthy)
     result = VpnTools(Settings(vpn_provider="airvpn")).vpn_status()

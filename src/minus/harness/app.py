@@ -654,6 +654,11 @@ class MinusHarness(App[None]):
                 if not callable(operation):
                     raise AttributeError(f"{action} is not available in this build")
                 result = operation(self.settings)
+                if action == "connect":
+                    binding = vpn.bind_downloads(self.settings, result)
+                    if not binding.get("bound"):
+                        reason = binding.get("error") or binding.get("reason") or "not bound"
+                        result = f"{result} (qBittorrent: {reason})"
                 summary = (
                     payload_summary(result)
                     if isinstance(result, dict)

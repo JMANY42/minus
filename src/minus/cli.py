@@ -391,12 +391,19 @@ def run_vpn_command(args) -> int:
     import json
 
     from minus.errors import MinusError
-    from minus.services.vpn import VpnError, connect, disconnect, tunnel_status
+    from minus.services.vpn import (
+        VpnError,
+        bind_downloads,
+        connect,
+        disconnect,
+        tunnel_status,
+    )
 
     settings = load_settings()
     try:
         if args.action == "connect":
             snapshot = connect(settings)
+            binding = bind_downloads(settings, snapshot)
         elif args.action == "disconnect":
             result = disconnect(settings)
             print(json.dumps(result) if args.json else result.get("output", ""))
@@ -421,6 +428,12 @@ def run_vpn_command(args) -> int:
         )
     else:
         print(_vpn_report(settings, snapshot))
+        if args.action == "connect":
+            if binding.get("bound"):
+                print(f"qBittorrent: bound to {binding['interface']}")
+            else:
+                reason = binding.get("error") or binding.get("reason") or "not bound"
+                print(f"qBittorrent: {reason}")
     return 0 if snapshot.healthy or args.action == "status" else 1
 
 
