@@ -1,3 +1,4 @@
+import contextlib
 import json as stdjson
 import os
 import re
@@ -50,9 +51,15 @@ def write_json(path, payload, *, encoding="utf-8", indent=2):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.tmp")
 
+    with contextlib.suppress(OSError):
+        os.chmod(path.parent, 0o700)
     with temp_path.open("w", encoding=encoding) as handle:
         stdjson.dump(payload, handle, ensure_ascii=False, indent=indent)
         handle.write("\n")
+    # Private before it is visible: transcripts, facts and verdicts are personal
+    # data, and the rename is what makes the file appear.
+    with contextlib.suppress(OSError):
+        os.chmod(temp_path, 0o600)
 
     os.replace(temp_path, path)
 

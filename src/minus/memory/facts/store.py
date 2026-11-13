@@ -85,6 +85,13 @@ class SqliteFactStore:
                 injected so the store can be tested without torch installed.
         """
         self.db_path = str(db_path)
+        # A fresh clone has no memory/ (it is gitignored), and sqlite will not
+        # create intermediate directories: connect() fails with "unable to open
+        # database file" until one exists. Making the parent here fixes the first
+        # run and any custom --db path with the same line; the in-memory name has
+        # no directory and is skipped.
+        if self.db_path != ":memory:":
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.embedder = embedder or SentenceTransformerEmbedder()
         self._lock = threading.RLock()
         # See _serialized: the thread check is off because this connection is
@@ -94,6 +101,11 @@ class SqliteFactStore:
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
         self._init_schema()
+
+    def embeddings_available(self) -> bool:
+        """Whether this store's embedder can produce vectors right now."""
+        probe = getattr(self.embedder, "available", None)
+        return bool(probe()) if callable(probe) else True
 
     def _init_schema(self) -> None:
         dimensions = getattr(self.embedder, "dimensions", DEFAULT_DIMENSIONS)

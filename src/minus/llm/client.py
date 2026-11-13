@@ -32,9 +32,13 @@ class OpenRouterClient:
 
     def __init__(self, settings: Settings, client: Any | None = None) -> None:
         self._settings = settings
+        # A direct provider (eg. DeepSeek) wins over the OpenRouter defaults, so
+        # one key in MINUS_LLM_API_KEY is enough to point the whole harness at it.
+        base_url = settings.llm_base_url or settings.openrouter_base_url
+        api_key = settings.llm_api_key or settings.openrouter_api_key
         self._client = client or OpenAI(
-            base_url=settings.openrouter_base_url,
-            api_key=settings.openrouter_api_key,
+            base_url=base_url,
+            api_key=api_key,
             default_headers={"X-Title": settings.app_title},
         )
 

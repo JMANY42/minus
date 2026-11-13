@@ -1,0 +1,21 @@
+[package]
+name = "minus-core"
+version = "0.1.0"
+edition = "2021"
+description = "Rust side of MINUS: protocol, config, control server"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+libc = "0.2"
+rusqlite = { version = "0.42", default-features = false, features = ["bundled", "load_extension"] }
+sqlite-vec = "0.1.9"
+schemars = "1.2"
+reqwest = { version = "0.13", features = ["blocking", "json"] }
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "minus-cored"
+path = "src/main.rs"

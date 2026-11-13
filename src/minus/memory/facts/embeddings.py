@@ -12,12 +12,17 @@ actually needs a vector.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Any
 
 import sqlite_vec
 
 logger = logging.getLogger(__name__)
+
+class EmbeddingsUnavailable(RuntimeError):
+    """The `embeddings` extra (sentence-transformers/torch) is not installed."""
+
 
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_DIMENSIONS = 384  # matches all-MiniLM-L6-v2
@@ -39,10 +44,19 @@ class SentenceTransformerEmbedder:
     def dimensions(self) -> int:
         return self._dimensions
 
+    @staticmethod
+    def available() -> bool:
+        """Whether the model can be loaded at all, without loading it."""
+        return importlib.util.find_spec("sentence_transformers") is not None
+
     def _load(self) -> Any:
         if self._model is None:
             # Deferred: importing sentence_transformers costs seconds and pulls
             # torch into the process, which most commands never need.
+            if not self.available():
+                raise EmbeddingsUnavailable(
+                    "semantic memory needs its extra: uv sync --extra embeddings"
+                )
             from sentence_transformers import SentenceTransformer
 
             logger.debug("Loading embedding model %s", self.model_name)

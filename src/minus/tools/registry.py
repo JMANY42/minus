@@ -209,6 +209,36 @@ class ToolRegistry:
             raise UnknownToolError(f"Unknown tool(s): {', '.join(sorted(unknown))}")
         self._disabled = wanted
 
+    # ---- Installing a Tool that was not built from a function ----
+    #
+    # `tool()` derives the schema from a Python signature, which is the right
+    # default and the only thing most tools need. A plugin is the exception:
+    # its schema is declared in another language, so the Tool arrives already
+    # built and all that is left is the same duplicate check `tool()` does.
+
+    def add_tool(self, tool: Tool) -> None:
+        """Register an already-built `Tool`. Raises on a duplicate name."""
+        if tool.name in self._tools:
+            raise ValueError(f"Tool {tool.name!r} is already registered")
+        self._tools[tool.name] = tool
+
+    def replace_tool(self, tool: Tool) -> None:
+        """Swap the `Tool` behind a name it already holds.
+
+        For a plugin reloaded from disk: its arguments, and therefore its
+        schema, may have changed, and the version the model is offered has to
+        be the one that will run.
+        """
+        if tool.name not in self._tools:
+            raise UnknownToolError(f"Unknown tool: {tool.name}")
+        self._tools[tool.name] = tool
+
+    def remove_tool(self, name: str) -> None:
+        """Forget a registered tool, including any record of it being off."""
+        self.get(name)
+        del self._tools[name]
+        self._disabled.discard(name)
+
     def subset(self, names: Iterable[str]) -> ToolRegistry:
         """A new registry holding only `names`, sharing this one's Tools.
 

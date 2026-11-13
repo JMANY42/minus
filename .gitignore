@@ -14,6 +14,12 @@ __pycache__/
 # which would have silently broken when the package moved one level deeper.
 /logs/
 /memory/
+/quarantine/
+/library/
+
+# Rust build artifacts. The core is source; target/ is machine-specific and
+# multi-gigabyte, so it must never be staged.
+/rust/minus-core/target/
 
 # claude worktrees
 .claude/worktrees

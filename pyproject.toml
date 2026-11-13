@@ -56,6 +56,22 @@ embeddings = [
 dashboard = [
     "textual>=0.80",
 ]
+# The interactive harness is the default `minus` surface and is Textual too.
+# Kept as its own extra so a headless install (`minus serve`, `minus mcp`) does
+# not need it, and so the dashboard's dependency can move independently.
+harness = [
+    "textual>=0.80",
+]
+# Lua plugins. Small, but deliberately an extra: the core install stays free of
+# it, and src/minus/plugins.py degrades to "no plugins" when it is absent.
+plugins = [
+    "lupa>=2.0",
+]
+# Windows detonation. pywinrm is imported lazily by the sandbox runner, so the
+# core install and the dry-run path stay dependency-free.
+windows = [
+    "pywinrm>=0.5",
+]
 
 # Tooling, not a feature of the package. A dependency group rather than an
 # extra: extras describe optional capabilities a consumer can ask for
@@ -74,6 +90,10 @@ dev = [
 
 [project.scripts]
 minus = "minus.cli:main"
+# The MCP server as a direct command, so an MCP client config does not need to
+# know it is a `minus` subcommand. No extra dependencies: the transport is
+# stdlib JSON-RPC.
+minus-mcp = "minus.mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]

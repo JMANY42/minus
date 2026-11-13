@@ -19,6 +19,7 @@ import signal
 import threading
 from dataclasses import dataclass
 from queue import Queue
+from typing import Any
 
 from minus.control.state import LISTENING, THINKING, RuntimeState
 from minus.core.agent import Conversation
@@ -44,6 +45,9 @@ class Assistant:
     thinker: DeepThinker
     results: Queue
     details: DetailSink
+    # The Lua plugin host, when plugins are enabled. Optional because a test or
+    # an embedding caller may build an Assistant without one.
+    plugins: Any = None
 
 
 @contextlib.contextmanager

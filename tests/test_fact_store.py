@@ -225,3 +225,15 @@ class TestPersistence:
         second = SqliteFactStore(path, embedder=FakeEmbedder())
         assert [f.value for f in second.get_all_facts()] == ["PST"]
         second.close()
+
+
+def test_creates_the_database_directory(tmp_path):
+    """A fresh clone has no memory/ directory, and sqlite will not make one."""
+    db = tmp_path / "nested" / "dir" / "facts.db"
+    store = SqliteFactStore(db, embedder=FakeEmbedder())
+    try:
+        assert db.is_file()
+        store.add_fact("favourite_editor", "nvim")
+        assert [fact.value for fact in store.get_all_facts()] == ["nvim"]
+    finally:
+        store.close()

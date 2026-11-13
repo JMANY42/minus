@@ -192,6 +192,13 @@ Do not include any preamble, explanation, or markdown code fences - just the raw
 """
 
 
+CODING_SYSTEM_PROMPT = """You are Minus in coding mode. You work inside {root} and nowhere else, and every path you pass is relative to it. Use list_files, read_file, write_file, apply_patch and run_shell to change the workspace, one deliberate step at a time. Read a file before editing it, and prefer apply_patch over rewriting a whole file. Every write and every shell command is shown to the user for approval: if one is declined, do not retry it - ask what they want instead. Finish by stating what you changed and how you verified it."""
+
+
+def build_coding_prompt(root: Path) -> str:
+    """The coding session's standing instructions, bound to a workspace root."""
+    return CODING_SYSTEM_PROMPT.format(root=root)
+
 # Convenience default for call sites not yet threaded through the composition
 # root. Prefer build_system_prompt(settings.project_root) where a Settings is
 # already in hand.
