@@ -346,7 +346,10 @@ override the root and the socket.
 | `memory/deep_notes/<stamp>-<slug>.json` | deep write-ups (title, created_at, detail) |
 | `logs/run-<stamp>-<pid>.log` | run log, `log_retention` kept |
 | `logs/console-<stamp>-<pid>.log` | raw fd 1/2 output (C extensions never log) |
+| `quarantine/incoming/` | qBittorrent's save path, 0700, before staging |
+| `quarantine/qbt-profile/` | qBittorrent config/log for the private profile |
 | `quarantine/<hash>/` | staged torrent, `manifest.json`, `verdict.json` |
+| `quarantine/rejected/` | 0600 records of malicious payloads (names, never bytes) |
 | `library/<name>/` + `<name>.provenance.json` | content released by a `clean` verdict |
 | `models/kokoro-v1.0.onnx`, `voices-v1.0.bin` | Kokoro weights and voices, via git-lfs |
 | `.env` | `OPENROUTER_API_KEY`, `MINUS_*` overrides, Google grant |
@@ -391,3 +394,30 @@ tool result telling the model not to retry. `--yes` is the only way to construct
 `scripts/models.py::resolve` and assigns `settings.chat_model`, which works because
 `OpenRouterClient.complete` reads that field per call. Transcripts land in
 `memory/coding_sessions/<id>.json` and never touch the fact store.
+
+## 15. The harness (`minus`, bare)
+
+`src/minus/harness/` is the default interactive surface: one Textual app with five modes (`chat`,
+`code`, `download`, `vpn`, `sys`) that share a transcript, an activity rail and an input. It is
+not the dashboard. The dashboard observes a MINUS that is already running and works with it
+stopped; the harness *is* the agent, so it builds the conversation, coding session and triage
+pipeline itself.
+
+`ToolLoop` gained an `observer` seam: it calls `("tool_start"|"tool_end"|"tool_error", payload)`
+and swallows rendering failures. The harness marshals those events to Textual's thread with
+`call_from_thread`; voice and coding callers pass nothing and pay nothing. Chat mode reuses
+`assembly.build_conversation` and polls the deep tier's result queue on a daemon thread. Code mode
+reuses `CodingSession` with a `ThreadApprover` that parks the worker on an Event until a modal
+answers, and denies on timeout. Download mode uses `assembly.build_triage_pipeline` and renders
+each stage plus any `ALERT` from a malicious verdict. `run_harness` refuses a non-TTY, and the old
+microphone loop is `minus voice`.
+
+## 16. MCP server
+
+`src/minus/mcp/server.py` puts the same `ToolRegistry` on an MCP stdio transport:
+`initialize`, `tools/list`, `tools/call`, `ping`, and empty resource/prompt lists. It is
+stdlib-only — MCP's stdio framing is newline-delimited JSON-RPC 2.0 — so the core install gains
+no dependency. `build_registry` registers the built-in, alarm, triage, VPN and (when configured)
+Google groups; `escalate` is excluded because it needs a live conversation and a result queue, and
+coding tools are excluded because an MCP client has no approval UI. Entry points: `minus mcp`,
+`minus-mcp`, `python -m minus.mcp`, and the shipped `.mcp.json`.

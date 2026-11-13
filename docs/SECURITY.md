@@ -10,11 +10,14 @@ needs a reason in its description.
 
 - Every secret is read from the environment or `.env`: `OPENROUTER_API_KEY` /
   `MINUS_LLM_API_KEY`, the three Google values, `MINUS_QBITTORRENT_PASSWORD`,
-  `MINUS_WINDOWS_WINRM_PASSWORD`. None of them is ever written by the dashboard
-  (`SECRETS` in `control/config_control.py` is a deny-list for both reads and
-  writes), logged, or returned in `get_config`.
-- MINUS does **not** hold VPN credentials. A tunnel is brought up by the user's own
-  client; MINUS only asserts that the route leaves through the expected interface.
+  `MINUS_AIRVPN_PASSWORD`, `MINUS_WINDOWS_WINRM_PASSWORD`. None of them is ever
+  written by the dashboard (`SECRETS` in `control/config_control.py` is a deny-list
+  for both reads and writes), logged, or returned in `get_config`.
+- MINUS drives AirVPN's own suite (bluetit + goldcrest) when credentials are
+  configured, and still verifies the kernel route before any fetch. The password
+  is redacted from every client output and error; the client command is allowed a
+  passwordless `sudo -n` retry through one sudoers drop-in because a fresh
+  `airvpn` group is not in the current login session.
 - `.env` is rewritten atomically at 0600 (`services/env_file.py`, Rust
   `envfile.rs`); a value that was never set is never invented.
 - Exposed secrets are rotated by the owner, not patched around: treat any value
@@ -94,6 +97,12 @@ not have. `triage/airlock.py` is the no-execution alternative:
 - staging now strips the executable bit and forces 0600 files / 0700
   directories before anything is inspected. A verdict still cannot be `clean`
   without a detonation, so promotion stays refused until a real guest exists.
+- **The model review is advisory but asymmetric.** `triage/review.py` reads
+  code-shaped text files under caps and asks the configured model what they would
+  do. The prompt treats every byte as data, not instructions, but prompt injection
+  is still possible; that is why the review can only *escalate*. A `malicious`
+  read deletes immediately, `high` is suspicious, and `medium` or a failed review
+  blocks `clean` rather than being treated as innocent.
 - **Malicious verdicts delete the payload immediately** (`MINUS_TRIAGE_DELETE_MALICIOUS`,
   default on): the staged tree is removed in one `rmtree`, a `CRITICAL` line names
   the torrent and the reasons, and the scan result carries an `alert` string. The
@@ -117,6 +126,15 @@ not have. `triage/airlock.py` is the no-execution alternative:
   log line cannot leak them.
 - `minus doctor` reports listening sockets from `ss -ltn` and flags public
   binds, plus every dangerous posture item.
+
+## MCP server
+
+`minus mcp` is a local stdio process with the user's privileges; it is not a
+sandbox. It exposes the same registry the assistant uses, so the workspace
+confinement, VPN gate, quarantine staging and promotion rule all still apply.
+`escalate` and the coding tools are not exposed: one needs a live conversation,
+the other needs an approval UI the client does not have. stdout carries only
+JSON-RPC; logs go to stderr and the run log.
 
 ## Untrusted input and tool execution
 

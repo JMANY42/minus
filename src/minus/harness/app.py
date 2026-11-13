@@ -842,7 +842,7 @@ def run_harness(
     if not _is_tty():
         raise SystemExit(
             "minus harness needs an interactive terminal; run it from a shell "
-            "(use `minus --no-mic` for a typed session without Textual)."
+            "(use `minus voice --no-mic` for a typed session without Textual)."
         )
 
     if model:
