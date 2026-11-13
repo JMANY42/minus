@@ -77,6 +77,16 @@ def control_socket() -> Path:
     return base / "control.sock"
 
 
+def coding_sessions_dir() -> Path:
+    """Transcripts from `minus code`.
+
+    Kept apart from `conversations/`: a coding session is not learning about the
+    user, so it never goes through `MemoryService` and is never condensed or
+    mined for facts. It is on disk only so a session survives a crash.
+    """
+    return memory_dir() / "coding_sessions"
+
+
 def deep_notes_dir() -> Path:
     """Where the deep tier's full written answers land.
 
@@ -84,6 +94,40 @@ def deep_notes_dir() -> Path:
     text so a dashboard can render it without going through TTS.
     """
     return memory_dir() / "deep_notes"
+
+
+def plugins_dir() -> Path:
+    """Where Lua plugins live: one directory per plugin, each with init.lua.
+
+    Under the project rather than the package for the same reason `.env` is:
+    plugins are the user's, not the distribution's, and a plugin added there
+    must not require reinstalling MINUS.
+    """
+    return project_root() / "plugins"
+
+
+def quarantine_dir() -> Path:
+    """Where downloaded content waits for a verdict.
+
+    Under the project root rather than /tmp: a verdict is only meaningful while
+    the bytes it describes still exist, and /tmp is cleared between boots.
+    """
+    return project_root() / "quarantine"
+
+
+def quarantine_incoming_dir() -> Path:
+    """Where qBittorrent puts finished downloads, before MINUS stages them.
+
+    Separate from `quarantine/<hash>/files/`: qBittorrent writes here while a
+    torrent is still transferring, and staging copies out of it so the download
+    client never touches a tree the pipeline owns.
+    """
+    return quarantine_dir() / "incoming"
+
+
+def library_dir() -> Path:
+    """Where content that passed triage is released."""
+    return project_root() / "library"
 
 
 def alarm_command() -> Path:
