@@ -23,7 +23,16 @@ _SCRUBBED = (
     "MINUS_LLM_API_KEY",
     "MINUS_LLM_BASE_URL",
     "MINUS_VPN_INTERFACE",
+    "MINUS_VPN_PROVIDER",
+    "MINUS_VPN_CLIENT_COMMAND",
     "MINUS_QBITTORRENT_URL",
+    "MINUS_QBITTORRENT_VPN_INTERFACE",
+    "MINUS_AIRVPN_USERNAME",
+    "MINUS_AIRVPN_PASSWORD",
+    "MINUS_AIRVPN_SERVER",
+    "MINUS_AIRVPN_COUNTRY",
+    "MINUS_AIRVPN_VPN_TYPE",
+    "MINUS_TRIAGE_MODEL_REVIEW",
     "MINUS_REQUIRE_VPN_FOR_TRIAGE",
     "MINUS_WINDOWS_BASE_IMAGE",
     "MINUS_PLUGINS_ENABLED",
@@ -48,7 +57,7 @@ def test_a_key_from_the_environment_is_named_never_printed(scrubbed, monkeypatch
     fixture = "test-value-must-not-be-printed"
     monkeypatch.setenv("OPENROUTER_API_KEY", fixture)
 
-    posture = _posture(Settings(), scrubbed)
+    posture = _posture(Settings(_env_file=None), scrubbed)
 
     assert posture["provider"]["api_key"] == "environment"
     assert fixture not in format_posture(posture)
@@ -58,7 +67,9 @@ def test_a_key_from_the_environment_is_named_never_printed(scrubbed, monkeypatch
 def test_enforcement_with_no_interface_is_reported_as_fail_closed(scrubbed, monkeypatch):
     monkeypatch.setenv("MINUS_REQUIRE_VPN_FOR_TRIAGE", "true")
 
-    settings = Settings(vpn_interface="", qbittorrent_url="")
+    settings = Settings(
+        _env_file=None, vpn_interface="", qbittorrent_url="", qbittorrent_vpn_interface=""
+    )
     posture = _posture(settings, scrubbed)
 
     assert any("fails closed" in finding for finding in posture["dangerous"])
@@ -70,6 +81,7 @@ def test_a_world_writable_quarantine_directory_is_dangerous(scrubbed):
     quarantine.chmod(0o777)
 
     settings = Settings(
+        _env_file=None,
         triage_quarantine_dir=quarantine,
         triage_library_dir=scrubbed / "library",
     )
@@ -78,19 +90,18 @@ def test_a_world_writable_quarantine_directory_is_dangerous(scrubbed):
     assert posture["storage"]["quarantine"]["exists"] is True
     assert posture["storage"]["quarantine"]["mode"] == "0777"
     assert any(
-        "quarantine" in finding and "group or other" in finding
-        for finding in posture["dangerous"]
+        "quarantine" in finding and "group or other" in finding for finding in posture["dangerous"]
     )
 
 
 def test_json_output_round_trips(scrubbed):
-    posture = _posture(Settings(), scrubbed)
+    posture = _posture(Settings(_env_file=None), scrubbed)
 
     assert json.loads(posture_json(posture)) == posture
 
 
 def test_provider_url_hides_userinfo_but_keeps_the_host(scrubbed):
-    settings = Settings(llm_base_url="https://user:pw@example.test/v1")
+    settings = Settings(_env_file=None, llm_base_url="https://user:pw@example.test/v1")
 
     posture = _posture(settings, scrubbed)
     base_url = posture["provider"]["base_url"]
