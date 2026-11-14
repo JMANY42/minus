@@ -48,22 +48,22 @@ Screen {
 
 #dock-left.-active,
 #dock-right.-active {
-    width: 38;
+    width: 54;
 }
 
 #dock-top.-active,
 #dock-bottom.-active {
-    height: 16;
+    height: 24;
 }
 
 #dock-left.-active.-expanded,
 #dock-right.-active.-expanded {
-    width: 64;
+    width: 84;
 }
 
 #dock-top.-active.-expanded,
 #dock-bottom.-active.-expanded {
-    height: 30;
+    height: 44;
 }
 
 #explorer {
@@ -89,12 +89,12 @@ Screen {
 }
 
 #explorer-toolbar {
-    height: 1;
+    height: 3;
 }
 
 .dockbtn {
-    height: 1;
-    min-width: 3;
+    height: 3;
+    min-width: 8;
     padding: 0;
     margin: 0;
     border: none;
@@ -108,8 +108,8 @@ Screen {
 }
 
 .nvimbtn {
-    width: 6;
-    min-width: 6;
+    width: 7;
+    min-width: 7;
     color: #86efac;
 }
 
@@ -121,10 +121,23 @@ Screen {
 }
 
 #file-preview {
+    width: 1fr;
     height: 1fr;
     background: transparent;
     scrollbar-size-vertical: 1;
     scrollbar-size-horizontal: 1;
+}
+
+/* Once there is something to read, the code view takes the rest of the
+ * dock. It spans the full width in every placement; top/bottom get a fixed
+ * tree strip above it rather than a half-and-half split. */
+#explorer.-preview #file-tree {
+    height: 10;
+}
+
+#explorer.-preview #file-preview {
+    width: 1fr;
+    height: 1fr;
 }
 
 #explorer.-expanded #file-tree {
@@ -132,6 +145,13 @@ Screen {
 }
 
 #explorer.-expanded #file-preview {
+    width: 1fr;
+    height: 1fr;
+}
+
+#dock-top #explorer,
+#dock-bottom #explorer {
+    width: 1fr;
     height: 1fr;
 }
 

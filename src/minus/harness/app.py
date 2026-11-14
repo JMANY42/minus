@@ -61,7 +61,8 @@ HELP = """commands:
   /doctor                   security posture, in short
   /tools                    what the current tier may call
   /thoughts                 open or close the reasoning and tool trace
-  /files                    open or close the file explorer (ctrl+b)"""
+  /files                    open or close the file explorer (ctrl+b)
+  /diffs                    show the working-tree diff in the explorer"""
 
 KEY_HINTS = (
     "enter send   /help commands   tab modes   ctrl+b files   "
@@ -540,6 +541,9 @@ class MinusHarness(App[None]):
             await self._dock_explorer(where)
         elif button_id == "nvim-btn":
             self.toggle_explorer_expanded()
+        elif button_id == "diffs-btn" and self._explorer is not None:
+            self._explorer.show_diff(self.explorer_preview_path)
+            self._set_status("diffs · working tree", False)
 
     @staticmethod
     def _tool_verb(name: str) -> str:
@@ -1055,6 +1059,12 @@ class MinusHarness(App[None]):
             self.toggle_thoughts()
         elif name == "/files":
             await self.action_toggle_explorer()
+        elif name == "/diffs":
+            if not self.explorer_visible:
+                await self.action_toggle_explorer()
+            if self._explorer is not None:
+                self._explorer.show_diff(self.explorer_preview_path)
+                self._set_status("diffs · working tree", False)
         else:
             self._append("sys", f"unknown command {name} · /help")
 

@@ -43,8 +43,8 @@ slash command: `/mode code`, `/download <magnet>`, `/vpn connect`, `/triage
 <hash>`, `/files`, `/doctor`, `/help`. The left rail switches modes; the right
 rail shows tool activity and any quarantine alert. `ctrl+b` opens the file
 explorer: the `left`/`right`/`top`/`bottom` buttons dock it, clicking a file
-shows a syntax-highlighted preview, and `nvim` expands the preview. `minus
-serve` remains the headless service.
+shows a syntax-highlighted preview, `diffs` shows the working-tree diff, and
+`nvim` expands the preview. `minus serve` remains the headless service.
 
 If the shell cannot find `minus`, link the venv script once (then `hash -r` or
 open a new shell):

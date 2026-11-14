@@ -15,6 +15,7 @@ Three pieces, deliberately kept out of `app.py`:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from rich.syntax import Syntax
@@ -42,6 +43,7 @@ HIDDEN_DIRS = {
 
 MAX_PREVIEW_BYTES = 160 * 1024
 MAX_PREVIEW_LINES = 5000
+MAX_DIFF_BYTES = 256 * 1024
 
 
 class ProjectTree(DirectoryTree):
@@ -96,6 +98,25 @@ class FilePreview(RichLog):
                 f"preview capped at {MAX_PREVIEW_BYTES // 1024} KiB / {MAX_PREVIEW_LINES} lines"
             )
 
+    def show_diff(self, label: str, diff: str) -> None:
+        """Render a unified diff with the diff lexer (green/red hunks)."""
+        self.clear()
+        self.write(label)
+        if not diff.strip():
+            self.write("no changes")
+            return
+        if len(diff) > MAX_DIFF_BYTES:
+            diff = diff[:MAX_DIFF_BYTES] + "\n… diff truncated …"
+        self.write(
+            Syntax(
+                diff,
+                "diff",
+                line_numbers=False,
+                word_wrap=False,
+                theme="monokai",
+            )
+        )
+
 
 class ExplorerPane(Vertical):
     """A file tree with a preview, movable between four docks."""
@@ -112,6 +133,7 @@ class ExplorerPane(Vertical):
             yield Button("top", id="dock-top-btn", classes="dockbtn")
             yield Button("bottom", id="dock-bottom-btn", classes="dockbtn")
             yield Button("nvim", id="nvim-btn", classes="dockbtn nvimbtn")
+            yield Button("diffs", id="diffs-btn", classes="dockbtn")
         yield ProjectTree(self.root, id="file-tree")
         yield FilePreview(id="file-preview", wrap=False, markup=False)
 
@@ -124,12 +146,45 @@ class ExplorerPane(Vertical):
 
     def show_file(self, path: Path) -> None:
         self._has_file = True
+        self.add_class("-preview")
         preview = self.query_one("#file-preview", FilePreview)
         preview.display = True
         preview.show(Path(path))
         preview.scroll_home(animate=False)
 
+    def show_diff(self, path: Path | None = None) -> str:
+        """Show the working-tree diff, or the selected file's diff.
+
+        `git diff HEAD` is the useful view while developing: it includes both
+        staged and unstaged changes. A workspace that is not a git checkout
+        says so rather than showing an empty pane.
+        """
+        command = ["git", "-C", str(self.root), "diff", "--no-color", "HEAD"]
+        label = "DIFF · workspace"
+        if path is not None:
+            command += ["--", str(path)]
+            try:
+                label = f"DIFF · {Path(path).relative_to(self.root)}"
+            except ValueError:
+                label = f"DIFF · {path}"
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=15, check=False
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            diff = f"cannot read git diff: {exc}"
+        else:
+            diff = completed.stdout if completed.returncode == 0 else completed.stderr
+        self._has_file = True
+        self.add_class("-preview")
+        preview = self.query_one("#file-preview", FilePreview)
+        preview.display = True
+        preview.show_diff(label, diff)
+        preview.scroll_home(animate=False)
+        return diff
+
     def toggle_preview(self) -> None:
         """Collapse or restore the preview without losing the tree."""
         preview = self.query_one("#file-preview", FilePreview)
         preview.display = not preview.display
+        self.set_class(preview.display, "-preview")

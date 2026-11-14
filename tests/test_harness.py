@@ -177,10 +177,15 @@ async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -
             await pilot.pause()
             assert explorer.parent.id == dock
             assert app.query_one(f"#{dock}").has_class("-active")
+            if dock in ("dock-top", "dock-bottom"):
+                # A top/bottom dock spans the shell, and the code view spans
+                # the dock rather than inheriting a side-pane width.
+                assert explorer.size.width == app.query_one(f"#{dock}").size.width
 
         app.preview_file(tmp_path / "pkg" / "mod.py")
         await pilot.pause()
         assert "def hello" in log_text(app, "file-preview")
+        assert app.query_one("#file-preview").size.width == explorer.size.width
 
         await pilot.click("#nvim-btn")
         await pilot.pause()
@@ -190,6 +195,34 @@ async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -
         await pilot.press("ctrl+b")
         await pilot.pause()
         assert not app.query_one("#dock-left").has_class("-active")
+
+
+async def test_diffs_button_shows_the_working_tree(tmp_path) -> None:
+    import subprocess
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.test")
+    git("config", "user.name", "Test")
+    (tmp_path / "change.py").write_text("value = 1\n", encoding="utf-8")
+    git("add", "change.py")
+    git("commit", "-qm", "base")
+    (tmp_path / "change.py").write_text("value = 2\n", encoding="utf-8")
+
+    app, _ = make_app(tmp_path)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.1)
+        await pilot.click("#diffs-btn")
+        await pilot.pause()
+
+        diff = log_text(app, "file-preview")
+        assert "diff --git" in diff
+        assert "-value = 1" in diff
+        assert "+value = 2" in diff
+        assert app.query_one("#explorer", ExplorerPane).has_class("-preview")
 
 
 async def test_malicious_alert_renders_in_red_rail_and_transcript() -> None:
