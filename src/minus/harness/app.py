@@ -565,6 +565,12 @@ class MinusHarness(App[None]):
 
         def work() -> None:
             try:
+                # Starting the downloader belongs in the worker: `provision`
+                # waits for the WebUI, and that wait must not freeze the UI.
+                if self.settings.qbittorrent_url:
+                    from minus.scripts.qbt import ensure_running
+
+                    ensure_running(self.settings)
                 result = ingest(target, detonate=True)
             except Exception as exc:
                 self._ui(partial(self._append, "sys", f"download failed: {exc}"))

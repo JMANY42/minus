@@ -490,6 +490,11 @@ def run_triage_command(args) -> int:
 
     try:
         if args.action == "ingest":
+            # The pipeline's client speaks HTTP; it does not start the
+            # downloader. Doing that here makes ingest work on a cold machine.
+            from minus.scripts.qbt import ensure_running
+
+            ensure_running(settings)
             result = pipeline.ingest(args.target, detonate=not args.no_detonate)
         elif args.action == "scan":
             result = pipeline.scan(args.target, detonate=not args.no_detonate)
