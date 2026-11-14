@@ -119,9 +119,26 @@ class QBittorrentClient:
             raise QBittorrentError(f"Adding a torrent failed: {exc}") from exc
 
         body = response.text.strip()
-        if body != "Ok.":
-            raise QBittorrentError(f"qBittorrent refused the torrent: {body}")
-        return body
+        if body == "Ok.":
+            return body
+        # qBittorrent 5.x answers with a JSON summary instead of "Ok.":
+        # {"added_torrent_ids": [...], "success_count": 1, ...}. Treating that
+        # as a refusal rejected a torrent the client had already accepted.
+        if body.startswith("{"):
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and (
+                payload.get("added_torrent_ids")
+                or payload.get("success_count")
+                # A .torrent URL is fetched by qBittorrent itself, so the
+                # immediate answer is "pending", not "added". It is still an
+                # acceptance; refusing it rejected a download already queued.
+                or payload.get("pending_count")
+            ):
+                return body
+        raise QBittorrentError(f"qBittorrent refused the torrent: {body}")
 
     def set_preferences(self, prefs: dict) -> None:
         """Apply a partial preferences update.

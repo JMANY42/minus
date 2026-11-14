@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     triage.add_argument(
         "action",
         nargs="?",
-        choices=("ingest", "scan", "verdict", "promote"),
+        choices=("ingest", "download", "scan", "verdict", "promote"),
         default="ingest",
         help="Stage of the pipeline (default: ingest)",
     )
@@ -496,6 +496,8 @@ def run_triage_command(args) -> int:
 
             ensure_running(settings)
             result = pipeline.ingest(args.target, detonate=not args.no_detonate)
+        elif args.action == "download":
+            result = pipeline.download(args.target)
         elif args.action == "scan":
             result = pipeline.scan(args.target, detonate=not args.no_detonate)
         elif args.action == "verdict":

@@ -100,6 +100,30 @@ def test_add_posts_urlencoded_newline_joined_urls_paused():
     assert "paused=true" in fake.bodies[0]
 
 
+def test_add_accepts_qbittorrent_5s_json_summary():
+    summary = (
+        '{"added_torrent_ids":["' + MAGNET.split(":")[-1] + '"],'
+        '"failure_count":0,"pending_count":0,"success_count":1}'
+    )
+    with FakeQbittorrent(summary) as fake:
+        client = QBittorrentClient(fake.url)
+        try:
+            assert client.add_torrent([MAGNET]) == summary
+        finally:
+            client.close()
+
+
+def test_add_accepts_a_pending_torrent_url():
+    # A .torrent URL is fetched by qBittorrent after the add call returns.
+    summary = '{"added_torrent_ids":[],"failure_count":0,"pending_count":1,"success_count":0}'
+    with FakeQbittorrent(summary) as fake:
+        client = QBittorrentClient(fake.url)
+        try:
+            assert client.add_torrent(["https://example.test/x.torrent"]) == summary
+        finally:
+            client.close()
+
+
 def test_add_unpauses_when_asked():
     with FakeQbittorrent() as fake:
         client = QBittorrentClient(fake.url)
@@ -127,9 +151,7 @@ def test_the_tool_adds_a_magnet(tmp_path):
     with FakeQbittorrent() as fake:
         client = QBittorrentClient(fake.url)
         try:
-            tool = TriageTools(
-                TriagePipeline(quarantine=tmp_path, library=tmp_path, client=client)
-            )
+            tool = TriageTools(TriagePipeline(quarantine=tmp_path, library=tmp_path, client=client))
             result = tool.torrent_add(MAGNET)
         finally:
             client.close()
@@ -143,9 +165,7 @@ def test_the_tool_refuses_paths_and_empty_strings_without_a_request(tmp_path):
     with FakeQbittorrent() as fake:
         client = QBittorrentClient(fake.url)
         try:
-            tool = TriageTools(
-                TriagePipeline(quarantine=tmp_path, library=tmp_path, client=client)
-            )
+            tool = TriageTools(TriagePipeline(quarantine=tmp_path, library=tmp_path, client=client))
             for candidate in ("/home/user/Downloads/thing.torrent", "thing.torrent", ""):
                 with pytest.raises(ToolExecutionError) as caught:
                     tool.torrent_add(candidate)

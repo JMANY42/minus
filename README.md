@@ -68,6 +68,7 @@ minus vpn status               # provider, interface, route, triage gate
 minus vpn connect              # AirVPN through bluetit/goldcrest
 minus vpn disconnect
 minus triage ingest 'magnet:?xt=urn:btih:...'
+minus triage download <hash>   # stage a finished torrent into quarantine
 minus triage scan <hash>       # static + model review (+ detonation if configured)
 minus triage verdict <hash>
 minus triage promote <hash>    # refused unless the verdict is clean
