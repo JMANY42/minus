@@ -80,6 +80,11 @@ Configuration lives in `.env` (0600, gitignored): `MINUS_AIRVPN_USERNAME`,
 password is never returned by the control socket, logged, or included in an
 error string.
 
+AirVPN's WireGuard mode needs a loadable `wireguard` kernel module. If the
+running kernel cannot load one, set `MINUS_AIRVPN_VPN_TYPE=openvpn` to use
+AirVPN's own OpenVPN transport (still Goldcrest/bluetit, not a separate
+OpenVPN configuration), or reboot into a kernel whose modules match.
+
 A malicious verdict deletes the staged payload immediately, writes a 0600
 record under `quarantine/rejected/` (hash, reasons, file names — never bytes),
 and returns an `ALERT` the harness shows. Promotion stays refused for anything
