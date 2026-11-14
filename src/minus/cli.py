@@ -402,7 +402,10 @@ def run_vpn_command(args) -> int:
     settings = load_settings()
     try:
         if args.action == "connect":
-            snapshot = connect(settings)
+            # Asking twice must not spawn a second goldcrest against a tunnel
+            # that is already carrying traffic; rebinding is still applied.
+            current = tunnel_status(settings)
+            snapshot = current if current.healthy else connect(settings)
             binding = bind_downloads(settings, snapshot)
         elif args.action == "disconnect":
             result = disconnect(settings)
