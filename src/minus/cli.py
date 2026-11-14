@@ -826,10 +826,13 @@ def main() -> None:
         if args.command is None:
             args.workspace = "."
             args.model = None
+        # A full-screen TUI must own stderr; a log line painted over the
+        # transcript is worse than no console logger. The run log still has it.
         log_file = setup_logging(
             level=settings.log_level,
             console_level=settings.console_log_level,
             retention=settings.log_retention,
+            console=False,
         )
         logger.info("Logging to %s", log_file)
         _install_stack_dumper()

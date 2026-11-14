@@ -192,12 +192,25 @@ class ToolLoop:
 
     # ---- The loop ----
 
+    def _notify_thought(self, completion, round_number: int) -> None:
+        """Surface a provider-supplied reasoning trace, when there is one.
+
+        DeepSeek's reasoner returns `reasoning_content`; most other models do
+        not. This is an event for a UI, not part of the transcript: the model's
+        private reasoning is not sent back to it on the next round.
+        """
+        raw_message = completion.choices[0].message
+        reasoning = getattr(raw_message, "reasoning_content", None)
+        if reasoning:
+            self._notify("thought", {"text": str(reasoning), "round": round_number})
+
     def _final(self, completion) -> Message:
         """Append the answer the model finished on, and hand it back."""
         raw_message = completion.choices[0].message
         # validate_completion guarantees non-blank content when there are no
         # tool calls, so .strip() is safe here.
         text = (raw_message.content or "").strip()
+        self._notify("answer", {"text": text})
         return self.transcript.append(Message.from_completion(raw_message, content=text))
 
     def _forced_answer(self) -> Message:
@@ -209,7 +222,10 @@ class ToolLoop:
         """
         logger.warning("Round budget of %s spent; forcing an answer.", self.max_tool_rounds)
         try:
-            message = self._final(self._complete(tools=None))
+            self._notify("thinking", {"round": self.max_tool_rounds + 1, "forced": True})
+            completion = self._complete(tools=None)
+            self._notify_thought(completion, self.max_tool_rounds + 1)
+            message = self._final(completion)
         except LLMError as exc:
             raise GenerationFailedError(
                 f"Tool call limit reached and the final answer could not be generated: {exc}"
@@ -230,8 +246,11 @@ class ToolLoop:
             if completed_tool_rounds >= self.max_tool_rounds:
                 break
 
+            round_number = completed_tool_rounds + 1
+            self._notify("thinking", {"round": round_number})
             try:
                 completion = self._complete(tools=schemas)
+                self._notify_thought(completion, round_number)
             except LLMError as exc:
                 # Spend an attempt but not a round: the dead end is now in the
                 # transcript, and the next try can see it and go elsewhere.

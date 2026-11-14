@@ -15,7 +15,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Input, OptionList, RichLog
+from textual.widgets import Input, OptionList, RichLog, Static
 
 from minus.config import Settings
 from minus.harness import MODES, MinusHarness, run_harness
@@ -121,6 +121,30 @@ async def test_tool_events_become_compact_activity() -> None:
         assert cards[1] == "read_file ok"
         # The result is never copied onto the screen.
         assert "x" * 1000 not in "\n".join(app.activity_lines)
+
+
+async def test_thinking_bar_expands_to_reasoning_and_tool_trace() -> None:
+    app, _ = make_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.observer("thinking", {"round": 1})
+        app.observer("thought", {"text": "I should inspect notes.txt"})
+        app.observer("tool_start", {"name": "read_file", "arguments": {"path": "notes.txt"}})
+        await pilot.pause()
+
+        bar = str(app.query_one("#thinking-bar", Static).content)
+        assert "reading" in bar
+        assert "read_file" in bar
+
+        trace = app.query_one("#thinking-trace", RichLog)
+        assert not trace.has_class("-open")
+        await pilot.click("#thinking-bar")
+        await pilot.pause()
+        assert trace.has_class("-open")
+        assert "I should inspect notes.txt" in log_text(app, "thinking-trace")
+        assert "reading · read_file" in log_text(app, "thinking-trace")
+        await pilot.click("#thinking-bar")
+        await pilot.pause()
+        assert not trace.has_class("-open")
 
 
 async def test_malicious_alert_renders_in_red_rail_and_transcript() -> None:

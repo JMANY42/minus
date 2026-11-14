@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -37,6 +38,7 @@ from minus.harness.agent import (
     DeepResultWatcher,
     format_value,
     payload_summary,
+    summarize_arguments,
     tool_line,
 )
 from minus.harness.approvals import ThreadApprover
@@ -56,9 +58,12 @@ HELP = """commands:
   /triage <hash>            scan a staged torrent
   /promote <hash> [name]    release a clean torrent into the library
   /doctor                   security posture, in short
-  /tools                    what the current tier may call"""
+  /tools                    what the current tier may call
+  /thoughts                 open or close the reasoning and tool trace"""
 
-KEY_HINTS = "enter send   /help commands   tab modes   esc clear focus   ctrl+c quit"
+KEY_HINTS = (
+    "enter send   /help commands   tab modes   ctrl+t thoughts   esc clear focus   ctrl+c quit"
+)
 
 # The label each role is drawn under. Rich styles rather than Textual CSS,
 # because these are text runs inside a RichLog, not widgets.
@@ -106,6 +111,7 @@ class MinusHarness(App[None]):
         # card's own escape means "deny".
         Binding("escape", "clear_focus", "clear focus", show=False),
         Binding("tab", "focus_modes", "modes", show=False),
+        Binding("ctrl+t", "toggle_thoughts", "thoughts", show=False),
         # Textual's own ctrl+c opens the quit help; the hint bar promises quit.
         Binding("ctrl+c", "quit", "quit", show=False, priority=True),
     ]
@@ -133,8 +139,19 @@ class MinusHarness(App[None]):
         self.conversation_lines: list[tuple[str, str]] = []
         self.activity_lines: list[str] = []
         self.alert_lines: list[str] = []
+        self.thought_lines: list[tuple[str, str]] = []
+
+        # The thinking bar is deliberately plain state: the loop emits events
+        # faster than a widget should be rebuilt, and the spinner timer only
+        # needs to know whether something is in flight.
+        self._thinking_label = "ready"
+        self._thinking_active = False
+        self._thinking_frame = 0
+        self._thinking_timer: Any | None = None
+        self.thoughts_open = False
 
         self._ui_thread: int | None = None
+        self._chat_lock = threading.Lock()
         self._deep_watcher: DeepResultWatcher | None = None
         self._pipeline: Any | None = None
         self._coding: Any | None = None
@@ -156,6 +173,11 @@ class MinusHarness(App[None]):
                 yield OptionList(*MODES, id="mode-list")
             with Vertical(id="center"):
                 yield RichLog(id="conversation", wrap=True, markup=False)
+                # The bar is the collapsed form; clicking it reveals the
+                # reasoning/tool trace above the input instead of pushing the
+                # conversation into a separate screen.
+                yield Static("ready", id="thinking-bar")
+                yield RichLog(id="thinking-trace", wrap=True, markup=False)
             with Vertical(id="right"):
                 yield Static("ACTIVITY", classes="rail-title")
                 yield RichLog(id="activity", wrap=True, markup=False)
@@ -171,12 +193,17 @@ class MinusHarness(App[None]):
         self.refresh_topbar()
         self._sync_rail()
         self._append("sys", "ready · /help for commands")
+        self._trace("trace · thinking, reads and commands", style=DIM)
+        self._render_thinking_bar()
+        self._thinking_timer = self.set_interval(0.12, self._tick_thinking)
         if self.assistant is not None:
             self._bind_chat()
 
     def on_unmount(self) -> None:
         if self._deep_watcher is not None:
             self._deep_watcher.stop()
+        if self._thinking_timer is not None:
+            self._thinking_timer.stop()
 
     # ---- Focus and mode selection ----
 
@@ -346,6 +373,84 @@ class MinusHarness(App[None]):
         # The rail is easy to miss; the transcript is where the user is looking.
         self._append("sys", label)
 
+    # ---- Thinking bar and trace ----
+
+    def on_click(self, event: events.Click) -> None:
+        widget = event.widget
+        if widget is not None and getattr(widget, "id", "") == "thinking-bar":
+            self.toggle_thoughts()
+
+    def action_toggle_thoughts(self) -> None:
+        self.toggle_thoughts()
+
+    def toggle_thoughts(self) -> None:
+        """Open or close the reasoning/tool trace above the input."""
+        try:
+            panel = self.query_one("#thinking-trace", RichLog)
+        except NoMatches:
+            return
+        self.thoughts_open = not self.thoughts_open
+        if self.thoughts_open:
+            # A hidden RichLog does not retain writes reliably; the list is the
+            # source of truth, and opening replays it with its styles.
+            panel.clear()
+            for text, style in self.thought_lines[-250:]:
+                panel.write(Text(text, style=style))
+            panel.add_class("-open")
+            panel.scroll_end(animate=False)
+        else:
+            panel.remove_class("-open")
+        self._render_thinking_bar()
+
+    def _tick_thinking(self) -> None:
+        if not self._thinking_active:
+            return
+        self._thinking_frame += 1
+        self._render_thinking_bar()
+
+    def _render_thinking_bar(self) -> None:
+        spinner = "|/-\\"[self._thinking_frame % 4] if self._thinking_active else "·"
+        hint = "click to collapse" if self.thoughts_open else "click for trace"
+        style = "#7dd3fc" if self._thinking_active else DIM
+        try:
+            self.query_one("#thinking-bar", Static).update(
+                Text(f"{spinner} {self._thinking_label}  ·  {hint}", style=style)
+            )
+        except NoMatches:
+            return
+
+    def _set_status(self, label: str, active: bool = True) -> None:
+        """Set the one-line state; called on the UI thread."""
+        self._thinking_label = _clip(label, 88)
+        self._thinking_active = active
+        if not active:
+            self._thinking_frame = 0
+        self._render_thinking_bar()
+
+    def _trace(self, line: str, style: str = DIM) -> None:
+        """Append one line to the trace, whether or not the panel is open."""
+        text = _clip(str(line), 400)
+        self.thought_lines.append((text, style))
+        self.thought_lines = self.thought_lines[-250:]
+        if not self.thoughts_open:
+            return
+        try:
+            self.query_one("#thinking-trace", RichLog).write(Text(text, style=style))
+        except NoMatches:
+            return
+
+    @staticmethod
+    def _tool_verb(name: str) -> str:
+        if name in ("read_file", "read_workspace_file", "list_files", "list_workspace_files"):
+            return "reading"
+        if name in ("grep", "glob", "qbittorrent_find", "list_torrents"):
+            return "searching"
+        if name == "run_shell":
+            return "running"
+        if name in ("write_file", "apply_patch"):
+            return "writing"
+        return "working"
+
     def _ui(self, callback: Callable[[], None]) -> None:
         """Run a UI mutation on Textual's thread, from here or from a worker."""
         try:
@@ -369,18 +474,51 @@ class MinusHarness(App[None]):
         self._ui(partial(self._render_event, event, data))
 
     def _render_event(self, event: str, payload: dict[str, Any]) -> None:
+        if event == "thinking":
+            round_number = payload.get("round")
+            label = f"thinking · round {round_number}" if round_number else "thinking"
+            if payload.get("forced"):
+                label = "thinking · final answer"
+            self._set_status(label, True)
+            self._trace(label)
+            return
+
+        if event == "thought":
+            text = str(payload.get("text") or "").strip()
+            if text:
+                self._trace("thought", style="#c4b5fd")
+                for line in text.splitlines()[:12]:
+                    self._trace(f"  {_clip(line, 240)}", style="#9aa4b2")
+            self._set_status("reasoning", True)
+            return
+
+        if event == "answer":
+            self._set_status("ready", False)
+            text = str(payload.get("text") or "").strip()
+            if text:
+                self._trace(f"answer · {_clip(text, 160)}", style=OK)
+            return
+
         name = str(payload.get("name") or "tool")
         if event == "tool_start":
             card = tool_line(name, payload.get("arguments"))
+            verb = self._tool_verb(name)
+            summary = summarize_arguments(payload.get("arguments"))
             self._append("tool", card)
             self._activity(f"tool {card}")
+            self._set_status(f"{verb} · {name} {summary}".strip(), True)
+            self._trace(f"{verb} · {card}", style=VALUE)
         elif event == "tool_end":
             self._append("tool", f"{name} ok")
             self._activity(f"ok {name}", style=OK)
+            self._set_status("thinking", True)
+            self._trace(f"ok · {name}", style=OK)
         elif event == "tool_error":
             error = _clip(str(payload.get("error") or "failed"), 80)
             self._append("tool", f"{name} error · {error}")
             self._activity(f"error {name} · {error}", style=ALERT)
+            self._set_status("recovering", True)
+            self._trace(f"error · {name} · {error}", style=ALERT)
 
     def notify_event(self, kind: str, payload: dict[str, Any]) -> None:
         """The triage pipeline's notification hook; usable from any thread.
@@ -407,11 +545,15 @@ class MinusHarness(App[None]):
                 subject = data.get("torrent_hash") or data.get("name") or "payload"
                 body = f"malicious {subject}"
             self._ui(partial(self._show_alert, body))
+            self._ui(partial(self._set_status, "alert · malicious payload", False))
+            self._ui(partial(self._trace, body, style=ALERT))
             return
 
         summary = payload_summary(data)
         line = f"{kind}: {summary}" if kind else summary
         self._ui(partial(self._activity, line))
+        self._ui(partial(self._set_status, line, kind not in ("verdict", "promoted")))
+        self._ui(partial(self._trace, line))
 
     # ---- Chat mode ----
 
@@ -431,33 +573,42 @@ class MinusHarness(App[None]):
                 self._deep_watcher.start()
 
     def _ensure_chat(self) -> Any | None:
-        if self.assistant is not None:
+        with self._chat_lock:
+            if self.assistant is not None:
+                self._bind_chat()
+                return getattr(self.assistant, "conversation", None)
+            try:
+                from minus.assembly import build_conversation
+
+                self.assistant = build_conversation(self.settings)
+            except Exception as exc:
+                logger.exception("Could not build the conversation")
+                self._ui(partial(self._append, "sys", f"chat unavailable: {exc}"))
+                self._ui(partial(self._set_status, "unavailable", False))
+                return None
             self._bind_chat()
             return getattr(self.assistant, "conversation", None)
-        try:
-            from minus.assembly import build_conversation
-
-            self.assistant = build_conversation(self.settings)
-        except Exception as exc:
-            logger.exception("Could not build the conversation")
-            self._append("sys", f"chat unavailable: {exc}")
-            return None
-        self._bind_chat()
-        return getattr(self.assistant, "conversation", None)
 
     def _chat_submit(self, text: str) -> None:
-        conversation = self._ensure_chat()
-        if conversation is None:
-            return
         self._append("you", text)
+        # Building the conversation loads the embedding model on first use.
+        # That belongs in the worker: the spinner must keep moving while it
+        # happens, and a 40-second first turn must not freeze the screen.
+        self._set_status("thinking", True)
+        self._trace(f"you · {_clip(text, 160)}", style=VALUE)
 
         def work() -> None:
+            conversation = self._ensure_chat()
+            if conversation is None:
+                return
             try:
                 answer = conversation.reply(text)
             except Exception as exc:
                 self._ui(partial(self._append, "sys", f"chat failed: {exc}"))
+                self._ui(partial(self._set_status, f"failed · {_clip(str(exc), 60)}", False))
                 return
             self._ui(lambda: self._append("minus", answer or "(no reply)"))
+            self._ui(partial(self._set_status, "ready", False))
 
         self._spawn(work, "chat")
 
@@ -480,6 +631,8 @@ class MinusHarness(App[None]):
             self._activity(
                 f"deep: {head} · {len(detail)} chars of detail" if detail else f"deep: {head}"
             )
+            self._trace(f"deep · {head}", style=OK)
+            self._set_status("ready", False)
 
         self._ui(render)
 
@@ -509,14 +662,18 @@ class MinusHarness(App[None]):
         if coding is None:
             return
         self._append("you", text)
+        self._set_status("thinking · code", True)
+        self._trace(f"you · {_clip(text, 160)}", style=VALUE)
 
         def work() -> None:
             try:
                 answer = coding.run_turn(text)
             except Exception as exc:
                 self._ui(partial(self._append, "sys", f"code failed: {exc}"))
+                self._ui(partial(self._set_status, f"failed · {_clip(str(exc), 60)}", False))
                 return
             self._ui(lambda: self._append("minus", answer or "(no reply)"))
+            self._ui(partial(self._set_status, "ready", False))
 
         self._spawn(work, "code")
 
@@ -562,6 +719,8 @@ class MinusHarness(App[None]):
             )
             return
         self._append("sys", f"download: {_clip(target, 100)}")
+        self._set_status("working · download", True)
+        self._trace(f"download · {_clip(target, 120)}", style=VALUE)
 
         def work() -> None:
             try:
@@ -574,6 +733,7 @@ class MinusHarness(App[None]):
                 result = ingest(target, detonate=True)
             except Exception as exc:
                 self._ui(partial(self._append, "sys", f"download failed: {exc}"))
+                self._ui(partial(self._set_status, "download failed", False))
                 return
             self._ui(partial(self._render_stage_result, result))
 
@@ -584,12 +744,15 @@ class MinusHarness(App[None]):
         if pipeline is None:
             return
         self._append("sys", f"triage: {torrent_hash}")
+        self._set_status("working · scanning", True)
+        self._trace(f"scan · {_clip(torrent_hash, 80)}", style=VALUE)
 
         def work() -> None:
             try:
                 result = pipeline.scan(torrent_hash)
             except Exception as exc:
                 self._ui(partial(self._append, "sys", f"triage failed: {exc}"))
+                self._ui(partial(self._set_status, "scan failed", False))
                 return
             self._ui(partial(self._render_stage_result, result))
 
@@ -600,18 +763,22 @@ class MinusHarness(App[None]):
         if pipeline is None:
             return
         self._append("sys", f"promote: {torrent_hash}")
+        self._set_status("working · promote", True)
+        self._trace(f"promote · {_clip(torrent_hash, 80)}", style=VALUE)
 
         def work() -> None:
             try:
                 result = pipeline.promote(torrent_hash, name=name)
             except Exception as exc:
                 self._ui(partial(self._append, "sys", f"promote failed: {exc}"))
+                self._ui(partial(self._set_status, "promote failed", False))
                 return
             self._ui(partial(self._render_stage_result, result))
 
         self._spawn(work, "promote")
 
     def _render_stage_result(self, result: Any) -> None:
+        self._set_status("ready", False)
         if not isinstance(result, dict):
             self._append("sys", format_value(result, 120))
             return
@@ -652,6 +819,9 @@ class MinusHarness(App[None]):
             self._append("sys", f"vpn: {missing}")
             return
 
+        self._set_status(f"working · vpn {action}", True)
+        self._trace(f"vpn {action}", style=VALUE)
+
         def work() -> None:
             try:
                 from minus.services import vpn
@@ -673,6 +843,8 @@ class MinusHarness(App[None]):
             except Exception as exc:
                 summary = f"failed: {exc}"
             self._ui(lambda: self._append("sys", f"vpn {action}: {summary}"))
+            self._ui(partial(self._set_status, f"vpn {action}", False))
+            self._ui(partial(self._trace, f"vpn {action} · {summary}", style=VALUE))
             self._ui(self._refresh_vpn_and_header)
 
         self._spawn(work, "vpn")
@@ -777,6 +949,8 @@ class MinusHarness(App[None]):
             self._render_doctor()
         elif name == "/tools":
             self._render_tools()
+        elif name == "/thoughts":
+            self.toggle_thoughts()
         else:
             self._append("sys", f"unknown command {name} · /help")
 

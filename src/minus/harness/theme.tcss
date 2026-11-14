@@ -56,6 +56,34 @@ Screen {
     scrollbar-size-vertical: 1;
 }
 
+/* The collapsed state is one line directly above the prompt. Clicking it
+ * opens the trace in place, so the conversation keeps its scroll position. */
+#thinking-bar {
+    height: 1;
+    padding: 0 1;
+    background: #0e1116;
+    color: #6b7280;
+}
+
+#thinking-bar:hover {
+    background: #151b24;
+    color: #c9d0da;
+}
+
+#thinking-trace {
+    display: none;
+    height: 12;
+    padding: 0 1;
+    background: #0b0d10;
+    color: #9aa4b2;
+    border-top: solid #1d222a;
+    scrollbar-size-vertical: 1;
+}
+
+#thinking-trace.-open {
+    display: block;
+}
+
 #activity {
     height: 1fr;
     background: transparent;
