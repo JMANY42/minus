@@ -20,7 +20,118 @@ Screen {
     color: #c9d0da;
 }
 
+#shell {
+    height: 1fr;
+    layout: vertical;
+}
+
 #body {
+    height: 1fr;
+}
+
+/* Four zero-size docks. The explorer is reparented into the active one, and
+ * the active class is what gives it room; hiding is just removing the class,
+ * so the pane keeps its tree, preview and scroll position. */
+.dock {
+    background: #0e1116;
+}
+
+#dock-top,
+#dock-bottom {
+    height: 0;
+}
+
+#dock-left,
+#dock-right {
+    width: 0;
+}
+
+#dock-left.-active,
+#dock-right.-active {
+    width: 38;
+}
+
+#dock-top.-active,
+#dock-bottom.-active {
+    height: 16;
+}
+
+#dock-left.-active.-expanded,
+#dock-right.-active.-expanded {
+    width: 64;
+}
+
+#dock-top.-active.-expanded,
+#dock-bottom.-active.-expanded {
+    height: 30;
+}
+
+#explorer {
+    width: 1fr;
+    height: 1fr;
+    background: #0e1116;
+}
+
+#dock-left #explorer {
+    border-right: solid #1d222a;
+}
+
+#dock-right #explorer {
+    border-left: solid #1d222a;
+}
+
+#dock-top #explorer {
+    border-bottom: solid #1d222a;
+}
+
+#dock-bottom #explorer {
+    border-top: solid #1d222a;
+}
+
+#explorer-toolbar {
+    height: 1;
+}
+
+.dockbtn {
+    height: 1;
+    min-width: 3;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: #151b24;
+    color: #9aa4b2;
+}
+
+.dockbtn:hover {
+    background: #243247;
+    color: #e8edf5;
+}
+
+.nvimbtn {
+    width: 6;
+    min-width: 6;
+    color: #86efac;
+}
+
+#file-tree {
+    height: 1fr;
+    background: transparent;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+#file-preview {
+    height: 1fr;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 1;
+}
+
+#explorer.-expanded #file-tree {
+    height: 6;
+}
+
+#explorer.-expanded #file-preview {
     height: 1fr;
 }
 

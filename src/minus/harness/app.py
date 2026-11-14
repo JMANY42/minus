@@ -31,7 +31,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.widgets import Input, OptionList, RichLog, Static
+from textual.widgets import Button, DirectoryTree, Input, OptionList, RichLog, Static
 
 from minus.config import Settings
 from minus.harness.agent import (
@@ -42,6 +42,7 @@ from minus.harness.agent import (
     tool_line,
 )
 from minus.harness.approvals import ThreadApprover
+from minus.harness.explorer import ExplorerPane
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,12 @@ HELP = """commands:
   /promote <hash> [name]    release a clean torrent into the library
   /doctor                   security posture, in short
   /tools                    what the current tier may call
-  /thoughts                 open or close the reasoning and tool trace"""
+  /thoughts                 open or close the reasoning and tool trace
+  /files                    open or close the file explorer (ctrl+b)"""
 
 KEY_HINTS = (
-    "enter send   /help commands   tab modes   ctrl+t thoughts   esc clear focus   ctrl+c quit"
+    "enter send   /help commands   tab modes   ctrl+b files   "
+    "ctrl+t thoughts   esc clear focus   ctrl+c quit"
 )
 
 # The label each role is drawn under. Rich styles rather than Textual CSS,
@@ -111,7 +114,10 @@ class MinusHarness(App[None]):
         # card's own escape means "deny".
         Binding("escape", "clear_focus", "clear focus", show=False),
         Binding("tab", "focus_modes", "modes", show=False),
-        Binding("ctrl+t", "toggle_thoughts", "thoughts", show=False),
+        # The Input binds ctrl+b/ctrl+t for line editing; these are app-level
+        # views and must win while the prompt has focus.
+        Binding("ctrl+b", "toggle_explorer", "files", show=False, priority=True),
+        Binding("ctrl+t", "toggle_thoughts", "thoughts", show=False, priority=True),
         # Textual's own ctrl+c opens the quit help; the hint bar promises quit.
         Binding("ctrl+c", "quit", "quit", show=False, priority=True),
     ]
@@ -149,6 +155,11 @@ class MinusHarness(App[None]):
         self._thinking_frame = 0
         self._thinking_timer: Any | None = None
         self.thoughts_open = False
+        self.explorer_visible = False
+        self.explorer_dock = "left"
+        self.explorer_expanded = False
+        self.explorer_preview_path: Path | None = None
+        self._explorer: ExplorerPane | None = None
 
         self._ui_thread: int | None = None
         self._chat_lock = threading.Lock()
@@ -167,22 +178,31 @@ class MinusHarness(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static(id="topbar")
-        with Horizontal(id="body"):
-            with Vertical(id="left"):
-                yield Static("MODES", classes="rail-title")
-                yield OptionList(*MODES, id="mode-list")
-            with Vertical(id="center"):
-                yield RichLog(id="conversation", wrap=True, markup=False)
-                # The bar is the collapsed form; clicking it reveals the
-                # reasoning/tool trace above the input instead of pushing the
-                # conversation into a separate screen.
-                yield Static("ready", id="thinking-bar")
-                yield RichLog(id="thinking-trace", wrap=True, markup=False)
-            with Vertical(id="right"):
-                yield Static("ACTIVITY", classes="rail-title")
-                yield RichLog(id="activity", wrap=True, markup=False)
-                yield Static("ALERTS", classes="rail-title")
-                yield RichLog(id="alerts", wrap=True, markup=False)
+        with Vertical(id="shell"):
+            with Vertical(id="dock-top", classes="dock dock-v"):
+                pass
+            with Horizontal(id="body"):
+                with Vertical(id="left"):
+                    yield Static("MODES", classes="rail-title")
+                    yield OptionList(*MODES, id="mode-list")
+                with Vertical(id="dock-left", classes="dock dock-h"):
+                    pass
+                with Vertical(id="center"):
+                    yield RichLog(id="conversation", wrap=True, markup=False)
+                    # The bar is the collapsed form; clicking it reveals the
+                    # reasoning/tool trace above the input instead of pushing
+                    # the conversation into a separate screen.
+                    yield Static("ready", id="thinking-bar")
+                    yield RichLog(id="thinking-trace", wrap=True, markup=False)
+                with Vertical(id="dock-right", classes="dock dock-h"):
+                    pass
+                with Vertical(id="right"):
+                    yield Static("ACTIVITY", classes="rail-title")
+                    yield RichLog(id="activity", wrap=True, markup=False)
+                    yield Static("ALERTS", classes="rail-title")
+                    yield RichLog(id="alerts", wrap=True, markup=False)
+            with Vertical(id="dock-bottom", classes="dock dock-v"):
+                pass
         with Vertical(id="bottom"):
             yield Input(placeholder="message · /help", id="prompt")
             yield Static(KEY_HINTS, id="hints")
@@ -438,6 +458,88 @@ class MinusHarness(App[None]):
             self.query_one("#thinking-trace", RichLog).write(Text(text, style=style))
         except NoMatches:
             return
+
+    # ---- File explorer ----
+
+    async def action_toggle_explorer(self) -> None:
+        if self.explorer_visible:
+            host = self.query_one(f"#dock-{self.explorer_dock}", Vertical)
+            host.remove_class("-active")
+            host.remove_class("-expanded")
+            self.explorer_visible = False
+            self._set_status("files hidden", False)
+            return
+        await self._dock_explorer(self.explorer_dock)
+
+    async def _dock_explorer(self, where: str) -> None:
+        if where not in ("left", "right", "top", "bottom"):
+            return
+        if self._explorer is None:
+            # The DirectoryTree scans on mount, so it is built only when the
+            # explorer is first opened; a harness that never opens files pays
+            # nothing for the tree.
+            self._explorer = ExplorerPane(self.workspace)
+        explorer = self._explorer
+        target = self.query_one(f"#dock-{where}", Vertical)
+        for name in ("left", "right", "top", "bottom"):
+            host = self.query_one(f"#dock-{name}", Vertical)
+            host.remove_class("-active")
+            host.remove_class("-expanded")
+        if explorer.parent is not None:
+            try:
+                await explorer.remove()
+            except Exception:  # pragma: no cover - already unmounted
+                logger.debug("Explorer was not mounted while docking", exc_info=True)
+        await target.mount(explorer)
+        target.add_class("-active")
+        if self.explorer_expanded:
+            target.add_class("-expanded")
+        self.explorer_dock = where
+        self.explorer_visible = True
+        self._set_status(f"files · {where}", False)
+
+    def toggle_explorer_expanded(self) -> None:
+        """Give the preview more room, or restore the tree-first split."""
+        if self._explorer is None or not self.explorer_visible:
+            self._append("sys", "open the file explorer with ctrl+b first")
+            return
+        self.explorer_expanded = not self.explorer_expanded
+        explorer = self._explorer
+        host = self.query_one(f"#dock-{self.explorer_dock}", Vertical)
+        explorer.set_class(self.explorer_expanded, "-expanded")
+        host.set_class(self.explorer_expanded, "-expanded")
+        state = "nvim" if self.explorer_expanded else "tree"
+        self._set_status(f"files · {self.explorer_dock} · {state}", False)
+
+    def preview_file(self, path: Path) -> None:
+        path = Path(path)
+        if not path.is_file():
+            self._append("sys", f"file: {path} is not a regular file")
+            return
+        if self._explorer is None or not self.explorer_visible:
+            self._append("sys", "open the file explorer with ctrl+b first")
+            return
+        explorer = self._explorer
+        explorer.show_file(path)
+        self.explorer_preview_path = path
+        try:
+            relative = path.relative_to(self.workspace)
+        except ValueError:
+            relative = path
+        self._set_status(f"reading · {_clip(str(relative), 70)}", False)
+        self._trace(f"file · {relative}", style=VALUE)
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        event.stop()
+        self.preview_file(Path(event.path))
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id.startswith("dock-") and button_id.endswith("-btn"):
+            where = button_id.removeprefix("dock-").removesuffix("-btn")
+            await self._dock_explorer(where)
+        elif button_id == "nvim-btn":
+            self.toggle_explorer_expanded()
 
     @staticmethod
     def _tool_verb(name: str) -> str:
@@ -908,7 +1010,7 @@ class MinusHarness(App[None]):
 
     # ---- Commands ----
 
-    def _command(self, line: str) -> None:
+    async def _command(self, line: str) -> None:
         name, _, argument = line.partition(" ")
         name = name.strip().lower()
         argument = argument.strip()
@@ -951,6 +1053,8 @@ class MinusHarness(App[None]):
             self._render_tools()
         elif name == "/thoughts":
             self.toggle_thoughts()
+        elif name == "/files":
+            await self.action_toggle_explorer()
         else:
             self._append("sys", f"unknown command {name} · /help")
 
@@ -982,13 +1086,13 @@ class MinusHarness(App[None]):
 
     # ---- Input ----
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
         line = event.value.strip()
         event.input.value = ""
         if not line:
             return
         if line.startswith("/"):
-            self._command(line)
+            await self._command(line)
             return
         if self.mode == "chat":
             self._chat_submit(line)

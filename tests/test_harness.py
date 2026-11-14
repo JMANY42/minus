@@ -19,6 +19,7 @@ from textual.widgets import Input, OptionList, RichLog, Static
 
 from minus.config import Settings
 from minus.harness import MODES, MinusHarness, run_harness
+from minus.harness.explorer import ExplorerPane
 
 
 class FakeConversation:
@@ -36,10 +37,13 @@ class FakeConversation:
         return "a grounded answer"
 
 
-def make_app() -> tuple[MinusHarness, FakeConversation]:
+def make_app(workspace=None) -> tuple[MinusHarness, FakeConversation]:
     conversation = FakeConversation()
     assistant = SimpleNamespace(conversation=conversation, results=Queue())
-    return MinusHarness(Settings(), conversation=assistant), conversation
+    return (
+        MinusHarness(Settings(), workspace=workspace, conversation=assistant),
+        conversation,
+    )
 
 
 def log_text(app: MinusHarness, widget_id: str) -> str:
@@ -94,7 +98,11 @@ async def test_chat_turn_runs_on_a_worker_and_shows_the_reply() -> None:
         prompt = app.query_one("#prompt", Input)
         prompt.value = "hello"
         await pilot.press("enter")
-        await app.workers.wait_for_complete()
+        # The explorer's DirectoryTree has its own long-lived loader worker;
+        # wait for the turn we just started, not for every worker in the app.
+        await app.workers.wait_for_complete(
+            [worker for worker in app.workers if worker.group == "chat"]
+        )
         await pilot.pause()
 
         assert conversation.turns == ["hello"]
@@ -145,6 +153,43 @@ async def test_thinking_bar_expands_to_reasoning_and_tool_trace() -> None:
         await pilot.click("#thinking-bar")
         await pilot.pause()
         assert not trace.has_class("-open")
+
+
+async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+    app, _ = make_app(tmp_path)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.1)
+
+        explorer = app.query_one("#explorer", ExplorerPane)
+        assert explorer.parent.id == "dock-left"
+        assert app.query_one("#dock-left").has_class("-active")
+
+        for button, dock in (
+            ("#dock-right-btn", "dock-right"),
+            ("#dock-top-btn", "dock-top"),
+            ("#dock-bottom-btn", "dock-bottom"),
+            ("#dock-left-btn", "dock-left"),
+        ):
+            await pilot.click(button)
+            await pilot.pause()
+            assert explorer.parent.id == dock
+            assert app.query_one(f"#{dock}").has_class("-active")
+
+        app.preview_file(tmp_path / "pkg" / "mod.py")
+        await pilot.pause()
+        assert "def hello" in log_text(app, "file-preview")
+
+        await pilot.click("#nvim-btn")
+        await pilot.pause()
+        assert explorer.has_class("-expanded")
+        assert app.query_one("#dock-left").has_class("-expanded")
+
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert not app.query_one("#dock-left").has_class("-active")
 
 
 async def test_malicious_alert_renders_in_red_rail_and_transcript() -> None:
