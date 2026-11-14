@@ -6,11 +6,11 @@ the question that matters is whether the route to the internet leaves through
 the expected interface. If it does not, a leak has already started.
 
 The connection half drives AirVPN's own suite -- bluetit is the daemon and
-goldcrest is the CLI that talks to it -- rather than writing an OpenVPN
-configuration. AirVPN owns server selection, the network lock and the WireGuard
-keys, so a second implementation here would be a copy that drifts. What this
-module owns is the part AirVPN does not: deciding when a tunnel counts as
-carrying traffic, and keeping the password out of every error string.
+goldcrest is the CLI that talks to it. There is no second VPN client and no
+config file of our own: AirVPN owns server selection, the network lock and the
+tunnel keys, so another implementation would only drift. What this module owns
+is the part AirVPN does not: deciding when a tunnel counts as carrying traffic,
+and keeping the password out of every error string.
 """
 
 from __future__ import annotations

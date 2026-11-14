@@ -118,6 +118,28 @@ def _profile_log_path() -> Path:
     return paths.quarantine_dir() / "qbt-profile" / "qbittorrent.log"
 
 
+def _private_umask() -> None:
+    """Make everything qBittorrent creates under its profile private."""
+    os.umask(0o077)
+
+
+def _harden_profile(profile: Path) -> None:
+    """Force the profile tree to 0700/0600, whatever qBittorrent chose.
+
+    qBittorrent creates its config and log with the process umask, so a
+    first start can leave 0644 files inside a 0700 parent. The parent is the
+    boundary, but a future move of the profile must not turn the log -- which
+    contains the first-run password -- into a world-readable file.
+    """
+    if not profile.exists():
+        return
+    for path in (profile, *profile.rglob("*")):
+        try:
+            os.chmod(path, 0o700 if path.is_dir() else 0o600)
+        except OSError:
+            logger.debug("Could not harden %s", path, exc_info=True)
+
+
 def _start_process(settings: Settings, port: int, profile: Path) -> Path:
     """Start qBittorrent detached, returning the log file it writes."""
     log_path = profile / "qbittorrent.log"
@@ -135,7 +157,9 @@ def _start_process(settings: Settings, port: int, profile: Path) -> Path:
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
+            preexec_fn=_private_umask,
         )
+    os.chmod(log_path, 0o600)
     logger.info("Started qBittorrent on port %d (log: %s)", port, log_path)
     return log_path
 
@@ -223,6 +247,7 @@ def _spawn(settings: Settings, url: str) -> tuple[QBittorrentClient, str]:
             f"qBittorrent did not open its WebUI on port {port} within "
             f"{START_TIMEOUT_SECONDS:.0f}s; see {log_path}"
         )
+    _harden_profile(profile)
 
     configured = _try_configured(settings, url)
     if configured is not None:
@@ -271,6 +296,7 @@ def _ensure_running(settings: Settings) -> tuple[QBittorrentClient, bool, str]:
 def ensure_running(settings: Settings) -> QBittorrentClient:
     """A client, starting qBittorrent first when nothing answers."""
     client, _, _ = _ensure_running(settings)
+    _harden_profile(_profile_dir())
     return client
 
 

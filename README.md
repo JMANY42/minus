@@ -82,8 +82,7 @@ error string.
 
 AirVPN's WireGuard mode needs a loadable `wireguard` kernel module. If the
 running kernel cannot load one, set `MINUS_AIRVPN_VPN_TYPE=openvpn` to use
-AirVPN's own OpenVPN transport (still Goldcrest/bluetit, not a separate
-OpenVPN configuration), or reboot into a kernel whose modules match.
+AirVPN's alternate transport, or reboot into a kernel whose modules match.
 
 A malicious verdict deletes the staged payload immediately, writes a 0600
 record under `quarantine/rejected/` (hash, reasons, file names — never bytes),

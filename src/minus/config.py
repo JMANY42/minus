@@ -117,10 +117,10 @@ class Settings(BaseSettings):
 
     # ---- Triage: qBittorrent in, verdict out ----
     # ---- VPN (AirVPN) ----
-    # MINUS can bring the tunnel up itself. AirVPN's own suite is the client:
-    # bluetit is the daemon and goldcrest is what talks to it, so no raw
-    # OpenVPN config is involved. Empty `vpn_interface` is discovered from the
-    # route after a successful connect rather than guessed.
+    # MINUS can bring the tunnel up itself. AirVPN's own suite is the only
+    # client: bluetit is the daemon and goldcrest is what talks to it, so there
+    # is no second VPN client or config file. Empty `vpn_interface` is
+    # discovered from the route after a successful connect rather than guessed.
     vpn_provider: str = "airvpn"
     vpn_client_command: str = "goldcrest"
     vpn_interface: str = ""
@@ -128,8 +128,8 @@ class Settings(BaseSettings):
     vpn_connect_timeout: float = 120.0
     # On Arch the current login session does not pick up a freshly added
     # `airvpn` group until the user logs in again. Falling back to a
-    # passwordless `sudo -n -g airvpn` (one sudoers line) makes the harness work
-    # in that window; direct invocation is always tried first.
+    # passwordless `sudo -n` (one sudoers line) makes the harness work in that
+    # window; direct invocation is always tried first.
     vpn_use_sudo_fallback: bool = True
     airvpn_username: str = ""
     airvpn_password: str = Field(default="", repr=False)

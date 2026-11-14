@@ -335,6 +335,25 @@ def test_spawn_bootstraps_when_the_configured_password_is_not_known(tmp_path, mo
     assert prefs == {"web_ui_username": "minus", "web_ui_password": "secret"}
 
 
+def test_profile_tree_is_hardened(tmp_path):
+    profile = tmp_path / "qbt-profile"
+    (profile / "qBittorrent" / "config").mkdir(parents=True)
+    log = profile / "qbittorrent.log"
+    log.write_text("temp password: x\n")
+    (profile / "qBittorrent" / "config" / "qBittorrent.conf").write_text("[x]\n")
+    profile.chmod(0o755)
+    log.chmod(0o644)
+
+    qbt._harden_profile(profile)
+
+    assert profile.stat().st_mode & 0o777 == 0o700
+    assert (profile / "qBittorrent").stat().st_mode & 0o777 == 0o700
+    assert (profile / "qBittorrent" / "config").stat().st_mode & 0o777 == 0o700
+    assert log.stat().st_mode & 0o777 == 0o600
+    config = profile / "qBittorrent" / "config" / "qBittorrent.conf"
+    assert config.stat().st_mode & 0o777 == 0o600
+
+
 def test_login_accepts_qbittorrent_5s_empty_204(tmp_path):
     # A real 5.3 install answers 204 with no body; treating that as a refusal
     # made provisioning fail against a Web UI that curl could log into.
