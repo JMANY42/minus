@@ -509,6 +509,27 @@ class MinusHarness(App[None]):
         host = self.query_one(f"#dock-{self.explorer_dock}", Vertical)
         explorer.set_class(self.explorer_expanded, "-expanded")
         host.set_class(self.explorer_expanded, "-expanded")
+        if self.explorer_dock in ("left", "right"):
+            if self.explorer_expanded:
+                ceiling = max(
+                    24,
+                    self.query_one("#body").size.width
+                    - self.query_one("#left").outer_size.width
+                    - self.query_one("#right").outer_size.width
+                    - 30,
+                )
+                host.styles.width = min(84, ceiling)
+            else:
+                host.styles.width = 54
+        else:
+            if self.explorer_expanded:
+                ceiling = max(10, self.query_one("#shell").size.height - 12)
+                host.styles.height = min(44, ceiling)
+            else:
+                host.styles.height = 24
+        tree = explorer.query_one("#file-tree")
+        if explorer.has_class("-preview"):
+            tree.styles.height = 6 if self.explorer_expanded else 10
         state = "nvim" if self.explorer_expanded else "tree"
         self._set_status(f"files · {self.explorer_dock} · {state}", False)
 

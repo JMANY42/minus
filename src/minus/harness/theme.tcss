@@ -138,6 +138,7 @@ Screen {
 #explorer.-preview #file-preview {
     width: 1fr;
     height: 1fr;
+    border-top: solid #2a323e;
 }
 
 #explorer.-expanded #file-tree {

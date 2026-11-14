@@ -15,6 +15,7 @@ import pytest
 
 pytest.importorskip("textual")
 
+from textual.events import MouseDown, MouseMove, MouseUp
 from textual.widgets import Input, OptionList, RichLog, Static
 
 from minus.config import Settings
@@ -195,6 +196,171 @@ async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -
         await pilot.press("ctrl+b")
         await pilot.pause()
         assert not app.query_one("#dock-left").has_class("-active")
+
+
+async def test_dragging_the_dock_edge_resizes_and_leaves_chat_room(tmp_path) -> None:
+    app, _ = make_app(tmp_path)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.1)
+        explorer = app.query_one("#explorer", ExplorerPane)
+        dock = app.query_one("#dock-left")
+        start = dock.size.width
+        x = explorer.region.right - 1
+        y = explorer.region.y + 2
+
+        explorer.on_mouse_down(
+            MouseDown(explorer, x, y, 0, 0, 1, False, False, False, screen_x=x, screen_y=y)
+        )
+        explorer.on_mouse_move(
+            MouseMove(explorer, x, y, 0, 0, 1, False, False, False, screen_x=x + 8, screen_y=y)
+        )
+        await pilot.pause()
+        assert dock.size.width > start
+
+        explorer.on_mouse_move(
+            MouseMove(explorer, x, y, 0, 0, 1, False, False, False, screen_x=x + 500, screen_y=y)
+        )
+        await pilot.pause()
+        explorer.on_mouse_up(
+            MouseUp(explorer, x, y, 0, 0, 1, False, False, False, screen_x=x, screen_y=y)
+        )
+        await pilot.pause()
+
+        assert app.query_one("#center").size.width >= 25
+        assert dock.size.width <= app.query_one("#body").size.width - 80
+
+
+async def test_dragging_a_top_dock_leaves_the_body_readable(tmp_path) -> None:
+    app, _ = make_app(tmp_path)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.1)
+        await pilot.click("#dock-top-btn")
+        await pilot.pause()
+        explorer = app.query_one("#explorer", ExplorerPane)
+        dock = app.query_one("#dock-top")
+        x = explorer.region.x + 2
+        edge = explorer.region.bottom - 1
+        explorer.on_mouse_down(
+            MouseDown(
+                explorer,
+                x,
+                edge,
+                0,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=x,
+                screen_y=edge,
+            )
+        )
+        explorer.on_mouse_move(
+            MouseMove(
+                explorer,
+                x,
+                edge,
+                0,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=x,
+                screen_y=edge + 500,
+            )
+        )
+        await pilot.pause()
+        explorer.on_mouse_up(
+            MouseUp(
+                explorer,
+                x,
+                edge,
+                0,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=x,
+                screen_y=edge + 500,
+            )
+        )
+        await pilot.pause()
+
+        assert app.query_one("#body").size.height >= 12
+        assert dock.size.height <= app.query_one("#shell").size.height - 12
+
+
+async def test_dragging_the_preview_divider_gives_code_more_space(tmp_path) -> None:
+    path = tmp_path / "sample.py"
+    path.write_text("\n".join(f"line_{n} = {n}" for n in range(80)), encoding="utf-8")
+    app, _ = make_app(tmp_path)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.1)
+        app.preview_file(path)
+        await pilot.pause()
+
+        explorer = app.query_one("#explorer", ExplorerPane)
+        tree = app.query_one("#file-tree")
+        preview = app.query_one("#file-preview", RichLog)
+        tree_height = tree.size.height
+        boundary = tree.region.bottom
+        x = explorer.region.x + 2
+
+        explorer.on_mouse_down(
+            MouseDown(
+                explorer,
+                x,
+                boundary,
+                0,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=x,
+                screen_y=boundary,
+            )
+        )
+        explorer.on_mouse_move(
+            MouseMove(
+                explorer,
+                x,
+                boundary,
+                0,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=x,
+                screen_y=boundary - 3,
+            )
+        )
+        await pilot.pause()
+        explorer.on_mouse_up(
+            MouseUp(
+                explorer,
+                x,
+                boundary - 3,
+                0,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=x,
+                screen_y=boundary - 3,
+            )
+        )
+        await pilot.pause()
+
+        assert tree.size.height < tree_height
+        assert preview.size.height > 0
 
 
 async def test_diffs_button_shows_the_working_tree(tmp_path) -> None:

@@ -19,9 +19,15 @@ import subprocess
 from pathlib import Path
 
 from rich.syntax import Syntax
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.widget import Widget
 from textual.widgets import Button, DirectoryTree, RichLog
+
+# The side pane may grow until the conversation still has this many columns.
+# The user asked for roughly 25-30 characters of reading room in the chat.
+CHAT_MIN_COLUMNS = 30
 
 # Directories that are either huge, machine-specific, or both. The explorer is
 # for reading the checkout, not for browsing a virtualenv or a build cache.
@@ -125,6 +131,9 @@ class ExplorerPane(Vertical):
         super().__init__(id="explorer")
         self.root = Path(root)
         self._has_file = False
+        # ("dock", x, y, start_size, dock_id) or
+        # ("split", y, start_tree_height, explorer_height)
+        self._drag: tuple | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="explorer-toolbar"):
@@ -188,3 +197,110 @@ class ExplorerPane(Vertical):
         preview = self.query_one("#file-preview", FilePreview)
         preview.display = not preview.display
         self.set_class(preview.display, "-preview")
+
+    # ---- Mouse resizing ----
+    #
+    # The dock's inner edge is a two-cell grab zone, and the divider between
+    # the tree and the code view is a two-row grab zone. Textual's mouse
+    # capture keeps the move events coming even when the pointer leaves the
+    # edge, so the drag stays attached to the pane it started on.
+
+    @property
+    def _host(self) -> Widget | None:
+        parent = self.parent
+        return parent if isinstance(parent, Widget) else None
+
+    def _dock_edge(self, x: float, y: float) -> str:
+        host = self._host
+        if host is None:
+            return ""
+        dock = host.id or ""
+        region = self.region
+        if dock in ("dock-left", "dock-right"):
+            edge = region.right - 1 if dock == "dock-left" else region.x
+            if region.y <= y < region.bottom and abs(x - edge) <= 1:
+                return "dock"
+        elif dock in ("dock-top", "dock-bottom"):
+            edge = region.bottom - 1 if dock == "dock-top" else region.y
+            if region.x <= x < region.right and abs(y - edge) <= 1:
+                return "dock"
+        return ""
+
+    def _split_edge(self, x: float, y: float) -> str:
+        if not self.has_class("-preview"):
+            return ""
+        tree = self.query_one("#file-tree")
+        boundary = tree.region.bottom
+        region = self.region
+        if region.x <= x < region.right and abs(y - boundary) <= 1:
+            return "split"
+        return ""
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if self._drag is not None:
+            return
+        x, y = event.screen_x, event.screen_y
+        if self._dock_edge(x, y):
+            host = self._host
+            if host is None:
+                return
+            dock = host.id or ""
+            size = host.size.width if dock in ("dock-left", "dock-right") else host.size.height
+            self._drag = ("dock", x, y, size, dock)
+            self.capture_mouse()
+            event.stop()
+            return
+        if self._split_edge(x, y):
+            tree = self.query_one("#file-tree")
+            self._drag = ("split", 0, y, tree.size.height)
+            self.capture_mouse()
+            event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._drag is None:
+            return
+        kind, start_x, start_y, start_size, *rest = self._drag
+        if kind == "dock":
+            dock = rest[0]
+            if dock == "dock-left":
+                delta = event.screen_x - start_x
+            elif dock == "dock-right":
+                delta = start_x - event.screen_x
+            elif dock == "dock-top":
+                delta = event.screen_y - start_y
+            else:
+                delta = start_y - event.screen_y
+            new_size = self._clamp_dock(dock, start_size + delta)
+            host = self._host
+            if host is not None:
+                if dock in ("dock-left", "dock-right"):
+                    host.styles.width = new_size
+                else:
+                    host.styles.height = new_size
+        else:
+            tree = self.query_one("#file-tree")
+            # Dragging down grows the tree; dragging up gives the code view
+            # the space. Keep at least three rows in each.
+            new_height = start_size + (event.screen_y - start_y)
+            ceiling = max(3, self.size.height - 4)
+            tree.styles.height = max(3, min(ceiling, new_height))
+        event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._drag is None:
+            return
+        self._drag = None
+        self.release_mouse()
+        event.stop()
+
+    def _clamp_dock(self, dock: str, value: float) -> int:
+        body = self.screen.query_one("#body")
+        if dock in ("dock-left", "dock-right"):
+            left = self.screen.query_one("#left").outer_size.width
+            right = self.screen.query_one("#right").outer_size.width
+            ceiling = max(24, body.size.width - left - right - CHAT_MIN_COLUMNS)
+            return int(max(24, min(ceiling, value)))
+        shell = self.screen.query_one("#shell")
+        # Leave a readable body beneath/above a top/bottom dock.
+        ceiling = max(10, shell.size.height - 12)
+        return int(max(8, min(ceiling, value)))
