@@ -44,6 +44,13 @@ slash command: `/mode code`, `/download <magnet>`, `/vpn connect`, `/triage
 tool activity and any quarantine alert. `minus serve` remains the headless
 service.
 
+If the shell cannot find `minus`, link the venv script once (then `hash -r` or
+open a new shell):
+
+```bash
+ln -sf "$PWD/.venv/bin/minus" ~/.local/bin/minus
+```
+
 Against an assistant that is already running:
 
 ```bash
