@@ -323,6 +323,15 @@ def connect(settings: Any) -> TunnelStatus:
     if login_error:
         detail = _redact(_tail(output), settings)
         raise VpnError(f"AirVPN login failed: {detail or 'the client rejected the credentials'}")
+    # A transport that cannot start leaves goldcrest exiting 0 and the caller
+    # polling for a tunnel that will never exist. Say what is missing instead.
+    if re.search(r"cannot load wireguard|no openvpn profile provided", output, re.I):
+        detail = _redact(_tail(output), settings)
+        raise VpnError(
+            "AirVPN could not start the selected transport: "
+            f"{detail}. Try MINUS_AIRVPN_VPN_TYPE=openvpn, or load the missing "
+            "kernel module and reboot."
+        )
     if completed.returncode != 0:
         detail = _redact(_tail(output), settings)
         raise VpnError(

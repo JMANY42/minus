@@ -143,6 +143,20 @@ def test_login_failure_exiting_zero_fails_fast(tmp_path):
     assert "s3cret-pass" not in str(caught.value)
 
 
+def test_a_missing_wireguard_module_fails_fast(tmp_path):
+    script, _log = _script(
+        tmp_path,
+        "print('ERROR: cannot load wireguard system module')\nsys.exit(0)\n",
+        name="no-wireguard-goldcrest",
+    )
+
+    with pytest.raises(VpnError) as caught:
+        vpn.connect(_settings(script))
+
+    assert "transport" in str(caught.value)
+    assert "openvpn" in str(caught.value)
+
+
 def test_connect_times_out_when_the_client_succeeds_but_no_tunnel_appears(tmp_path, monkeypatch):
     script, _log = _script(tmp_path, "sys.exit(0)\n")
     settings = _settings(script)
