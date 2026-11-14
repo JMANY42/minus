@@ -113,7 +113,27 @@ Screen {
     color: #86efac;
 }
 
+#explorer-main {
+    width: 1fr;
+    height: 1fr;
+}
+
+/* The tree is the sidebar: it keeps the 22-column rhythm of the modes rail,
+ * and the code view takes every remaining column and the full height. */
+#explorer-tree-pane {
+    width: 1fr;
+    height: 1fr;
+    border-right: solid #2a323e;
+}
+
+/* Once a file or diff is open, the tree becomes the sidebar and the code
+ * view takes every remaining column and the full height. */
+#explorer.-preview #explorer-tree-pane {
+    width: 22;
+}
+
 #file-tree {
+    width: 1fr;
     height: 1fr;
     background: transparent;
     padding: 0 1;
@@ -126,28 +146,6 @@ Screen {
     background: transparent;
     scrollbar-size-vertical: 1;
     scrollbar-size-horizontal: 1;
-}
-
-/* Once there is something to read, the code view takes the rest of the
- * dock. It spans the full width in every placement; top/bottom get a fixed
- * tree strip above it rather than a half-and-half split. */
-#explorer.-preview #file-tree {
-    height: 10;
-}
-
-#explorer.-preview #file-preview {
-    width: 1fr;
-    height: 1fr;
-    border-top: solid #2a323e;
-}
-
-#explorer.-expanded #file-tree {
-    height: 6;
-}
-
-#explorer.-expanded #file-preview {
-    width: 1fr;
-    height: 1fr;
 }
 
 #dock-top #explorer,

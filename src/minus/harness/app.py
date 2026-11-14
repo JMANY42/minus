@@ -527,9 +527,6 @@ class MinusHarness(App[None]):
                 host.styles.height = min(44, ceiling)
             else:
                 host.styles.height = 24
-        tree = explorer.query_one("#file-tree")
-        if explorer.has_class("-preview"):
-            tree.styles.height = 6 if self.explorer_expanded else 10
         state = "nvim" if self.explorer_expanded else "tree"
         self._set_status(f"files · {self.explorer_dock} · {state}", False)
 

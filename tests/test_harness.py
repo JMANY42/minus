@@ -186,7 +186,10 @@ async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -
         app.preview_file(tmp_path / "pkg" / "mod.py")
         await pilot.pause()
         assert "def hello" in log_text(app, "file-preview")
-        assert app.query_one("#file-preview").size.width == explorer.size.width
+        preview = app.query_one("#file-preview", RichLog)
+        tree_pane = app.query_one("#explorer-tree-pane")
+        assert preview.size.width > tree_pane.size.width
+        assert preview.size.height == app.query_one("#explorer-main").size.height
 
         await pilot.click("#nvim-btn")
         await pilot.pause()
@@ -305,62 +308,63 @@ async def test_dragging_the_preview_divider_gives_code_more_space(tmp_path) -> N
         await pilot.pause()
 
         explorer = app.query_one("#explorer", ExplorerPane)
-        tree = app.query_one("#file-tree")
+        pane = app.query_one("#explorer-tree-pane")
         preview = app.query_one("#file-preview", RichLog)
-        tree_height = tree.size.height
-        boundary = tree.region.bottom
-        x = explorer.region.x + 2
+        tree_width = pane.size.width
+        preview_width = preview.size.width
+        boundary = pane.region.right
+        y = explorer.region.y + 2
 
         explorer.on_mouse_down(
             MouseDown(
                 explorer,
-                x,
                 boundary,
+                y,
                 0,
                 0,
                 1,
                 False,
                 False,
                 False,
-                screen_x=x,
-                screen_y=boundary,
+                screen_x=boundary,
+                screen_y=y,
             )
         )
         explorer.on_mouse_move(
             MouseMove(
                 explorer,
-                x,
                 boundary,
+                y,
                 0,
                 0,
                 1,
                 False,
                 False,
                 False,
-                screen_x=x,
-                screen_y=boundary - 3,
+                screen_x=boundary - 4,
+                screen_y=y,
             )
         )
         await pilot.pause()
         explorer.on_mouse_up(
             MouseUp(
                 explorer,
-                x,
-                boundary - 3,
+                boundary - 4,
+                y,
                 0,
                 0,
                 1,
                 False,
                 False,
                 False,
-                screen_x=x,
-                screen_y=boundary - 3,
+                screen_x=boundary - 4,
+                screen_y=y,
             )
         )
         await pilot.pause()
 
-        assert tree.size.height < tree_height
-        assert preview.size.height > 0
+        assert pane.size.width < tree_width
+        assert preview.size.width > preview_width
 
 
 async def test_diffs_button_shows_the_working_tree(tmp_path) -> None:

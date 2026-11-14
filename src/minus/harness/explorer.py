@@ -143,8 +143,10 @@ class ExplorerPane(Vertical):
             yield Button("bottom", id="dock-bottom-btn", classes="dockbtn")
             yield Button("nvim", id="nvim-btn", classes="dockbtn nvimbtn")
             yield Button("diffs", id="diffs-btn", classes="dockbtn")
-        yield ProjectTree(self.root, id="file-tree")
-        yield FilePreview(id="file-preview", wrap=False, markup=False)
+        with Horizontal(id="explorer-main"):
+            with Vertical(id="explorer-tree-pane"):
+                yield ProjectTree(self.root, id="file-tree")
+            yield FilePreview(id="file-preview", wrap=False, markup=False)
 
     def on_mount(self) -> None:
         # The tree is the primary control; give it room until a file is picked.
@@ -229,10 +231,10 @@ class ExplorerPane(Vertical):
     def _split_edge(self, x: float, y: float) -> str:
         if not self.has_class("-preview"):
             return ""
-        tree = self.query_one("#file-tree")
-        boundary = tree.region.bottom
+        pane = self.query_one("#explorer-tree-pane")
+        boundary = pane.region.right
         region = self.region
-        if region.x <= x < region.right and abs(y - boundary) <= 1:
+        if region.y <= y < region.bottom and abs(x - boundary) <= 1:
             return "split"
         return ""
 
@@ -251,8 +253,8 @@ class ExplorerPane(Vertical):
             event.stop()
             return
         if self._split_edge(x, y):
-            tree = self.query_one("#file-tree")
-            self._drag = ("split", 0, y, tree.size.height)
+            pane = self.query_one("#explorer-tree-pane")
+            self._drag = ("split", x, y, pane.size.width)
             self.capture_mouse()
             event.stop()
 
@@ -278,12 +280,11 @@ class ExplorerPane(Vertical):
                 else:
                     host.styles.height = new_size
         else:
-            tree = self.query_one("#file-tree")
-            # Dragging down grows the tree; dragging up gives the code view
-            # the space. Keep at least three rows in each.
-            new_height = start_size + (event.screen_y - start_y)
-            ceiling = max(3, self.size.height - 4)
-            tree.styles.height = max(3, min(ceiling, new_height))
+            pane = self.query_one("#explorer-tree-pane")
+            # Drag left to widen the code view, right to widen the tree.
+            new_width = start_size + (event.screen_x - start_x)
+            ceiling = max(16, self.size.width - 20)
+            pane.styles.width = max(14, min(ceiling, new_width))
         event.stop()
 
     def on_mouse_up(self, event: events.MouseUp) -> None:

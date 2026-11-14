@@ -45,7 +45,8 @@ rail shows tool activity and any quarantine alert. `ctrl+b` opens the file
 explorer: the `left`/`right`/`top`/`bottom` buttons dock it, clicking a file
 shows a syntax-highlighted preview, `diffs` shows the working-tree diff, and
 `nvim` expands the preview. Drag the explorer's inner edge to resize the dock,
-or the divider above the code view to grow it; the dock stops with roughly
+or the divider beside the file tree to grow the code view; the tree stays a
+22-column sidebar and the code view takes the rest. The dock stops with roughly
 25-30 columns left for the conversation. `minus serve` remains the headless
 service.
 
