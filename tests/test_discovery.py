@@ -215,6 +215,14 @@ def test_ranking_rejects_an_executable_dressed_as_a_film() -> None:
     assert "executable" in scored[0].reject_reason
 
 
+def test_choose_best_can_use_the_low_confidence_floor() -> None:
+    low = ScoredCandidate(candidate(seeders=3), 30.0, eligible=True)
+    result = DiscoveryResult("q", "movie", (low,))
+
+    assert choose_best(result, min_score=55.0) is None
+    assert choose_best(result, min_score=55.0, low_score=25.0) is low
+
+
 def test_choose_best_needs_the_threshold_but_keeps_archive_fallback() -> None:
     low = ScoredCandidate(candidate(seeders=3), 40.0, eligible=True)
     result = DiscoveryResult("q", "movie", (low,))

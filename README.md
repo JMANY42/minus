@@ -97,8 +97,11 @@ coverage, seeders, 1080p BluRay/Web-DL, verified uploads, agreement between
 sources, a low Knaben virus score and a legal origin. It rejects CAM/TS
 releases, executable/crack-style names, dead swarms, wrong-year matches,
 category mismatches, and anything larger than `MINUS_TRIAGE_MAX_BYTES`.
-`MINUS_DISCOVERY_MIN_SCORE` (default 55) is the cutoff; below it the harness
-shows the shortlist and downloads nothing.
+`MINUS_DISCOVERY_MIN_SCORE` (default 45) is the normal cutoff. If nothing
+clears it, a candidate that still passed every hard filter and scores at least
+`MINUS_DISCOVERY_LOW_CONFIDENCE_SCORE` (default 25) is downloaded for the VM to
+back-check and explicitly marked low confidence; it is **never** auto-promoted.
+Below both floors the harness shows the shortlist and downloads nothing.
 
 This ranking is a pre-filter, **not** a trust boundary. Every selected torrent
 still lands in quarantine and still needs the verdict rules; a static-only scan

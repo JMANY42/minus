@@ -286,6 +286,28 @@ async def test_download_mode_reports_a_shortlist_without_downloading(monkeypatch
         assert "no candidate cleared the threshold" in written
 
 
+async def test_download_mode_low_confidence_pick_does_not_auto_promote(monkeypatch) -> None:
+    found = discovery_result(score=30.0)
+    monkeypatch.setattr("minus.triage.discovery.discover", lambda _settings, _query: found)
+    app, pipeline = download_app(CLEAN_RESULT)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.select_mode("download")
+        await pilot.pause()
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "the great gatsby"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete(
+            [worker for worker in app.workers if worker.group == "download"]
+        )
+        await pilot.pause()
+
+        assert pipeline.ingested
+        assert pipeline.promoted == []
+        written = "\n".join(body for role, body in app.conversation_lines if role == "sys")
+        assert "below the normal score cutoff" in written
+
+
 async def test_download_mode_magnet_bypasses_search(monkeypatch) -> None:
     def explode(_settings, _query):
         raise AssertionError("a magnet must not be searched")

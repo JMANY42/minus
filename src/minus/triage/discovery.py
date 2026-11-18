@@ -776,7 +776,7 @@ def _score(
     coverage = len(query_tokens & title_tokens) / len(query_tokens) if query_tokens else 0.0
     score = coverage * 20.0
     reasons: list[str] = []
-    if coverage < 0.55:
+    if coverage < 0.45:
         return _reject(candidate, score, f"title match {coverage:.0%}")
 
     normalized = _normalise(title)
@@ -924,14 +924,25 @@ def rank_candidates(
     return scored
 
 
-def choose_best(result: DiscoveryResult, *, min_score: float = 55.0) -> ScoredCandidate | None:
+def choose_best(
+    result: DiscoveryResult,
+    *,
+    min_score: float = 55.0,
+    low_score: float | None = None,
+) -> ScoredCandidate | None:
     """The first eligible candidate that clears the score, or None.
 
     A verified Internet Archive item is the one exception: it has no swarm to
     score, so it is accepted as the fallback when no tracker result clears the
     threshold. It still goes through the same quarantine and verdict rules.
+
+    `low_score` is the explicit "download it and let the VM back-check it"
+    floor. It only returns a candidate that already passed every hard filter
+    (title, category, CAM, executables, seeders, size), and the harness marks
+    that pick low confidence. It never bypasses promotion rules.
     """
     archive: ScoredCandidate | None = None
+    low: ScoredCandidate | None = None
     for scored in result.candidates:
         if not scored.eligible:
             continue
@@ -939,7 +950,9 @@ def choose_best(result: DiscoveryResult, *, min_score: float = 55.0) -> ScoredCa
             return scored
         if "internetarchive" in scored.candidate.sources and archive is None:
             archive = scored
-    return archive
+        if low_score is not None and scored.score >= low_score and low is None:
+            low = scored
+    return archive or low
 
 
 # ---- Orchestration --------------------------------------------------------

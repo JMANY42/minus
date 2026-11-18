@@ -870,7 +870,12 @@ class MinusHarness(App[None]):
                 found = discover(self.settings, query)
                 for line in found.summary_lines(3):
                     self._ui(partial(self._append, "sys", line))
-                best = choose_best(found, min_score=self.settings.discovery_min_score)
+                minimum = self.settings.discovery_min_score
+                best = choose_best(
+                    found,
+                    min_score=minimum,
+                    low_score=self.settings.discovery_low_confidence_score,
+                )
                 if best is None:
                     self._ui(partial(self._set_status, "search · no pick", False))
                     self._ui(
@@ -884,8 +889,18 @@ class MinusHarness(App[None]):
                 item = best.candidate
                 if not item.download_url:
                     raise ValueError("the selected candidate has no magnet or .torrent URL")
+                low_confidence = best.score < minimum
                 self._ui(partial(self._append, "sys", f"pick: {best.describe()}"))
                 self._ui(partial(self._trace, f"pick · {item.title}", style=OK))
+                if low_confidence:
+                    self._ui(
+                        partial(
+                            self._append,
+                            "sys",
+                            "pick is below the normal score cutoff; downloading for "
+                            "quarantine/VM back-check, never auto-promoting",
+                        )
+                    )
 
                 if self.settings.qbittorrent_url:
                     from minus.scripts.qbt import ensure_running
@@ -893,7 +908,8 @@ class MinusHarness(App[None]):
                     ensure_running(self.settings)
                 result = ingest(item.download_url, detonate=True)
                 status = str(result.get("status") or "")
-                if status == "clean" and self.settings.discovery_auto_promote:
+                auto_promote = self.settings.discovery_auto_promote and not low_confidence
+                if status == "clean" and auto_promote:
                     try:
                         promoted = pipeline.promote(result["torrent_hash"], name=item.title)
                     except Exception as exc:

@@ -207,7 +207,12 @@ class Settings(BaseSettings):
     # Below this score the harness reports the shortlist instead of downloading
     # it. The default is calibrated so a seeded 1080p release clears it and a
     # CAM or an unknown tiny file does not.
-    discovery_min_score: float = 55.0
+    discovery_min_score: float = 45.0
+    # If nothing clears the normal cutoff, this lower floor still allows a
+    # seeded, non-hard-rejected candidate to be downloaded for the VM to
+    # back-check. It is never auto-promoted; the harness labels it low
+    # confidence.
+    discovery_low_confidence_score: float = 25.0
     # Results fetched per provider; the harness shows at most a handful.
     discovery_limit: int = 20
     discovery_timeout: float = 12.0
