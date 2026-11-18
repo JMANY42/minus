@@ -60,6 +60,31 @@ permissions, and each risky flag. It is read-only and makes no network calls.
   default), `TriagePipeline.download` refuses unless `MINUS_VPN_INTERFACE` is
   set, the link is up, and `ip route get 1.1.1.1` leaves through that interface.
   Enforcement on with no interface named is a refusal, not a pass.
+- **Discovery results are attacker-influenced input.** `triage/discovery.py`
+  queries public indexes and ranks what they return; its title, seed-count,
+  "verified" and virus-score signals are a pre-filter for picking what to
+  quarantine, never evidence that a file is safe. The selected magnet still goes
+  through `download` → `scan` → `verdict`, and auto-promotion is only reachable
+  on a `clean` label. An empty or failing provider is reported, not guessed
+  around. `MINUS_DISCOVERY_ENABLED=false` removes search entirely and leaves the
+  typed-magnet path unchanged.
+- **A Windows detonation is Windows-only.** The guest launches Windows shapes
+  (`.exe`, `.bat`, `.ps1`, `.msi`, `.lnk`, `.scr`, `.com`); it never runs ELF,
+  Mach-O, Linux scripts, or `.jar` files. `TriagePipeline.promote` therefore
+  refuses a `clean` verdict when the staged tree contains those Linux-active
+  files, even if another artifact was detonated. They need a Linux-side
+  detonation or manual quarantine review; a Windows-clean label is not proof
+  they are safe on this host.
+- **Manual release is explicit, passive-only and recorded.** `triage review`
+  shows the static facts and runs `ffprobe` over up to five media files under
+  bubblewrap, with read-only input and no network; that is parser evidence, not
+  a detonation. `triage promote --accept-review` releases **only** a
+  `needs_review` verdict whose files are passive media/text and whose
+  static/airlock flags contain no executable, script, archive, document or
+  other active content. Its provenance records the accepting user, UTC time,
+  reason and `detonated: false`. `suspicious`, `malicious` and active-content
+  payloads are never releasable this way; the model-facing `triage_promote`
+  tool cannot pass the flag at all.
 - **The guest has no route anywhere.** The QEMU NIC is
   `-netdev user,restrict=on` plus a host→guest WinRM forward; QEMU's own
   documentation states the guest cannot contact the host and no guest packet is
@@ -81,7 +106,7 @@ permissions, and each risky flag. It is read-only and makes no network calls.
 
 ## Airlock without a Windows guest
 
-Full Windows detonation needs qemu plus ~40 GiB, which this class of machine may
+Full Windows detonation needs qemu plus ~30 GiB of image, which this class of machine may
 not have. `triage/airlock.py` is the no-execution alternative:
 
 - static checks over the staged tree: private/executable permission flags, zip
@@ -108,6 +133,16 @@ not have. `triage/airlock.py` is the no-execution alternative:
   the torrent and the reasons, and the scan result carries an `alert` string. The
   verdict survives as a 0600 record under `quarantine/rejected/` containing the
   hash, reasons and file *names* — never the bytes.
+- **Auto-cleanup deletes the download only after a verdict.** `MINUS_TRIAGE_AUTO_CLEANUP`
+  (default on) asks qBittorrent to remove the torrent and the files it downloaded once a
+  promotion has succeeded — a `clean` release, or a manual `--accept-review` whose
+  provenance (operator, UTC time, reason, `detonated: false`) is already written beside
+  the library copy — or a `malicious` verdict has been rejected. It never deletes before
+  a verdict exists, and it keeps the download for `needs_review` and `suspicious`, which
+  are exactly the states a human is meant to inspect and possibly release. A failed
+  qBittorrent call is logged and does not undo the promotion or rejection. This changes
+  only what happens to the duplicate copy; the trust boundary is unchanged — discovery
+  is still a pre-filter and only a verdict can promote.
 - **Boundary, stated plainly:** storing a file is inert; nothing here executes
   Windows binaries (no Wine/VM), so a PE cannot run. `run_isolated` is namespace
   containment, not a VM — kernel bugs remain in scope, and the downloader's own
@@ -163,6 +198,31 @@ JSON-RPC; logs go to stderr and the run log.
 - A verdict is evidence, not a guarantee. `clean` means "detonated and nothing was
   observed", never "safe". Promotion refuses anything else.
 - Never detonate on the host, and never mount the library into the guest.
+- **Keep the guest's one network device restricted.** The runner uses QEMU's
+  `user,restrict=on` NIC with a single host→guest WinRM forward; do not bridge it or add a
+  host share, SMB or 9p mount for convenience. The guest is assumed compromised by the sample
+  it runs, so any route out of it is a route from malware to the network MINUS was careful to
+  keep it off.
+- **Only official Microsoft media builds the guest.** An official Windows 10 Enterprise LTSC
+  (or Enterprise Evaluation) x64 ISO is the input to `minus vm-image`; trimmed builds such as
+  "Tiny11" or "Lean11" are not acceptable whatever their size. They remove Defender, WinRM,
+  PowerShell and often Sysmon — the baseline controls and the only control channel — so a
+  sample that looks inert in one would not have been given a fair chance to act, and the
+  `clean` verdict it produced would be meaningless.
+- **The guest's hardware is chosen to be boring.** SeaBIOS, an IDE disk and an e1000 NIC all
+  have Windows 10 in-box drivers, so the image can be built from official media with no
+  OVMF/UEFI firmware, no emulated TPM and no virtio-win ISO. Fewer third-party drivers in the
+  build path means fewer things that can fail silently before the sample ever runs; speed is
+  not the requirement for a minutes-long detonation, and an optional virtio-win ISO exists
+  only for whoever wants it.
+- **Image and run directories need an ext4 volume.** The base image is a 64 GiB sparse qcow2,
+  ~20–30 GiB of real blocks once Windows is installed. Keep `MINUS_WINDOWS_BASE_IMAGE`,
+  `MINUS_WINDOWS_WORK_DIR` on ext4 (the ~62 GiB root is fine) rather than on an NTFS volume
+  shared with Windows: a hibernated or Fast-Startup NTFS still has Windows' journal open, so
+  letting Linux replay it write-access corrupts the filesystem for both systems. If NTFS is
+  unavoidable, disable Fast Startup and shut Windows down fully first, and treat it as
+  temporary. `MINUS_WINDOWS_MIN_FREE_BYTES` (default 20 GiB) is checked before a run starts;
+  the Windows ISO can be deleted once the base image exists, but the base image cannot.
 
 ## Privacy
 

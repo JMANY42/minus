@@ -62,6 +62,16 @@ def _healthy(_settings):
     return HEALTHY
 
 
+def _statuses(*snapshots):
+    """Return each snapshot in turn, holding the last one after that."""
+    remaining = list(snapshots)
+
+    def next_status(_settings):
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return next_status
+
+
 def test_connect_builds_server_argv_and_returns_the_tunnel(tmp_path, monkeypatch):
     script, log = _script(tmp_path, "sys.exit(0)\n")
     settings = _settings(script, airvpn_server="earth")
@@ -71,7 +81,7 @@ def test_connect_builds_server_argv_and_returns_the_tunnel(tmp_path, monkeypatch
 
     assert snapshot is HEALTHY
     argv = _recorded(log)[0]
-    assert argv[0:2] == ["--air-connect", "--air-user"]
+    assert argv[0:3] == ["--air-connect", "--async", "--air-user"]
     assert "user@example.test" in argv
     assert "--air-password" in argv
     assert argv[argv.index("--air-password") + 1] == "s3cret-pass"
@@ -394,3 +404,98 @@ def test_tool_errors_become_tool_execution_errors(monkeypatch):
 
     with pytest.raises(ToolExecutionError):
         VpnTools(Settings()).vpn_connect()
+
+
+UNHEALTHY = TunnelStatus("", False, False, "no tunnel")
+
+
+def test_autoconnect_with_a_healthy_tunnel_spawns_nothing(tmp_path, monkeypatch):
+    script, log = _script(tmp_path, "sys.exit(0)\n")
+    monkeypatch.setattr(vpn, "tunnel_status", _healthy)
+
+    def boom(*_args):
+        raise AssertionError("autoconnect must not run the client for a healthy tunnel")
+
+    monkeypatch.setattr(vpn, "connect", boom)
+    monkeypatch.setattr(vpn, "bind_downloads", boom)
+
+    result = vpn.autoconnect(_settings(script))
+
+    assert not log.exists()
+    assert result["connected"] is True
+    assert result["interface"] == "tun0"
+    assert result["binding"] is None
+    assert result["detail"] == HEALTHY.detail
+
+
+def test_autoconnect_disabled_reports_without_spawning(tmp_path, monkeypatch):
+    script, log = _script(tmp_path, "sys.exit(0)\n")
+    monkeypatch.setattr(vpn, "tunnel_status", lambda _settings: UNHEALTHY)
+
+    def boom(*_args):
+        raise AssertionError("autoconnect must not run the client when disabled")
+
+    monkeypatch.setattr(vpn, "connect", boom)
+
+    result = vpn.autoconnect(_settings(script, vpn_autoconnect=False))
+
+    assert not log.exists()
+    assert result["connected"] is False
+    assert result["interface"] == ""
+    assert result["binding"] is None
+    assert "disabled" in result["detail"]
+
+
+def test_autoconnect_without_credentials_reports_without_spawning(tmp_path, monkeypatch):
+    script, log = _script(tmp_path, "sys.exit(0)\n")
+    monkeypatch.setattr(vpn, "tunnel_status", lambda _settings: UNHEALTHY)
+
+    def boom(*_args):
+        raise AssertionError("autoconnect must not run the client without credentials")
+
+    monkeypatch.setattr(vpn, "connect", boom)
+
+    result = vpn.autoconnect(_settings(script, airvpn_username="", airvpn_password=""))
+
+    assert not log.exists()
+    assert result["connected"] is False
+    assert result["binding"] is None
+    assert "credentials" in result["detail"]
+
+
+def test_autoconnect_connects_and_binds_an_unhealthy_host(tmp_path, monkeypatch):
+    script, log = _script(tmp_path, "sys.exit(0)\n")
+    # The first status call is autoconnect's preflight; the second is the one
+    # `connect` polls, and it has to report a live tunnel or the connect loop
+    # will time out on a zero-second deadline.
+    monkeypatch.setattr(vpn, "tunnel_status", _statuses(UNHEALTHY, HEALTHY))
+    binding = {"bound": True, "interface": "tun0"}
+    monkeypatch.setattr(vpn, "bind_downloads", lambda _settings, _snapshot: binding)
+
+    result = vpn.autoconnect(_settings(script))
+
+    assert _recorded(log)[0][0] == "--air-connect"
+    assert result == {
+        "connected": True,
+        "interface": "tun0",
+        "binding": binding,
+        "detail": HEALTHY.detail,
+    }
+
+
+def test_autoconnect_propagates_a_connect_failure(monkeypatch):
+    monkeypatch.setattr(vpn, "tunnel_status", lambda _settings: UNHEALTHY)
+
+    def boom(_settings):
+        raise VpnError("AirVPN refused")
+
+    monkeypatch.setattr(vpn, "connect", boom)
+
+    with pytest.raises(VpnError, match="AirVPN refused"):
+        vpn.autoconnect(
+            Settings(
+                vpn_autoconnect=True,
+                airvpn_username="user@example.test",
+                airvpn_password="s3cret-pass",
+            )
+        )

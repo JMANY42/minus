@@ -55,7 +55,8 @@ HELP = """commands:
   /clear                    clear this scrollback (mode transcripts stay)
   /quit                     leave
   /vpn status|connect|disconnect
-  /download <magnet|url>    fetch through qBittorrent, then triage
+  /download <query|magnet|url>
+                            find the best torrent, download, scan, release clean
   /triage <hash>            scan a staged torrent
   /promote <hash> [name]    release a clean torrent into the library
   /doctor                   security posture, in short
@@ -157,10 +158,9 @@ class MinusHarness(App[None]):
         self._thinking_timer: Any | None = None
         self.thoughts_open = False
         self.explorer_visible = False
-        self.explorer_dock = "left"
-        self.explorer_expanded = False
         self.explorer_preview_path: Path | None = None
         self._explorer: ExplorerPane | None = None
+        self._explorer_mounting = False
 
         self._ui_thread: int | None = None
         self._chat_lock = threading.Lock()
@@ -179,31 +179,24 @@ class MinusHarness(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static(id="topbar")
-        with Vertical(id="shell"):
-            with Vertical(id="dock-top", classes="dock dock-v"):
+        with Horizontal(id="body"):
+            with Vertical(id="left"):
+                yield Static("MODES", classes="rail-title")
+                yield OptionList(*MODES, id="mode-list")
+            with Vertical(id="dock-left", classes="dock dock-h"):
                 pass
-            with Horizontal(id="body"):
-                with Vertical(id="left"):
-                    yield Static("MODES", classes="rail-title")
-                    yield OptionList(*MODES, id="mode-list")
-                with Vertical(id="dock-left", classes="dock dock-h"):
-                    pass
-                with Vertical(id="center"):
-                    yield RichLog(id="conversation", wrap=True, markup=False)
-                    # The bar is the collapsed form; clicking it reveals the
-                    # reasoning/tool trace above the input instead of pushing
-                    # the conversation into a separate screen.
-                    yield Static("ready", id="thinking-bar")
-                    yield RichLog(id="thinking-trace", wrap=True, markup=False)
-                with Vertical(id="dock-right", classes="dock dock-h"):
-                    pass
-                with Vertical(id="right"):
-                    yield Static("ACTIVITY", classes="rail-title")
-                    yield RichLog(id="activity", wrap=True, markup=False)
-                    yield Static("ALERTS", classes="rail-title")
-                    yield RichLog(id="alerts", wrap=True, markup=False)
-            with Vertical(id="dock-bottom", classes="dock dock-v"):
-                pass
+            with Vertical(id="center"):
+                yield RichLog(id="conversation", wrap=True, markup=False)
+                # The bar is the collapsed form; clicking it reveals the
+                # reasoning/tool trace above the input instead of pushing
+                # the conversation into a separate screen.
+                yield Static("ready", id="thinking-bar")
+                yield RichLog(id="thinking-trace", wrap=True, markup=False)
+            with Vertical(id="right"):
+                yield Static("ACTIVITY", classes="rail-title")
+                yield RichLog(id="activity", wrap=True, markup=False)
+                yield Static("ALERTS", classes="rail-title")
+                yield RichLog(id="alerts", wrap=True, markup=False)
         with Vertical(id="bottom"):
             yield Input(placeholder="message · /help", id="prompt")
             yield Static(KEY_HINTS, id="hints")
@@ -219,6 +212,7 @@ class MinusHarness(App[None]):
         self._thinking_timer = self.set_interval(0.12, self._tick_thinking)
         if self.assistant is not None:
             self._bind_chat()
+        self._autoconnect_vpn()
 
     def on_unmount(self) -> None:
         if self._deep_watcher is not None:
@@ -462,73 +456,54 @@ class MinusHarness(App[None]):
 
     # ---- File explorer ----
 
-    async def action_toggle_explorer(self) -> None:
-        if self.explorer_visible:
-            host = self.query_one(f"#dock-{self.explorer_dock}", Vertical)
-            host.remove_class("-active")
-            host.remove_class("-expanded")
-            self.explorer_visible = False
-            self._set_status("files hidden", False)
-            return
-        await self._dock_explorer(self.explorer_dock)
+    def action_toggle_explorer(self) -> None:
+        """Show or hide the left dock; a second `ctrl+b` is the close.
 
-    async def _dock_explorer(self, where: str) -> None:
-        if where not in ("left", "right", "top", "bottom"):
-            return
+        Synchronous on purpose. An async toggle leaves a window between the
+        key press and the completed mount in which `explorer_visible` is still
+        false, so a quick second press would try to open again instead of
+        closing. The dock is also never emptied on hide -- only its active
+        class is removed -- so reopening is a class change, not a remount.
+        """
+        if self.explorer_visible:
+            self._hide_explorer()
+        else:
+            self._show_explorer()
+
+    def _show_explorer(self) -> None:
         if self._explorer is None:
             # The DirectoryTree scans on mount, so it is built only when the
             # explorer is first opened; a harness that never opens files pays
             # nothing for the tree.
             self._explorer = ExplorerPane(self.workspace)
         explorer = self._explorer
-        target = self.query_one(f"#dock-{where}", Vertical)
-        for name in ("left", "right", "top", "bottom"):
-            host = self.query_one(f"#dock-{name}", Vertical)
-            host.remove_class("-active")
-            host.remove_class("-expanded")
-        if explorer.parent is not None:
-            try:
-                await explorer.remove()
-            except Exception:  # pragma: no cover - already unmounted
-                logger.debug("Explorer was not mounted while docking", exc_info=True)
-        await target.mount(explorer)
+        target = self.query_one("#dock-left", Vertical)
+        if explorer.parent is None and not self._explorer_mounting:
+            # Not awaited: hiding only removes a CSS class, and the mount is
+            # scheduled before the next paint. `_explorer_mounting` stops a
+            # rapid open/close/open from scheduling the same widget twice.
+            target.mount(explorer)
+            self._explorer_mounting = True
         target.add_class("-active")
-        if self.explorer_expanded:
-            target.add_class("-expanded")
-        self.explorer_dock = where
         self.explorer_visible = True
-        self._set_status(f"files · {where}", False)
+        self._set_status("files · left", False)
 
-    def toggle_explorer_expanded(self) -> None:
-        """Give the preview more room, or restore the tree-first split."""
-        if self._explorer is None or not self.explorer_visible:
-            self._append("sys", "open the file explorer with ctrl+b first")
-            return
-        self.explorer_expanded = not self.explorer_expanded
-        explorer = self._explorer
-        host = self.query_one(f"#dock-{self.explorer_dock}", Vertical)
-        explorer.set_class(self.explorer_expanded, "-expanded")
-        host.set_class(self.explorer_expanded, "-expanded")
-        if self.explorer_dock in ("left", "right"):
-            if self.explorer_expanded:
-                ceiling = max(
-                    24,
-                    self.query_one("#body").size.width
-                    - self.query_one("#left").outer_size.width
-                    - self.query_one("#right").outer_size.width
-                    - 30,
-                )
-                host.styles.width = min(84, ceiling)
-            else:
-                host.styles.width = 54
-        else:
-            if self.explorer_expanded:
-                ceiling = max(10, self.query_one("#shell").size.height - 12)
-                host.styles.height = min(44, ceiling)
-            else:
-                host.styles.height = 24
-        state = "nvim" if self.explorer_expanded else "tree"
-        self._set_status(f"files · {self.explorer_dock} · {state}", False)
+    def _hide_explorer(self) -> None:
+        self.query_one("#dock-left", Vertical).remove_class("-active")
+        self.explorer_visible = False
+        self._set_status("files hidden", False)
+        # Focus can be inside the tree or preview; leaving it there would send
+        # the next keystroke to a hidden widget.
+        if self._focus_is_in_explorer():
+            self.query_one("#prompt", Input).focus()
+
+    def _focus_is_in_explorer(self) -> bool:
+        focus: Any = self.focused
+        while focus is not None:
+            if focus is self._explorer:
+                return True
+            focus = getattr(focus, "parent", None)
+        return False
 
     def preview_file(self, path: Path) -> None:
         path = Path(path)
@@ -554,12 +529,7 @@ class MinusHarness(App[None]):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
-        if button_id.startswith("dock-") and button_id.endswith("-btn"):
-            where = button_id.removeprefix("dock-").removesuffix("-btn")
-            await self._dock_explorer(where)
-        elif button_id == "nvim-btn":
-            self.toggle_explorer_expanded()
-        elif button_id == "diffs-btn" and self._explorer is not None:
+        if button_id == "diffs-btn" and self._explorer is not None:
             self._explorer.show_diff(self.explorer_preview_path)
             self._set_status("diffs · working tree", False)
 
@@ -832,6 +802,17 @@ class MinusHarness(App[None]):
         return pipeline
 
     def _download(self, target: str) -> None:
+        """A magnet/URL is fetched directly; anything else is searched first."""
+        target = " ".join(target.split())
+        if not target:
+            self._append("sys", "download: needs a query, magnet link or .torrent URL")
+            return
+        if target.startswith(("magnet:?", "http://", "https://")):
+            self._ingest_url(target)
+        else:
+            self._download_query(target)
+
+    def _ingest_url(self, target: str) -> None:
         pipeline = self._ensure_pipeline()
         if pipeline is None:
             return
@@ -860,6 +841,110 @@ class MinusHarness(App[None]):
                 self._ui(partial(self._set_status, "download failed", False))
                 return
             self._ui(partial(self._render_stage_result, result))
+
+        self._spawn(work, "download")
+
+    def _download_query(self, query: str) -> None:
+        """Search, rank, then run the winner through the quarantine pipeline."""
+        if not self.settings.discovery_enabled:
+            self._append("sys", "download: discovery is off (MINUS_DISCOVERY_ENABLED=false)")
+            return
+        pipeline = self._ensure_pipeline()
+        if pipeline is None:
+            return
+        ingest = getattr(pipeline, "ingest", None)
+        if not callable(ingest):
+            self._append(
+                "sys",
+                "download unavailable: the pipeline has no URL/magnet ingest in this build",
+            )
+            return
+        self._append("sys", f"search: {_clip(query, 100)}")
+        self._set_status("working · searching", True)
+        self._trace(f"search · {_clip(query, 120)}", style=VALUE)
+
+        def work() -> None:
+            try:
+                from minus.triage.discovery import choose_best, discover
+
+                found = discover(self.settings, query)
+                for line in found.summary_lines(3):
+                    self._ui(partial(self._append, "sys", line))
+                best = choose_best(found, min_score=self.settings.discovery_min_score)
+                if best is None:
+                    self._ui(partial(self._set_status, "search · no pick", False))
+                    self._ui(
+                        partial(
+                            self._append,
+                            "sys",
+                            "search: no candidate cleared the threshold; refine the query",
+                        )
+                    )
+                    return
+                item = best.candidate
+                if not item.download_url:
+                    raise ValueError("the selected candidate has no magnet or .torrent URL")
+                self._ui(partial(self._append, "sys", f"pick: {best.describe()}"))
+                self._ui(partial(self._trace, f"pick · {item.title}", style=OK))
+
+                if self.settings.qbittorrent_url:
+                    from minus.scripts.qbt import ensure_running
+
+                    ensure_running(self.settings)
+                result = ingest(item.download_url, detonate=True)
+                status = str(result.get("status") or "")
+                if status == "clean" and self.settings.discovery_auto_promote:
+                    try:
+                        promoted = pipeline.promote(result["torrent_hash"], name=item.title)
+                    except Exception as exc:
+                        self._ui(partial(self._append, "sys", f"promote failed: {exc}"))
+                    else:
+                        self._ui(
+                            partial(
+                                self._append,
+                                "sys",
+                                f"library: {promoted.get('moved_to')}",
+                            )
+                        )
+                elif status == "clean":
+                    self._ui(
+                        partial(
+                            self._append,
+                            "sys",
+                            "safety: clean; left in quarantine (auto-promote is off)",
+                        )
+                    )
+                elif status in ("needs_review", "suspicious"):
+                    self._ui(
+                        partial(
+                            self._append,
+                            "sys",
+                            f"safety: {status}; left in quarantine",
+                        )
+                    )
+                    torrent_hash = str(result.get("torrent_hash") or "")
+                    if status == "needs_review" and torrent_hash:
+                        self._ui(
+                            partial(
+                                self._append,
+                                "sys",
+                                f"review: minus triage review {torrent_hash}",
+                            )
+                        )
+                        self._ui(
+                            partial(
+                                self._append,
+                                "sys",
+                                f"release: minus triage promote {torrent_hash} "
+                                "--accept-review --yes",
+                            )
+                        )
+                elif status == "malicious":
+                    self._ui(partial(self._append, "sys", "safety: malicious; payload deleted"))
+                self._ui(partial(self._render_stage_result, result))
+            except Exception as exc:
+                self._ui(partial(self._append, "sys", f"download failed: {exc}"))
+                self._ui(partial(self._set_status, "download failed", False))
 
         self._spawn(work, "download")
 
@@ -922,6 +1007,51 @@ class MinusHarness(App[None]):
             shown += 1
 
     # ---- VPN mode ----
+
+    def _autoconnect_vpn(self) -> None:
+        """Bring the default tunnel up in the background when the harness opens.
+
+        A first start should not need `/vpn connect` before a torrent can be
+        fetched, so `vpn_autoconnect` is honoured here rather than only on an
+        explicit command. The work goes to a worker because AirVPN can take
+        seconds; `services.vpn.autoconnect` leaves a live tunnel alone, so a
+        second start cannot spawn a second client. An ordinary `Settings()`
+        with no credentials returns without touching the network, which is
+        what keeps the harness usable on a box with no VPN.
+        """
+        if not self.settings.vpn_autoconnect:
+            return
+        if (self.settings.vpn_provider or "").lower() != "airvpn":
+            return
+        if not (self.settings.airvpn_username and self.settings.airvpn_password):
+            return
+        if self.vpn_healthy:
+            return
+
+        self._set_status("working · vpn autoconnect", True)
+        self._trace("vpn autoconnect", style=VALUE)
+
+        def work() -> None:
+            try:
+                from minus.services import vpn
+
+                result = vpn.autoconnect(self.settings)
+                if result.get("connected"):
+                    summary = f"up on {result.get('interface') or 'the tunnel'}"
+                    binding = result.get("binding")
+                    if isinstance(binding, dict) and not binding.get("bound"):
+                        reason = binding.get("error") or binding.get("reason")
+                        summary += f" (qBittorrent: {reason or 'not bound'})"
+                else:
+                    summary = str(result.get("detail") or "not connected")
+            except Exception as exc:
+                summary = f"failed: {exc}"
+            self._ui(lambda: self._append("sys", f"vpn autoconnect: {summary}"))
+            self._ui(partial(self._set_status, "vpn autoconnect", False))
+            self._ui(partial(self._trace, f"vpn autoconnect · {summary}", style=VALUE))
+            self._ui(self._refresh_vpn_and_header)
+
+        self._spawn(work, "vpn")
 
     def _vpn_command(self, argument: str) -> None:
         action = (argument or "status").strip().lower()
@@ -1055,7 +1185,10 @@ class MinusHarness(App[None]):
             self._vpn_command(argument)
         elif name == "/download":
             if not argument:
-                self._append("sys", "/download needs a magnet link or an http(s) URL")
+                self._append(
+                    "sys",
+                    "/download needs a query, a magnet link or an http(s) .torrent URL",
+                )
             else:
                 self._download(argument)
         elif name == "/triage":
@@ -1076,10 +1209,10 @@ class MinusHarness(App[None]):
         elif name == "/thoughts":
             self.toggle_thoughts()
         elif name == "/files":
-            await self.action_toggle_explorer()
+            self.action_toggle_explorer()
         elif name == "/diffs":
             if not self.explorer_visible:
-                await self.action_toggle_explorer()
+                self.action_toggle_explorer()
             if self._explorer is not None:
                 self._explorer.show_diff(self.explorer_preview_path)
                 self._set_status("diffs · working tree", False)
@@ -1126,6 +1259,10 @@ class MinusHarness(App[None]):
             self._chat_submit(line)
         elif self.mode == "code":
             self._code_submit(line)
+        elif self.mode == "download":
+            # In this mode the line is the thing to fetch; a magnet/URL goes
+            # straight to the pipeline and anything else is searched first.
+            self._download(line)
         else:
             self._append("sys", f"{self.mode} mode takes commands; /help")
 

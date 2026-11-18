@@ -170,6 +170,12 @@ class Settings(BaseSettings):
     # A malicious verdict deletes the staged payload at once; the verdict record
     # (hash, reasons, file names) is kept as evidence, never the bytes.
     triage_delete_malicious: bool = True
+    # After a successful promotion or a malicious rejection, ask qBittorrent to
+    # delete the torrent and the files it downloaded: the bytes are either in
+    # the library or the hazard, and neither needs a second copy. needs_review
+    # keeps the download so a human can look at it. A cleanup failure is logged
+    # and reported, never allowed to turn a release into a failure.
+    triage_auto_cleanup: bool = True
     # add -> wait for completion -> stage -> scan, as one tool call. The wait is
     # bounded: a torrent that never finishes is reported, not retried forever.
     triage_auto_flow: bool = True
@@ -184,6 +190,45 @@ class Settings(BaseSettings):
     # Empty uses the conversational model; naming a cheaper or stronger one is
     # allowed without touching code.
     triage_model_review_model: str = ""
+
+    # ---- Torrent discovery ----
+    # A query in download mode is resolved by cheap meta-search APIs, ranked
+    # locally, and then handed to the same quarantine pipeline as a magnet the
+    # user typed. Ranking is a pre-filter, never a trust boundary: the verdict
+    # rules still decide what leaves quarantine.
+    discovery_enabled: bool = True
+    # Comma-separated names. `prowlarr` is inserted automatically when its URL
+    # and key are set, because that is the only way to cover indexers the
+    # built-in APIs do not expose.
+    discovery_providers: str = "knaben,bitsearch,apibay,nyaa"
+    # Only queried when the primary APIs produce nothing eligible. Kept
+    # separate so a legal archive fallback does not pad every result list.
+    discovery_fallback_providers: str = "internetarchive"
+    # Below this score the harness reports the shortlist instead of downloading
+    # it. The default is calibrated so a seeded 1080p release clears it and a
+    # CAM or an unknown tiny file does not.
+    discovery_min_score: float = 55.0
+    # Results fetched per provider; the harness shows at most a handful.
+    discovery_limit: int = 20
+    discovery_timeout: float = 12.0
+    # Prefer 1080p over 4K: the smaller file is usually the right trade for a
+    # bot that still has to copy it into quarantine and scan it.
+    discovery_preferred_quality: str = "1080p"
+    # Only a verdict of `clean` is ever promoted. With no detonation sandbox a
+    # static-only result is `needs_review`, so this stays a no-op in practice
+    # until one is configured.
+    discovery_auto_promote: bool = True
+    # Optional Prowlarr instance. It carries the user's indexer definitions,
+    # including private trackers, so MINUS does not have to scrape them.
+    prowlarr_url: str = ""
+    prowlarr_api_key: str = Field(default="", repr=False)
+    # Jackett exposes every configured indexer through one Torznab endpoint.
+    # This is the supported route to Cloudflare-fronted sites such as 1337x and
+    # YourBittorrent; MINUS does not maintain HTML scrapers for them.
+    jackett_url: str = ""
+    jackett_api_key: str = Field(default="", repr=False)
+    # Empty means the `all` indexer. A comma list targets specific definitions.
+    jackett_indexers: str = ""
 
     # ---- Windows detonation sandbox ----
     # An immutable qcow2 base image plus a per-run overlay. Everything empty by

@@ -15,12 +15,14 @@ import pytest
 
 pytest.importorskip("textual")
 
+from textual.css.query import NoMatches
 from textual.events import MouseDown, MouseMove, MouseUp
 from textual.widgets import Input, OptionList, RichLog, Static
 
 from minus.config import Settings
 from minus.harness import MODES, MinusHarness, run_harness
 from minus.harness.explorer import ExplorerPane
+from minus.triage.discovery import DiscoveryResult, ScoredCandidate, TorrentCandidate
 
 
 class FakeConversation:
@@ -38,11 +40,50 @@ class FakeConversation:
         return "a grounded answer"
 
 
+class FakePipeline:
+    """Records the ingest/promote calls the download mode makes."""
+
+    def __init__(self, result: dict) -> None:
+        self.result = result
+        self.ingested: list[tuple[str, bool]] = []
+        self.promoted: list[tuple[str, str]] = []
+        self.notify = None
+
+    def ingest(self, url: str, detonate: bool = True) -> dict:
+        self.ingested.append((url, detonate))
+        return dict(self.result)
+
+    def promote(self, torrent_hash: str, name: str = "") -> dict:
+        self.promoted.append((torrent_hash, name))
+        return {"moved_to": f"/tmp/library/{name}"}
+
+
+def download_app(result: dict) -> tuple[MinusHarness, FakePipeline]:
+    conversation = FakeConversation()
+    assistant = SimpleNamespace(conversation=conversation, results=Queue())
+    settings = Settings(
+        vpn_autoconnect=False,
+        airvpn_username="",
+        airvpn_password="",
+        qbittorrent_url="",
+        discovery_enabled=True,
+        discovery_min_score=55.0,
+        discovery_auto_promote=True,
+    )
+    app = MinusHarness(settings, workspace=None, conversation=assistant)
+    pipeline = FakePipeline(result)
+    app._pipeline = pipeline
+    return app, pipeline
+
+
 def make_app(workspace=None) -> tuple[MinusHarness, FakeConversation]:
     conversation = FakeConversation()
     assistant = SimpleNamespace(conversation=conversation, results=Queue())
+    # The harness autoconnects the VPN on mount; keep every ordinary test
+    # offline even though the developer's real `.env` has credentials.
+    settings = Settings(vpn_autoconnect=False, airvpn_username="", airvpn_password="")
     return (
-        MinusHarness(Settings(), workspace=workspace, conversation=assistant),
+        MinusHarness(settings, workspace=workspace, conversation=assistant),
         conversation,
     )
 
@@ -79,6 +120,49 @@ async def test_mounts_with_all_modes_and_switches() -> None:
         assert app.mode == "chat"
 
 
+async def test_mount_autoconnects_the_vpn_in_the_background(monkeypatch) -> None:
+    from minus.services import vpn as vpn_service
+    from minus.services.vpn import TunnelStatus
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        vpn_service,
+        "tunnel_status",
+        lambda _settings: TunnelStatus("tun0", False, False, "tunnel down"),
+    )
+
+    def fake_autoconnect(settings):
+        calls.append(settings)
+        return {
+            "connected": True,
+            "interface": "tun0",
+            "binding": {"bound": True, "interface": "tun0"},
+            "detail": "tunnel up",
+        }
+
+    monkeypatch.setattr(vpn_service, "autoconnect", fake_autoconnect)
+    settings = Settings(
+        vpn_autoconnect=True,
+        vpn_provider="airvpn",
+        airvpn_username="user@example.test",
+        airvpn_password="secret",
+        vpn_interface="tun0",
+    )
+    conversation = FakeConversation()
+    assistant = SimpleNamespace(conversation=conversation, results=Queue())
+    app = MinusHarness(settings, workspace=None, conversation=assistant)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete(
+            [worker for worker in app.workers if worker.group == "vpn"]
+        )
+        await pilot.pause()
+
+        assert calls
+        written = [body for role, body in app.conversation_lines if role == "sys"]
+        assert any("vpn autoconnect: up on tun0" in body for body in written)
+
+
 async def test_help_writes_lines() -> None:
     app, _ = make_app()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -91,6 +175,148 @@ async def test_help_writes_lines() -> None:
         assert "/mode <mode>" in written
         assert "/download" in written
         assert "/vpn status|connect|disconnect" in written
+
+
+def download_candidate() -> TorrentCandidate:
+    return TorrentCandidate(
+        title="The Great Gatsby (2013) 1080p",
+        provider="knaben",
+        tracker="YTS",
+        size_bytes=2_200_000_000,
+        seeders=80,
+        infohash="a" * 40,
+        magnet="magnet:?xt=urn:btih:" + "a" * 40,
+        verified=True,
+        sources=("knaben", "bitsearch"),
+    )
+
+
+def discovery_result(score: float = 90.0) -> DiscoveryResult:
+    scored = ScoredCandidate(download_candidate(), score, ("test",))
+    return DiscoveryResult("the great gatsby", "movie", (scored,))
+
+
+CLEAN_RESULT = {
+    "status": "clean",
+    "torrent_hash": "a" * 40,
+    "name": "The Great Gatsby (2013) 1080p",
+    "verdict": {"label": "clean"},
+    "files": 1,
+    "alert": None,
+    "error": None,
+}
+
+
+async def test_download_mode_query_searches_ingests_and_promotes_clean(monkeypatch) -> None:
+    found = discovery_result()
+    monkeypatch.setattr("minus.triage.discovery.discover", lambda _settings, _query: found)
+    app, pipeline = download_app(CLEAN_RESULT)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.select_mode("download")
+        await pilot.pause()
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "the great gatsby"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete(
+            [worker for worker in app.workers if worker.group == "download"]
+        )
+        await pilot.pause()
+
+        assert pipeline.ingested == [(download_candidate().magnet, True)]
+        assert pipeline.promoted == [("a" * 40, download_candidate().title)]
+        written = "\n".join(body for role, body in app.conversation_lines if role == "sys")
+        assert "pick:" in written
+        assert "library: /tmp/library/The Great Gatsby (2013) 1080p" in written
+
+
+async def test_download_mode_leaves_needs_review_in_quarantine(monkeypatch) -> None:
+    found = discovery_result()
+    monkeypatch.setattr("minus.triage.discovery.discover", lambda _settings, _query: found)
+    app, pipeline = download_app(
+        {
+            "status": "needs_review",
+            "torrent_hash": "a" * 40,
+            "name": "The Great Gatsby (2013) 1080p",
+            "verdict": {"label": "needs_review", "reasons": ["no detonation"]},
+            "files": 1,
+            "alert": None,
+            "error": None,
+        }
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.select_mode("download")
+        await pilot.pause()
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "the great gatsby"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete(
+            [worker for worker in app.workers if worker.group == "download"]
+        )
+        await pilot.pause()
+
+        assert pipeline.ingested
+        assert pipeline.promoted == []
+        written = "\n".join(body for role, body in app.conversation_lines if role == "sys")
+        assert "safety: needs_review; left in quarantine" in written
+        assert "review: minus triage review" in written
+        assert "release: minus triage promote" in written
+        assert "--accept-review --yes" in written
+
+
+async def test_download_mode_reports_a_shortlist_without_downloading(monkeypatch) -> None:
+    found = discovery_result(score=20.0)
+    monkeypatch.setattr("minus.triage.discovery.discover", lambda _settings, _query: found)
+    app, pipeline = download_app(CLEAN_RESULT)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.select_mode("download")
+        await pilot.pause()
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "the great gatsby"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete(
+            [worker for worker in app.workers if worker.group == "download"]
+        )
+        await pilot.pause()
+
+        assert pipeline.ingested == []
+        written = "\n".join(body for role, body in app.conversation_lines if role == "sys")
+        assert "no candidate cleared the threshold" in written
+
+
+async def test_download_mode_magnet_bypasses_search(monkeypatch) -> None:
+    def explode(_settings, _query):
+        raise AssertionError("a magnet must not be searched")
+
+    monkeypatch.setattr("minus.triage.discovery.discover", explode)
+    app, pipeline = download_app(
+        {
+            "status": "needs_review",
+            "torrent_hash": "a" * 40,
+            "name": "Magnet",
+            "verdict": {"label": "needs_review"},
+            "files": 1,
+            "alert": None,
+            "error": None,
+        }
+    )
+    magnet = "magnet:?xt=urn:btih:" + "a" * 40
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.select_mode("download")
+        await pilot.pause()
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = magnet
+        await pilot.press("enter")
+        await app.workers.wait_for_complete(
+            [worker for worker in app.workers if worker.group == "download"]
+        )
+        await pilot.pause()
+
+        assert pipeline.ingested == [(magnet, True)]
+        assert pipeline.promoted == []
 
 
 async def test_chat_turn_runs_on_a_worker_and_shows_the_reply() -> None:
@@ -156,7 +382,7 @@ async def test_thinking_bar_expands_to_reasoning_and_tool_trace() -> None:
         assert not trace.has_class("-open")
 
 
-async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -> None:
+async def test_ctrl_b_opens_a_left_docked_explorer(tmp_path) -> None:
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "mod.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
     app, _ = make_app(tmp_path)
@@ -167,21 +393,15 @@ async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -
         explorer = app.query_one("#explorer", ExplorerPane)
         assert explorer.parent.id == "dock-left"
         assert app.query_one("#dock-left").has_class("-active")
-
-        for button, dock in (
-            ("#dock-right-btn", "dock-right"),
-            ("#dock-top-btn", "dock-top"),
-            ("#dock-bottom-btn", "dock-bottom"),
-            ("#dock-left-btn", "dock-left"),
+        for absent in (
+            "#dock-right",
+            "#dock-top",
+            "#dock-bottom",
+            "#nvim-btn",
+            "#dock-left-btn",
         ):
-            await pilot.click(button)
-            await pilot.pause()
-            assert explorer.parent.id == dock
-            assert app.query_one(f"#{dock}").has_class("-active")
-            if dock in ("dock-top", "dock-bottom"):
-                # A top/bottom dock spans the shell, and the code view spans
-                # the dock rather than inheriting a side-pane width.
-                assert explorer.size.width == app.query_one(f"#{dock}").size.width
+            with pytest.raises(NoMatches):
+                app.query_one(absent)
 
         app.preview_file(tmp_path / "pkg" / "mod.py")
         await pilot.pause()
@@ -191,13 +411,25 @@ async def test_ctrl_b_opens_the_explorer_and_docks_on_all_four_sides(tmp_path) -
         assert preview.size.width > tree_pane.size.width
         assert preview.size.height == app.query_one("#explorer-main").size.height
 
-        await pilot.click("#nvim-btn")
+        app.query_one("#file-tree").focus()
         await pilot.pause()
-        assert explorer.has_class("-expanded")
-        assert app.query_one("#dock-left").has_class("-expanded")
-
         await pilot.press("ctrl+b")
         await pilot.pause()
+        assert not app.query_one("#dock-left").has_class("-active")
+        # A hidden pane must not keep the keyboard.
+        assert app.focused is app.query_one("#prompt")
+
+
+async def test_second_ctrl_b_closes_without_waiting_for_the_mount(tmp_path) -> None:
+    app, _ = make_app(tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("ctrl+b")
+        # No pause between: the toggle state must be settled synchronously, so
+        # the second press closes rather than trying to open a second time.
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.2)
+
+        assert not app.explorer_visible
         assert not app.query_one("#dock-left").has_class("-active")
 
 
@@ -232,69 +464,6 @@ async def test_dragging_the_dock_edge_resizes_and_leaves_chat_room(tmp_path) -> 
 
         assert app.query_one("#center").size.width >= 25
         assert dock.size.width <= app.query_one("#body").size.width - 80
-
-
-async def test_dragging_a_top_dock_leaves_the_body_readable(tmp_path) -> None:
-    app, _ = make_app(tmp_path)
-    async with app.run_test(size=(140, 45)) as pilot:
-        await pilot.press("ctrl+b")
-        await pilot.pause(0.1)
-        await pilot.click("#dock-top-btn")
-        await pilot.pause()
-        explorer = app.query_one("#explorer", ExplorerPane)
-        dock = app.query_one("#dock-top")
-        x = explorer.region.x + 2
-        edge = explorer.region.bottom - 1
-        explorer.on_mouse_down(
-            MouseDown(
-                explorer,
-                x,
-                edge,
-                0,
-                0,
-                1,
-                False,
-                False,
-                False,
-                screen_x=x,
-                screen_y=edge,
-            )
-        )
-        explorer.on_mouse_move(
-            MouseMove(
-                explorer,
-                x,
-                edge,
-                0,
-                0,
-                1,
-                False,
-                False,
-                False,
-                screen_x=x,
-                screen_y=edge + 500,
-            )
-        )
-        await pilot.pause()
-        explorer.on_mouse_up(
-            MouseUp(
-                explorer,
-                x,
-                edge,
-                0,
-                0,
-                1,
-                False,
-                False,
-                False,
-                screen_x=x,
-                screen_y=edge + 500,
-            )
-        )
-        await pilot.pause()
-
-        assert app.query_one("#body").size.height >= 12
-        assert dock.size.height <= app.query_one("#shell").size.height - 12
 
 
 async def test_dragging_the_preview_divider_gives_code_more_space(tmp_path) -> None:

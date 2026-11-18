@@ -5,9 +5,9 @@ Three pieces, deliberately kept out of `app.py`:
   * `ProjectTree` hides the directories a developer never wants to click
     (.git, .venv, caches, the Rust target dir) while still letting the tree
     lazy-load everything else.
-  * `ExplorerPane` is the dockable widget: four placement buttons, the tree,
-    and a syntax-highlighted preview. Its host lives in `app.py`, which moves
-    the pane between four dock containers.
+  * `ExplorerPane` is the left-docked widget: a diffs button, the tree, and a
+    syntax-highlighted preview. Its host lives in `app.py`, which mounts it in
+    the left dock container and hides it again.
   * `FilePreview` is a RichLog rather than a TextArea: this view is read-only,
     and Rich's `Syntax` gives line numbers and keyword colouring for the
     languages a developer actually opens without adding an LSP.
@@ -125,23 +125,18 @@ class FilePreview(RichLog):
 
 
 class ExplorerPane(Vertical):
-    """A file tree with a preview, movable between four docks."""
+    """A file tree with a preview, always docked on the left."""
 
     def __init__(self, root: Path) -> None:
         super().__init__(id="explorer")
         self.root = Path(root)
         self._has_file = False
-        # ("dock", x, y, start_size, dock_id) or
-        # ("split", y, start_tree_height, explorer_height)
+        # ("dock", x, y, start_size) for the left edge, or
+        # ("split", x, y, start_tree_width) for the tree/preview divider.
         self._drag: tuple | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="explorer-toolbar"):
-            yield Button("left", id="dock-left-btn", classes="dockbtn")
-            yield Button("right", id="dock-right-btn", classes="dockbtn")
-            yield Button("top", id="dock-top-btn", classes="dockbtn")
-            yield Button("bottom", id="dock-bottom-btn", classes="dockbtn")
-            yield Button("nvim", id="nvim-btn", classes="dockbtn nvimbtn")
             yield Button("diffs", id="diffs-btn", classes="dockbtn")
         with Horizontal(id="explorer-main"):
             with Vertical(id="explorer-tree-pane"):
@@ -202,10 +197,10 @@ class ExplorerPane(Vertical):
 
     # ---- Mouse resizing ----
     #
-    # The dock's inner edge is a two-cell grab zone, and the divider between
-    # the tree and the code view is a two-row grab zone. Textual's mouse
-    # capture keeps the move events coming even when the pointer leaves the
-    # edge, so the drag stays attached to the pane it started on.
+    # The left dock's right edge is a two-cell grab zone, and the divider
+    # between the tree and the code view is a two-cell grab zone. Textual's
+    # mouse capture keeps the move events coming even when the pointer leaves
+    # the edge, so the drag stays attached to the pane it started on.
 
     @property
     def _host(self) -> Widget | None:
@@ -213,19 +208,11 @@ class ExplorerPane(Vertical):
         return parent if isinstance(parent, Widget) else None
 
     def _dock_edge(self, x: float, y: float) -> str:
-        host = self._host
-        if host is None:
+        if self._host is None:
             return ""
-        dock = host.id or ""
         region = self.region
-        if dock in ("dock-left", "dock-right"):
-            edge = region.right - 1 if dock == "dock-left" else region.x
-            if region.y <= y < region.bottom and abs(x - edge) <= 1:
-                return "dock"
-        elif dock in ("dock-top", "dock-bottom"):
-            edge = region.bottom - 1 if dock == "dock-top" else region.y
-            if region.x <= x < region.right and abs(y - edge) <= 1:
-                return "dock"
+        if region.y <= y < region.bottom and abs(x - (region.right - 1)) <= 1:
+            return "dock"
         return ""
 
     def _split_edge(self, x: float, y: float) -> str:
@@ -246,9 +233,7 @@ class ExplorerPane(Vertical):
             host = self._host
             if host is None:
                 return
-            dock = host.id or ""
-            size = host.size.width if dock in ("dock-left", "dock-right") else host.size.height
-            self._drag = ("dock", x, y, size, dock)
+            self._drag = ("dock", x, y, host.size.width)
             self.capture_mouse()
             event.stop()
             return
@@ -261,24 +246,12 @@ class ExplorerPane(Vertical):
     def on_mouse_move(self, event: events.MouseMove) -> None:
         if self._drag is None:
             return
-        kind, start_x, start_y, start_size, *rest = self._drag
+        kind, start_x, _start_y, start_size = self._drag
         if kind == "dock":
-            dock = rest[0]
-            if dock == "dock-left":
-                delta = event.screen_x - start_x
-            elif dock == "dock-right":
-                delta = start_x - event.screen_x
-            elif dock == "dock-top":
-                delta = event.screen_y - start_y
-            else:
-                delta = start_y - event.screen_y
-            new_size = self._clamp_dock(dock, start_size + delta)
+            new_size = self._clamp_dock(start_size + (event.screen_x - start_x))
             host = self._host
             if host is not None:
-                if dock in ("dock-left", "dock-right"):
-                    host.styles.width = new_size
-                else:
-                    host.styles.height = new_size
+                host.styles.width = new_size
         else:
             pane = self.query_one("#explorer-tree-pane")
             # Drag left to widen the code view, right to widen the tree.
@@ -294,14 +267,9 @@ class ExplorerPane(Vertical):
         self.release_mouse()
         event.stop()
 
-    def _clamp_dock(self, dock: str, value: float) -> int:
+    def _clamp_dock(self, value: float) -> int:
         body = self.screen.query_one("#body")
-        if dock in ("dock-left", "dock-right"):
-            left = self.screen.query_one("#left").outer_size.width
-            right = self.screen.query_one("#right").outer_size.width
-            ceiling = max(24, body.size.width - left - right - CHAT_MIN_COLUMNS)
-            return int(max(24, min(ceiling, value)))
-        shell = self.screen.query_one("#shell")
-        # Leave a readable body beneath/above a top/bottom dock.
-        ceiling = max(10, shell.size.height - 12)
-        return int(max(8, min(ceiling, value)))
+        left = self.screen.query_one("#left").outer_size.width
+        right = self.screen.query_one("#right").outer_size.width
+        ceiling = max(24, body.size.width - left - right - CHAT_MIN_COLUMNS)
+        return int(max(24, min(ceiling, value)))

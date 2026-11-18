@@ -210,6 +210,7 @@ def build_triage_pipeline(settings: Settings):
         qbittorrent_vpn_interface=settings.qbittorrent_vpn_interface,
         require_vpn=settings.require_vpn_for_triage,
         delete_malicious=settings.triage_delete_malicious,
+        auto_cleanup=settings.triage_auto_cleanup,
         reviewer=reviewer,
         download_timeout=settings.triage_download_timeout,
         poll_seconds=settings.triage_poll_seconds,

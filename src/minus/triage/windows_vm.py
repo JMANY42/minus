@@ -42,10 +42,10 @@ from minus.triage.sandbox import SandboxReport
 
 logger = logging.getLogger(__name__)
 
-# 8 KiB decoded per WinRM call: large enough that a 64 MiB artifact is ~8k
-# round trips, small enough that the base64 script stays well inside the
-# default 500 KiB WS-Management envelope.
-CHUNK_BYTES = 8192
+# 2 KiB decoded per WinRM call. The base64 text is embedded in a PowerShell
+# command line, and Windows caps that at ~8 KiB; 8 KiB decoded produced ~11 KiB
+# of base64 and failed with "The command line is too long."
+CHUNK_BYTES = 2048
 
 GUEST_ROOT = "C:\\triage"
 
@@ -128,13 +128,17 @@ class WindowsVmRunner:
     # ---- Command ----
 
     def build_command(self, overlay: Path, port: int, run_dir: Path) -> list[str]:
-        """The exact qemu argv. Kept separate so a test can assert it."""
+        """The exact qemu argv. Kept separate so a test can assert it.
+
+        SeaBIOS boots the IDE-installed base image, and the e1000 NIC is the
+        one Windows installed its driver for; neither needs OVMF or virtio.
+        """
         qemu = self._resolved(self.qemu) or self.qemu
         return [
             str(qemu),
             "-enable-kvm",
             "-machine",
-            "q35",
+            "pc",
             "-cpu",
             "host",
             "-smp",
@@ -142,11 +146,11 @@ class WindowsVmRunner:
             "-m",
             str(self.memory_mb),
             "-drive",
-            f"file={overlay},if=virtio,format=qcow2",
+            f"file={overlay},if=ide,format=qcow2",
             "-netdev",
             f"user,id=n0,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:5985",
             "-device",
-            "virtio-net-pci,netdev=n0",
+            "e1000,netdev=n0",
             "-display",
             "none",
             "-no-reboot",
@@ -223,15 +227,24 @@ class WindowsVmRunner:
 
     # ---- WinRM ----
 
-    def _session(self, port: int) -> Any:
+    def _session(self, port: int, *, probe: bool = False) -> Any:
         if self.winrm_factory is not None:
             return self.winrm_factory(port)
         import winrm  # imported lazily: the extra is optional
 
+        # pywinrm defaults to 20s per operation. The guest harness runs a
+        # Defender scan and waits for launched artifacts, so a short timeout
+        # closes the shell mid-run and looks like the guest died. During boot,
+        # however, QEMU's hostfwd accepts the TCP connect before Windows
+        # answers; a long read timeout would block the first probe for minutes.
+        operation_timeout = 5.0 if probe else max(60.0, self.guest_timeout + 60.0)
         return winrm.Session(
             WINRM_URL.format(port=port),
             auth=(self.username, self.password),
             transport="ntlm",
+            # pywinrm requires read_timeout_sec > operation_timeout_sec.
+            read_timeout_sec=operation_timeout + (5.0 if probe else 30.0),
+            operation_timeout_sec=operation_timeout,
         )
 
     def _wait_for_winrm(self, port: int) -> Any:
@@ -239,10 +252,12 @@ class WindowsVmRunner:
         last_error = "no attempt made"
         while time.monotonic() < deadline:
             try:
-                session = self._session(port)
+                session = self._session(port, probe=True)
                 result = session.run_ps("$PSVersionTable.PSVersion.Major")
                 if getattr(result, "status_code", 1) == 0:
-                    return session
+                    # The probe must fail fast while boot is in progress; the
+                    # harness itself needs the long operation timeout.
+                    return self._session(port)
                 last_error = getattr(result, "std_err", "unknown WinRM error")
             except Exception as exc:  # connection refused while Windows boots
                 last_error = str(exc)
@@ -306,8 +321,12 @@ class WindowsVmRunner:
         self._write_remote(session, f"{GUEST_ROOT}\\guest_harness.ps1", source.encode("utf-8"))
 
     def _run_harness(self, session: Any, timeout: float) -> None:
+        # The default policy on a fresh guest blocks an unsigned script file.
+        # Scope it to this process; changing the machine policy would be a
+        # lasting security downgrade for the base image.
         self._ps(
             session,
+            "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; "
             f"& {GUEST_ROOT}\\guest_harness.ps1 -TimeoutSeconds {max(1, int(timeout))}",
         )
 

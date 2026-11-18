@@ -106,7 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
         "vm-image", help="Build the Windows sandbox base image (needs qemu and ISOs)"
     )
     vm_image.add_argument("--iso", required=True, help="Windows x64 installation ISO")
-    vm_image.add_argument("--virtio-iso", required=True, help="virtio-win driver ISO")
+    vm_image.add_argument(
+        "--virtio-iso",
+        default=None,
+        help="virtio-win driver ISO (optional: the BIOS/IDE guest needs no drivers)",
+    )
     vm_image.add_argument(
         "--work-dir", required=True, help="Where base.qcow2 goes (needs >= 40 GiB free)"
     )
@@ -134,17 +138,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Provision (start + preferences) or print status",
     )
 
-    triage = subcommands.add_parser("triage", help="Ingest, scan, verdict or promote a torrent")
+    triage = subcommands.add_parser(
+        "triage", help="Ingest, scan, review, verdict or promote a torrent"
+    )
     triage.add_argument(
         "action",
         nargs="?",
-        choices=("ingest", "download", "scan", "verdict", "promote"),
+        choices=("ingest", "download", "scan", "verdict", "review", "promote"),
         default="ingest",
         help="Stage of the pipeline (default: ingest)",
     )
     triage.add_argument("target", nargs="?", help="Magnet/http URL to ingest, or info hash")
     triage.add_argument("--name", default="", help="Library name for promote")
     triage.add_argument("--no-detonate", action="store_true", help="Skip the sandbox stage")
+    triage.add_argument(
+        "--accept-review",
+        action="store_true",
+        help="With promote: release a needs_review item after explicit confirmation",
+    )
+    triage.add_argument(
+        "--yes",
+        action="store_true",
+        help="With --accept-review: skip the interactive hash confirmation",
+    )
+    triage.add_argument("--reason", default="", help="Recorded with a manual acceptance")
 
     harness = subcommands.add_parser("harness", help="Open the interactive MINUS harness")
     harness.add_argument(
@@ -490,6 +507,9 @@ def run_triage_command(args) -> int:
     if not args.target:
         print("triage needs a magnet/http URL (ingest) or an info hash.")
         return 1
+    if args.accept_review and args.action != "promote":
+        print("--accept-review is only valid with `triage promote`.")
+        return 1
 
     try:
         if args.action == "ingest":
@@ -505,6 +525,37 @@ def run_triage_command(args) -> int:
             result = pipeline.scan(args.target, detonate=not args.no_detonate)
         elif args.action == "verdict":
             result = pipeline.verdict(args.target)
+        elif args.action == "review":
+            result = pipeline.review(args.target)
+        elif args.accept_review:
+            # The hash confirmation is deliberately separate from --yes: a
+            # terminal operator has to acknowledge which item is being released,
+            # and a non-terminal caller has to say so explicitly.
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    print("--yes is required with --accept-review when stdin is not a terminal.")
+                    return 1
+                expected = args.target[:8]
+                try:
+                    answer = input(
+                        f"Type {expected} to accept the risk and move "
+                        f"{args.target} into the library: "
+                    )
+                except EOFError:
+                    print("not accepted")
+                    return 1
+                if answer.strip().lower() != expected.lower():
+                    print("not accepted")
+                    return 1
+            import getpass
+
+            result = pipeline.promote(
+                args.target,
+                name=args.name,
+                accept_review=True,
+                accepted_by=getpass.getuser(),
+                reason=args.reason,
+            )
         else:
             result = pipeline.promote(args.target, name=args.name)
     except Exception as exc:  # pipeline errors are MinusError subclasses
@@ -627,7 +678,7 @@ def run_vm_image(args) -> int:
         base = build_base_image(
             settings,
             iso=Path(args.iso).expanduser(),
-            virtio_iso=Path(args.virtio_iso).expanduser(),
+            virtio_iso=Path(args.virtio_iso).expanduser() if args.virtio_iso else None,
             work_dir=Path(args.work_dir).expanduser(),
             sysmon_zip=Path(args.sysmon_zip).expanduser() if args.sysmon_zip else None,
         )

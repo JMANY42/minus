@@ -17,6 +17,9 @@ __pycache__/
 /quarantine/
 /library/
 
+# Sandbox base image and per-run overlays. Large, machine-specific, never tracked.
+/vm/
+
 # Rust build artifacts. The core is source; target/ is machine-specific and
 # multi-gigabyte, so it must never be staged.
 /rust/minus-core/target/

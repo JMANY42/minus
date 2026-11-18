@@ -5,9 +5,11 @@ here, every detonation uses a throwaway overlay on top of it, and a failed build
 deletes the partial image so it cannot be mistaken for a usable one.
 
 Requirements this cannot verify or install: qemu (`qemu-full`), a Windows x64
-ISO, a virtio-win ISO, and a work directory with room for a 64 GiB sparse image.
-The unattended file is written with the WinRM password substituted and is not
-logged.
+ISO, and a work directory with room for a 64 GiB sparse image. The guest
+installs under SeaBIOS with an IDE disk and the e1000 NIC, both of which
+Windows Setup already knows, so a virtio-win ISO is optional and only attached
+when a caller supplies one. The unattended file is written with the WinRM
+password substituted and is not logged.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -86,6 +89,13 @@ def _free_port() -> int:
         return probe.getsockname()[1]
 
 
+def _text(value: object) -> str:
+    """Pywinrm reports stdout as bytes; metadata and logs want text."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace").strip()
+    return str(value or "").strip()
+
+
 def _qemu_version(qemu: Path) -> str:
     try:
         completed = subprocess.run(
@@ -97,14 +107,24 @@ def _qemu_version(qemu: Path) -> str:
 
 
 def install_qemu(
-    qemu: Path, base: Path, iso: Path, virtio_iso: Path, floppy: Path, port: int
+    qemu: Path,
+    base: Path,
+    iso: Path,
+    floppy: Path,
+    port: int,
+    virtio_iso: Path | None = None,
 ) -> list[str]:
-    """The installer's argv. Separate so the test can assert it."""
-    return [
+    """The installer's argv. Separate so the test can assert it.
+
+    SeaBIOS with an IDE disk and the e1000 NIC: Windows Setup carries drivers
+    for both, so the install needs neither OVMF nor a virtio-win ISO. The
+    virtio ISO is attached only when a caller supplies one.
+    """
+    command = [
         str(qemu),
         "-enable-kvm",
         "-machine",
-        "q35",
+        "pc",
         "-cpu",
         "host",
         "-smp",
@@ -112,36 +132,68 @@ def install_qemu(
         "-m",
         "4096",
         "-drive",
-        f"file={base},if=virtio,format=qcow2",
+        f"file={base},if=ide,format=qcow2",
         "-drive",
         f"file={iso},media=cdrom,readonly=on",
-        "-drive",
-        f"file={virtio_iso},media=cdrom,readonly=on",
+    ]
+    if virtio_iso is not None:
+        command += ["-drive", f"file={virtio_iso},media=cdrom,readonly=on"]
+    command += [
         "-drive",
         f"file={floppy},if=floppy",
         "-netdev",
         f"user,id=n0,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:5985",
         "-device",
-        "virtio-net-pci,netdev=n0",
+        "e1000,netdev=n0",
         "-display",
         "none",
-        "-no-reboot",
+        "-serial",
+        f"file:{base.parent / 'install-console.log'}",
+        # Windows bootmgr prints "Press any key to boot from CD" when it sees
+        # an attached disk. With -display none nobody can press it, so the
+        # build sends Enter through this monitor socket.
+        "-monitor",
+        f"unix:{base.parent / 'monitor.sock'},server,nowait",
+        # Setup reboots into the installed disk; -no-reboot would kill QEMU
+        # before WinRM ever came up. Boot the CD once, then the disk.
+        "-boot",
+        "once=d",
     ]
+    return command
+
+
+def _press_boot_key(monitor: Path, *, seconds: float = 12.0) -> None:
+    """Send Enter to the QEMU monitor while bootmgr's CD prompt is open.
+
+    The prompt is only a few seconds; repeated keys are harmless once Windows
+    Setup owns the screen. A missing monitor is not fatal: the build will time
+    out with a useful WinRM error rather than fail here.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(1.0)
+                client.connect(str(monitor))
+                client.sendall(b"sendkey ret\n")
+        except OSError:
+            pass
+        time.sleep(0.75)
 
 
 def build_base_image(
     settings,
     *,
     iso: Path,
-    virtio_iso: Path,
     work_dir: Path,
+    virtio_iso: Path | None = None,
     sysmon_zip: Path | None = None,
 ) -> Path:
     """Create `work_dir/base.qcow2` and return it."""
     require_tools()
     if not iso.is_file():
         raise WindowsVmError(f"Windows ISO not found: {iso}")
-    if not virtio_iso.is_file():
+    if virtio_iso is not None and not virtio_iso.is_file():
         raise WindowsVmError(f"virtio-win ISO not found: {virtio_iso}")
     if sysmon_zip is not None and not sysmon_zip.is_file():
         raise WindowsVmError(f"Sysmon zip not found: {sysmon_zip}")
@@ -182,11 +234,14 @@ def build_base_image(
         raise WindowsVmError(f"qemu-img create failed: {created.stderr.strip()}")
 
     port = _free_port()
+    monitor = base.parent / "monitor.sock"
+    monitor.unlink(missing_ok=True)
     process = subprocess.Popen(
-        install_qemu(qemu, base, iso, virtio_iso, floppy, port),
+        install_qemu(qemu, base, iso, floppy, port, virtio_iso=virtio_iso),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    _press_boot_key(monitor)
     runner = WindowsVmRunner(
         qemu=qemu,
         qemu_img=qemu_img,
@@ -211,7 +266,7 @@ def build_base_image(
                 "& 'C:\\triage\\sysmon\\Sysmon64.exe' -accepteula -i | Out-Null",
             )
         version = (
-            runner._ps(session, "(Get-CimInstance Win32_OperatingSystem).Caption").std_out.strip()
+            _text(runner._ps(session, "(Get-CimInstance Win32_OperatingSystem).Caption").std_out)
             or "unknown"
         )
         runner._ps(session, "Stop-Computer -Force")
@@ -221,6 +276,7 @@ def build_base_image(
         raise WindowsVmError(f"base image build failed: {exc}") from exc
     finally:
         autounattend.unlink(missing_ok=True)
+        monitor.unlink(missing_ok=True)
         if process.poll() is None:
             try:
                 process.terminate()

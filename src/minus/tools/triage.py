@@ -69,8 +69,9 @@ class TriageTools:
     ) -> dict:
         """Find torrents already in qBittorrent whose name matches a query.
 
-        Only searches the download client's own list; MINUS does not look for
-        content on index sites.
+        Only searches the download client's own list. Finding a new torrent is
+        the harness download mode's discovery path; this tool never queries an
+        index site.
 
         Args:
             query: Case-insensitive substring of the torrent name; empty lists all.

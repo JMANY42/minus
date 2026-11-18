@@ -32,9 +32,10 @@ from minus.errors import MinusError
 from minus.services.json import read_json, write_json
 from minus.triage.airlock import inspect_tree
 from minus.triage.library import promote_to_library
+from minus.triage.media import clean_review_blockers, manual_review_blockers, probe_media
 from minus.triage.review import ModelReviewer
 from minus.triage.sandbox import DryRunRunner, SandboxReport, SandboxRunner
-from minus.triage.scoring import CLEAN, MALICIOUS, decide
+from minus.triage.scoring import CLEAN, MALICIOUS, NEEDS_REVIEW, decide
 from minus.triage.static import HEAD_HASH_BYTES, analyse, sha256_file
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,11 @@ class TriagePipeline:
     qbittorrent_vpn_interface: str = ""
     require_vpn: bool = True
     delete_malicious: bool = True
+    # Once content is released or a malicious payload rejected, the copy
+    # qBittorrent downloaded is redundant; asking it to remove the torrent (and
+    # its bytes) keeps the download directory from growing a second library.
+    # A cleanup failure is reported in the result, never raised.
+    auto_cleanup: bool = True
     # The harness attaches an observer here to render live progress and the
     # malicious-payload alert; the pipeline itself writes state to disk and
     # must work with no listener at all.
@@ -139,6 +145,28 @@ class TriagePipeline:
             self.notify(kind, payload)
         except Exception:
             logger.debug("triage observer failed for %s", kind, exc_info=True)
+
+    # ---- qBittorrent cleanup ----
+
+    def _cleanup_download(self, torrent_hash: str) -> dict:
+        """Ask qBittorrent to drop a torrent and the bytes it downloaded.
+
+        Housekeeping happens after the decision, never as part of it: the
+        content is already in the library or already rejected, so a client
+        failure is reported in the result rather than raised at the caller.
+        `needs_review` is deliberately not cleaned up -- those bytes are what
+        a human is being asked to look at.
+        """
+        if not self.auto_cleanup:
+            return {"skipped": True, "reason": "auto cleanup is disabled"}
+        if self.client is None:
+            return {"skipped": True, "reason": "qBittorrent is not configured"}
+        try:
+            self.client.delete_torrent(torrent_hash.lower(), delete_files=True)
+        except Exception as exc:
+            logger.warning("Could not remove torrent %s from qBittorrent: %s", torrent_hash, exc)
+            return {"deleted": False, "error": str(exc)}
+        return {"deleted": True}
 
     # ---- Paths ----
 
@@ -435,6 +463,7 @@ class TriagePipeline:
             "rejected_record": str(record_path),
             "alert": _malicious_alert(torrent_hash, payload.get("name")),
         }
+        result["cleanup"] = self._cleanup_download(torrent_hash)
         self._notify("malicious_deleted", {"torrent_hash": torrent_hash.lower(), **result})
         return result
 
@@ -448,20 +477,98 @@ class TriagePipeline:
 
     # ---- Stage 4: release ----
 
-    def promote(self, torrent_hash: str, *, name: str = "") -> dict:
+    def review(self, torrent_hash: str) -> dict:
+        """Facts for a human deciding whether to accept a `needs_review` item.
+
+        Static results and a bounded, sandboxed ffprobe pass over media files.
+        No promotion happens here; `promote(..., accept_review=True)` is the
+        separate, explicit act.
+        """
+        payload = self.verdict(torrent_hash)
+        static = payload.get("static") or {}
+        airlock = payload.get("airlock") or {}
+        label = (payload.get("verdict") or {}).get("label")
+        sandbox = payload.get("sandbox") or {}
+        blockers = manual_review_blockers(payload)
+        accept = label == NEEDS_REVIEW and not blockers
+        return {
+            "torrent_hash": torrent_hash.lower(),
+            "name": payload.get("name"),
+            "verdict": payload.get("verdict"),
+            "detonated": bool(sandbox.get("detonated")),
+            "static_flags": static.get("flags", []),
+            "files": (static.get("files") or [])[:200],
+            "engines": airlock.get("engines", []),
+            "media_probe": probe_media(self.files_root(torrent_hash)),
+            "promotion": {
+                "label": label,
+                "can_accept_review": accept,
+                "manual_blockers": blockers,
+                "command": (
+                    f"minus triage promote {torrent_hash.lower()} --accept-review --yes"
+                    if accept
+                    else None
+                ),
+            },
+        }
+
+    def promote(
+        self,
+        torrent_hash: str,
+        *,
+        name: str = "",
+        accept_review: bool = False,
+        accepted_by: str = "",
+        reason: str = "",
+    ) -> dict:
         """Move clean content into the library, with its verdict alongside.
 
-        Only `clean` gets through. That label already means "detonated, and
-        nothing was observed", so this is not a threshold of its own.
+        `clean` is the normal gate. `accept_review` is the explicit manual
+        release for `needs_review` only: the operator has seen the facts and
+        accepts the risk, and the provenance records that no detonation
+        happened. `suspicious` and `malicious` are never releasable this way.
         """
         payload = self.verdict(torrent_hash)
         label = payload.get("verdict", {}).get("label")
+        manual: dict | None = None
+        if label == CLEAN:
+            linux_active = clean_review_blockers(payload)
+            if linux_active:
+                raise TriageError(
+                    f"Refusing to promote {torrent_hash!r}: the Windows detonation did not "
+                    "exercise Linux-active content: " + "; ".join(linux_active[:6])
+                )
         if label != CLEAN:
             reasons = payload.get("verdict", {}).get("reasons", [])
-            raise TriageError(
-                f"Refusing to promote {torrent_hash!r}: verdict is {label!r}. "
-                f"Reasons: {'; '.join(reasons) or 'none recorded'}"
-            )
+            if not accept_review:
+                raise TriageError(
+                    f"Refusing to promote {torrent_hash!r}: verdict is {label!r}. "
+                    f"Reasons: {'; '.join(reasons) or 'none recorded'}"
+                )
+            if label == MALICIOUS:
+                raise TriageError(
+                    f"Refusing to manually promote {torrent_hash!r}: the verdict is malicious."
+                )
+            if label != NEEDS_REVIEW:
+                raise TriageError(
+                    f"Refusing to manually promote {torrent_hash!r}: verdict is {label!r}, "
+                    "not needs_review."
+                )
+            blockers = manual_review_blockers(payload)
+            if blockers:
+                raise TriageError(
+                    f"Refusing to manually promote {torrent_hash!r}: manual acceptance is "
+                    "only for passive media. Blockers: " + "; ".join(blockers[:6])
+                )
+            sandbox = payload.get("sandbox") or {}
+            manual = {
+                "accepted_at": _utc(),
+                "accepted_by": accepted_by or "local operator",
+                "reason": reason or "manual acceptance of a needs_review verdict",
+                "detonated": bool(sandbox.get("detonated")),
+                "verdict": label,
+                "reasons": reasons,
+            }
 
         manifest = _read_optional(self.manifest_path(torrent_hash)) or {}
         content_name = manifest.get("content_name") or manifest.get("name") or "content"
@@ -475,6 +582,8 @@ class TriagePipeline:
             "manifest": manifest,
             "verdict": payload.get("verdict"),
         }
+        if manual is not None:
+            provenance["manual_acceptance"] = manual
         try:
             moved = promote_to_library(
                 source,
@@ -492,6 +601,7 @@ class TriagePipeline:
             "provenance": moved["provenance"],
             "bytes": moved["bytes"],
         }
+        result["cleanup"] = self._cleanup_download(torrent_hash)
         self._notify("promoted", result)
         return result
 
@@ -585,6 +695,7 @@ class TriagePipeline:
                 "error": "qBittorrent is not configured (set MINUS_QBITTORRENT_URL).",
             }
 
+        torrent_hash = ""
         try:
             before = {str(torrent.get("hash") or "").lower() for torrent in self.client.torrents()}
             self.client.add_torrent(
@@ -598,7 +709,14 @@ class TriagePipeline:
             staged = self.download(torrent_hash)
             summary = self.scan(torrent_hash, detonate=detonate)
         except TriageError as exc:
-            return {"status": "failed", "error": str(exc)}
+            # The hash is still useful to a caller: a timeout leaves the
+            # download in qBittorrent, and naming it is what lets the harness
+            # report it (or a later retry resume it) instead of orphaning it.
+            return {
+                "status": "failed",
+                "torrent_hash": torrent_hash or None,
+                "error": str(exc),
+            }
 
         verdict = summary.get("verdict") or {}
         return {

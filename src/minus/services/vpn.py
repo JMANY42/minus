@@ -276,7 +276,12 @@ def _run_client(
 
 
 def _connect_argv(settings: Any) -> list[str]:
-    argv = [*_resolve_command(settings), "--air-connect"]
+    # Goldcrest without --async holds the foreground for the life of the
+    # tunnel: the call would only return on disconnect, so a startup
+    # autoconnect would never finish and the timeout below would fire against
+    # a tunnel that is already up. Async mode hands the session to bluetit and
+    # exits; the polling loop in `connect` is what waits for the route.
+    argv = [*_resolve_command(settings), "--air-connect", "--async"]
     argv += [
         "--air-user",
         settings.airvpn_username,
@@ -399,6 +404,55 @@ def bind_downloads(settings: Any, snapshot: TunnelStatus) -> dict:
         return {"bound": False, "interface": snapshot.interface, "error": str(exc)}
 
     return {"bound": True, "interface": snapshot.interface}
+
+
+def autoconnect(settings: Any) -> dict:
+    """Bring the tunnel up for a starting harness, or say why it was left alone.
+
+    This is idempotent on purpose: it asks the routing preflight first, so
+    opening the harness a second time against a live tunnel cannot spawn a
+    second client and fight the first one for the same interface. Only an
+    unhealthy host with enabled autoconnect and real credentials reaches
+    `connect()`.
+
+    A disabled setting or missing credentials is reported rather than raised,
+    because the VPN is a safety net for downloads and must not be allowed to
+    block startup: the user still gets a working assistant, and the preflight
+    keeps refusing fetches that would leak. Everything `connect()` itself
+    raises is left alone -- it runs only when the caller asked for a tunnel and
+    a failure there is a fact the caller has to surface.
+    """
+    snapshot = tunnel_status(settings)
+    if snapshot.healthy:
+        return {
+            "connected": True,
+            "interface": snapshot.interface,
+            "binding": None,
+            "detail": snapshot.detail,
+        }
+    if not getattr(settings, "vpn_autoconnect", False):
+        return {
+            "connected": False,
+            "interface": snapshot.interface,
+            "binding": None,
+            "detail": "autoconnect disabled",
+        }
+    if not settings.airvpn_username or not settings.airvpn_password:
+        return {
+            "connected": False,
+            "interface": snapshot.interface,
+            "binding": None,
+            "detail": "AirVPN credentials are empty",
+        }
+
+    snapshot = connect(settings)
+    binding = bind_downloads(settings, snapshot)
+    return {
+        "connected": True,
+        "interface": snapshot.interface,
+        "binding": binding,
+        "detail": snapshot.detail,
+    }
 
 
 def disconnect(settings: Any) -> dict:

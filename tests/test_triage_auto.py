@@ -15,7 +15,7 @@ from minus.errors import ToolExecutionError
 from minus.tools.triage import TriageTools
 from minus.triage import pipeline as pipeline_module
 from minus.triage.pipeline import TriageError, TriagePipeline
-from minus.triage.scoring import MALICIOUS, Verdict
+from minus.triage.scoring import CLEAN, MALICIOUS, Verdict
 from minus.triage.static import FileReport, StaticReport
 
 HASH = "d" * 40
@@ -25,11 +25,18 @@ MAGNET = f"magnet:?xt=urn:btih:{HASH}&dn=Movie"
 class ScriptedClient:
     """Reports a scripted progress sequence and the same completed content."""
 
-    def __init__(self, content: Path, progress: tuple[float, ...] = (0.5, 1.0)) -> None:
+    def __init__(
+        self,
+        content: Path,
+        progress: tuple[float, ...] = (0.5, 1.0),
+        delete_error: Exception | None = None,
+    ) -> None:
         self.content = content
         self.progress = list(progress)
         self.items: list[dict] = []
         self.calls: list = []
+        self.delete_error = delete_error
+        self.deleted: list[tuple[str, bool]] = []
 
     def torrents(self, **filters: str) -> list[dict]:
         self.calls.append("torrents")
@@ -60,6 +67,12 @@ class ScriptedClient:
             "content_path": str(self.content),
             "save_path": str(self.content.parent),
         }
+
+    def delete_torrent(self, torrent_hash: str, delete_files: bool = True) -> None:
+        self.calls.append(("delete_torrent", torrent_hash, delete_files))
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append((torrent_hash, delete_files))
 
 
 def _static(flags: list[str] | None = None, score: int = 0) -> StaticReport:
@@ -97,6 +110,19 @@ def _content(tmp_path: Path) -> Path:
     content.mkdir(parents=True)
     (content / "file.txt").write_bytes(b"hello")
     return content
+
+
+def _promote_clean(tmp_path: Path, monkeypatch, client: ScriptedClient, **kwargs) -> dict:
+    """Ingest a scripted torrent whose verdict is clean, then release it."""
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    monkeypatch.setattr(
+        pipeline_module,
+        "decide",
+        lambda *args, **options: Verdict(CLEAN, 0, True, ()),
+    )
+    pipeline = _pipeline(tmp_path, client, [], **kwargs)
+    assert pipeline.ingest(MAGNET)["status"] == CLEAN
+    return pipeline.promote(HASH)
 
 
 def test_ingest_adds_waits_stages_and_scans_in_order(tmp_path, monkeypatch):
@@ -188,6 +214,8 @@ def test_ingest_returns_failure_instead_of_raising_on_timeout(tmp_path, monkeypa
 
     assert result["status"] == "failed"
     assert "50%" in result["error"]
+    # The torrent is still in qBittorrent; the caller needs its hash.
+    assert result["torrent_hash"] == HASH
 
 
 def test_find_new_torrent_reads_the_hash_out_of_a_magnet(tmp_path):
@@ -261,3 +289,57 @@ def test_torrent_progress_reports_only_the_fields_a_decision_needs(tmp_path):
         "eta": None,
         "size": 5,
     }
+
+
+def test_a_clean_promotion_deletes_the_torrent_and_its_files(tmp_path, monkeypatch):
+    client = ScriptedClient(_content(tmp_path))
+    promoted = _promote_clean(tmp_path, monkeypatch, client)
+
+    assert Path(promoted["moved_to"]).is_dir()
+    assert promoted["cleanup"] == {"deleted": True}
+    assert client.deleted == [(HASH, True)]
+    assert ("delete_torrent", HASH, True) in client.calls
+
+
+def test_a_malicious_rejection_deletes_the_torrent_and_its_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        pipeline_module,
+        "analyse",
+        lambda root: _static(flags=["windows-pe"], score=9),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "decide",
+        lambda static, run, *, require_detonation=True, review=None: Verdict(
+            MALICIOUS, 9, True, ("defender detection: Trojan:Win32/X",)
+        ),
+    )
+    client = ScriptedClient(_content(tmp_path))
+    events: list = []
+    pipeline = _pipeline(tmp_path, client, events)
+
+    result = pipeline.ingest(MAGNET)
+
+    assert result["status"] == "malicious"
+    assert client.deleted == [(HASH, True)]
+    assert events[-1][0] == "malicious_deleted"
+    assert events[-1][1]["cleanup"] == {"deleted": True}
+
+
+def test_auto_cleanup_off_keeps_the_torrent_in_qbittorrent(tmp_path, monkeypatch):
+    client = ScriptedClient(_content(tmp_path))
+    promoted = _promote_clean(tmp_path, monkeypatch, client, auto_cleanup=False)
+
+    assert Path(promoted["moved_to"]).is_dir()
+    assert promoted["cleanup"] == {"skipped": True, "reason": "auto cleanup is disabled"}
+    assert client.deleted == []
+    assert not any(isinstance(call, tuple) and call[0] == "delete_torrent" for call in client.calls)
+
+
+def test_a_delete_failure_leaves_the_promotion_successful(tmp_path, monkeypatch):
+    client = ScriptedClient(_content(tmp_path), delete_error=RuntimeError("qBittorrent went away"))
+    promoted = _promote_clean(tmp_path, monkeypatch, client)
+
+    assert Path(promoted["moved_to"]).is_dir()
+    assert promoted["cleanup"] == {"deleted": False, "error": "qBittorrent went away"}
+    assert client.deleted == []

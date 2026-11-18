@@ -260,27 +260,75 @@ input works with the assistant stopped. Restarts go through `systemctl --user`
 register only when `MINUS_QBITTORRENT_URL` is set (`assembly.build_triage_tools`), because every
 flow starts at the torrent list.
 
-`TriagePipeline` (`triage/pipeline.py`) runs four stages, each leaving a file behind — `qbittorrent_find`
-searches only torrents already in the client, never an index site — and `download`
-refuses outright unless the VPN preflight passes (fail-closed; see
-`docs/SECURITY.md`):
+`TriagePipeline` (`triage/pipeline.py`) runs four stages, each leaving a file behind. The
+`qbittorrent_find` tool still searches only torrents already in the client; finding a new
+torrent is the separate, opt-in path in `triage/discovery.py`. That module queries cheap
+meta-index APIs (Knaben, Bitsearch, apibay, Nyaa by default; Internet Archive as a fallback;
+Prowlarr or Jackett when configured), deduplicates by infohash, and ranks locally on title coverage, seeders,
+resolution/source, verified flags, cross-source agreement, virus signal and size. The ranking
+is a pre-filter only: it rejects CAM/TS rips, executable/crack-style names, dead swarms and
+files above the staging cap, then hands one magnet/URL to the pipeline. It never bypasses
+`download`, `scan` or the verdict. `download` refuses outright unless the VPN preflight
+passes (fail-closed; see `docs/SECURITY.md`):
 `download` copies a *completed* torrent (progress must be 1.0) into
 `quarantine/<hash>/files/` and writes `manifest.json` with per-file sizes and 16 MiB head
 hashes; `scan` runs `triage/static.py` (magic bytes, PE header and section entropy, name-lie
 flags) plus an optional detonation, then writes `verdict.json`; `verdict` reads it back;
-`promote` moves content into `library/<name>/` **only** for a `clean` label (0755/0644,
-atomic rename or staged copy, 0600 provenance), with the verdict
-stored beside it as provenance. A torrent hash is validated as hex before it becomes a path
-component.
+`review` adds the static file list plus a bounded `ffprobe` pass under the
+airlock, without promoting; `promote` moves content into `library/<name>/` for a
+`clean` label (0755/0644, atomic rename or staged copy, 0600 provenance), with
+the verdict stored beside it as provenance. A `needs_review` item can be
+released only by the explicit CLI `--accept-review` path, and only when every
+staged file is passive media/text with no active-content flags; it records the
+operator, time, reason and `detonated: false`. `suspicious`, `malicious` and
+active-content payloads are never releasable that way. A torrent hash is validated as hex
+before it becomes a path component.
+
+`MINUS_TRIAGE_AUTO_CLEANUP` (default on) closes the loop after the verdict rather than
+leaving two copies of the same bytes on disk. Once `promote` has moved the staged tree into
+`library/` — or a manual `--accept-review` release has recorded its provenance — the pipeline
+asks qBittorrent to delete the torrent and the files it downloaded; the library copy and its
+0600 provenance are a separate tree, so the deletion cannot reach what was released. A
+`malicious` rejection takes the same route after `reject_malicious` removes the staged payload,
+because the client would otherwise keep the downloaded copy that payload was taken from. The
+delete is deliberately downstream of the verdict, never part of it: `needs_review` and
+`suspicious` keep the download, since those are the states a human inspects and possibly
+releases. Cleanup is best-effort — a qBittorrent failure is logged and leaves the promotion or
+rejection standing, because undoing a recorded release over a failed delete would be the worse
+outcome.
 
 `triage/scoring.py::decide` is deliberately unable to guess: `clean` requires a detonation that
 observed nothing, so with the default `DryRunRunner` (no guest, nothing executed) every result is
 `needs_review`. `triage/windows_vm.py::WindowsVmRunner` is the real guest: an immutable
-`base.qcow2` plus a per-run overlay, launched under QEMU/KVM with
-`-netdev user,restrict=on` and only a host→guest WinRM forward, so artifacts are pushed in
-base64 chunks and the report pulled back with no guest→host path at all. `minus vm-image` builds
-the base once from a Windows ISO and a virtio-win ISO; `minus vm-check` says what is missing
-when it cannot run.
+`base.qcow2` plus a per-run overlay, launched under QEMU/KVM with `-netdev user,restrict=on`
+and only a host→guest WinRM forward, so artifacts are pushed in base64 chunks and the report
+pulled back with no guest→host path at all. `minus vm-image` builds the base once from official
+Microsoft Windows 10 x64 media (Enterprise LTSC or the Enterprise Evaluation); `minus vm-check`
+says what is missing when it cannot run.
+
+The guest uses the oldest virtual hardware Windows 10 still supports out of the box: SeaBIOS,
+an IDE disk and an e1000 NIC. Every one of those has an in-box driver, so the unattended
+install finishes without a driver ISO, without OVMF/UEFI firmware and without an emulated TPM —
+the three things that otherwise turn a one-off image build into an afternoon of driver
+wrangling, and each of which can fail in a way that is invisible until a detonation starts. I/O
+is slower than virtio and that is the accepted cost: a run watches a sample for minutes, not a
+workload, so build reliability outranks guest performance. A virtio-win ISO remains an optional
+extra for anyone who wants the speed; it is never required. Trimmed Windows builds ("Tiny11",
+"Lean11" and similar) are not merely unsupported but disallowed: they remove WinRM
+(the only control channel), Defender (the baseline behaviour a sample is compared against),
+PowerShell (how the harness runs anything) and often Sysmon, so what a sample does inside one
+says nothing about what it does on a real machine.
+
+`MINUS_WINDOWS_BASE_IMAGE` and `MINUS_WINDOWS_WORK_DIR` want an ext4 volume with room for a
+64 GiB sparse qcow2 that occupies 20–30 GiB once Windows is installed — on this machine the
+ext4 root, which has about 62 GiB free. NTFS on a dual-boot disk is not that volume: a
+hibernated or Fast-Startup NTFS still has Windows' journal open, so
+letting Linux's NTFS driver replay it corrupts the filesystem for both operating systems, and
+the image would compete with Windows for free space. If nothing but NTFS is available, disable
+Fast Startup, shut Windows down fully, mount read-write, and treat it as temporary. The
+free-space precheck is `MINUS_WINDOWS_MIN_FREE_BYTES` (20 GiB) and runs before QEMU starts. The
+ISO is an input to the image build only; once `minus vm-image` returns it can be deleted,
+because runs boot the base image plus a throwaway per-run overlay.
 
 ## 10. Audio
 
@@ -409,8 +457,10 @@ and swallows rendering failures. The harness marshals those events to Textual's 
 `assembly.build_conversation` and polls the deep tier's result queue on a daemon thread. Code mode
 reuses `CodingSession` with a `ThreadApprover` that parks the worker on an Event until a modal
 answers, and denies on timeout. Download mode uses `assembly.build_triage_pipeline` and renders
-each stage plus any `ALERT` from a malicious verdict. `run_harness` refuses a non-TTY, and the old
-microphone loop is `minus voice`.
+each stage plus any `ALERT` from a malicious verdict. A line that is not a magnet/URL is sent
+through `triage/discovery.py` first; the selected candidate is ingested and, if the verdict is
+`clean` and `MINUS_DISCOVERY_AUTO_PROMOTE` is on, promoted into `library/`. `run_harness` refuses
+a non-TTY, and the old microphone loop is `minus voice`.
 
 ## 16. MCP server
 

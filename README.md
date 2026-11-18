@@ -39,16 +39,15 @@ minus google-auth      # connect a Google account for the task/calendar tools
 ```
 
 The harness is the default surface. Type a line to talk to the agent, or use a
-slash command: `/mode code`, `/download <magnet>`, `/vpn connect`, `/triage
-<hash>`, `/files`, `/doctor`, `/help`. The left rail switches modes; the right
+slash command: `/mode code`, `/download <query|magnet|url>`, `/vpn connect`,
+`/triage <hash>`, `/files`, `/doctor`, `/help`. The left rail switches modes; the right
 rail shows tool activity and any quarantine alert. `ctrl+b` opens the file
-explorer: the `left`/`right`/`top`/`bottom` buttons dock it, clicking a file
-shows a syntax-highlighted preview, `diffs` shows the working-tree diff, and
-`nvim` expands the preview. Drag the explorer's inner edge to resize the dock,
-or the divider beside the file tree to grow the code view; the tree stays a
-22-column sidebar and the code view takes the rest. The dock stops with roughly
-25-30 columns left for the conversation. `minus serve` remains the headless
-service.
+explorer, which is always docked on the left: clicking a file shows a
+syntax-highlighted preview and `diffs` shows the working-tree diff. Drag the
+explorer's inner edge to resize the dock, or the divider beside the file tree to
+grow the code view; the tree stays a 22-column sidebar and the code view takes
+the rest. The dock stops with roughly 25-30 columns left for the conversation.
+`minus serve` remains the headless service.
 
 If the shell cannot find `minus`, link the venv script once (then `hash -r` or
 open a new shell):
@@ -68,11 +67,55 @@ minus status --watch          # ...and keep printing as that changes
 
 ## Torrents, VPN and quarantine
 
-MINUS does not search index sites. You give it a magnet or a `.torrent` URL;
-qBittorrent downloads it into `quarantine/incoming`; the pipeline copies the
-finished content into `quarantine/<hash>/`, inspects it, asks the agent model to
-read any code-shaped files, and records a verdict. Only a `clean` verdict can be
-promoted into `library/`.
+In download mode a plain line is a search. `/download the great gatsby` (or
+just `the great gatsby` while that mode is selected) queries cheap meta-index
+APIs, ranks the results locally, and sends only the winner through the same
+pipeline as a typed magnet: qBittorrent downloads into `quarantine/incoming`,
+the pipeline copies the finished content into `quarantine/<hash>/`, inspects it,
+asks the agent model to read any code-shaped files, and records a verdict. Only
+a `clean` verdict is promoted into `library/`; a magnet or `.torrent` URL still
+bypasses search and goes straight to the pipeline.
+
+### How discovery picks
+
+The default providers are **Knaben** (a meta-index whose JSON API already
+carries 1337x and The Pirate Bay results), **Bitsearch** (a second index, so a
+repeated infohash is evidence of a real release), **The Pirate Bay** via
+`apibay.org`, and **Nyaa** via RSS. **Internet Archive** is the fallback when
+the trackers produce nothing eligible.
+
+**Prowlarr** and **Jackett** are used when configured. They own the per-site
+definitions, so every site they support becomes searchable without a scraper in
+MINUS — including 1337x and YourBittorrent, which answer plain HTTP with a
+Cloudflare interstitial. Set `MINUS_PROWLARR_URL`/`MINUS_PROWLARR_API_KEY` or
+`MINUS_JACKETT_URL`/`MINUS_JACKETT_API_KEY`; `MINUS_JACKETT_INDEXERS` can target
+specific definitions. Deprecated sites such as RARBG and old Demonoid clones
+are not added.
+
+Ranking is deterministic and cheap — no model call. It rewards exact title
+coverage, seeders, 1080p BluRay/Web-DL, verified uploads, agreement between
+sources, a low Knaben virus score and a legal origin. It rejects CAM/TS
+releases, executable/crack-style names, dead swarms, wrong-year matches,
+category mismatches, and anything larger than `MINUS_TRIAGE_MAX_BYTES`.
+`MINUS_DISCOVERY_MIN_SCORE` (default 55) is the cutoff; below it the harness
+shows the shortlist and downloads nothing.
+
+This ranking is a pre-filter, **not** a trust boundary. Every selected torrent
+still lands in quarantine and still needs the verdict rules; a static-only scan
+is `needs_review`, so without a configured detonation sandbox nothing is
+auto-promoted and the content stays in quarantine. Tune discovery with
+`MINUS_DISCOVERY_PROVIDERS`, `MINUS_DISCOVERY_FALLBACK_PROVIDERS`,
+`MINUS_DISCOVERY_MIN_SCORE`, `MINUS_DISCOVERY_LIMIT`,
+`MINUS_DISCOVERY_PREFERRED_QUALITY` and `MINUS_DISCOVERY_AUTO_PROMOTE`.
+For open indexer coverage set `MINUS_JACKETT_URL` + `MINUS_JACKETT_API_KEY`
+(optionally `MINUS_JACKETT_INDEXERS`), or the Prowlarr equivalents.
+
+Direct scraping of 1337x and YourBittorrent is not used: both answer plain HTTP
+with a Cloudflare interstitial. Demonoid is account-based, has no live public
+API, and its original site closed in 2018; RARBG is gone. Knaben's 1337x
+coverage plus Jackett/Prowlarr definitions are the supported routes to those
+sites. The built-in direct providers are Knaben, Bitsearch, The Pirate Bay
+(`apibay.org`) and Nyaa (RSS).
 
 ```bash
 minus qbt setup                # start qBittorrent, loopback WebUI, quarantine paths
@@ -84,14 +127,45 @@ minus triage ingest 'magnet:?xt=urn:btih:...'
 minus triage download <hash>   # stage a finished torrent into quarantine
 minus triage scan <hash>       # static + model review (+ detonation if configured)
 minus triage verdict <hash>
-minus triage promote <hash>    # refused unless the verdict is clean
+minus triage review <hash>     # static facts + sandboxed ffprobe; no promotion
+minus triage promote <hash>    # refused unless the verdict is clean; asks qBittorrent
+                               # to delete the torrent and its files (default)
+minus triage promote <hash> --accept-review --yes
+                               # explicit manual release of a needs_review item
 ```
+
+`MINUS_TRIAGE_AUTO_CLEANUP` (on by default) is what removes the download copy:
+after a successful promotion — a `clean` verdict or a manual `--accept-review`
+release — MINUS asks qBittorrent to delete the torrent and the files it
+downloaded, because the content now lives in `library/` with its provenance.
+The same happens after a `malicious` verdict, whose staged payload is deleted
+outright. `needs_review` and `suspicious` keep the download, since it is what
+you would inspect or release next. A cleanup that fails is logged and does not
+undo the promotion or the rejection. Set
+`MINUS_TRIAGE_AUTO_CLEANUP=false` to keep finished downloads until you remove
+them yourself.
+
+`triage review` prints the verdict, static flags, file list and a bounded
+`ffprobe` pass run under bubblewrap (read-only input, no network). It is a
+parser smoke test, not a detonation. `--accept-review` only releases a
+`needs_review` item whose staged files are **passive media/text** (video, audio,
+images, subtitles, plain text) and whose static/airlock flags show no
+executable, script, archive, PDF/Office or other active content. It records the
+accepting user, time, reason and `detonated: false` in the library provenance
+JSON. `suspicious`, `malicious` and any active-content payload are never
+releasable this way. Without `--yes` the terminal asks you to type the first
+eight characters of the hash.
 
 Configuration lives in `.env` (0600, gitignored): `MINUS_AIRVPN_USERNAME`,
 `MINUS_AIRVPN_PASSWORD`, `MINUS_QBITTORRENT_URL`,
 `MINUS_QBITTORRENT_PASSWORD`, and the `MINUS_TRIAGE_*` knobs. The AirVPN
 password is never returned by the control socket, logged, or included in an
 error string.
+
+With credentials present, the harness brings the tunnel up on launch when
+`MINUS_VPN_AUTOCONNECT` is on (the default) and no healthy tunnel already
+exists, then binds qBittorrent to the discovered interface. Opening the harness
+twice does not start a second client; `/vpn status` shows what happened.
 
 AirVPN's WireGuard mode needs a loadable `wireguard` kernel module. If the
 running kernel cannot load one, set `MINUS_AIRVPN_VPN_TYPE=openvpn` to use
@@ -102,6 +176,59 @@ record under `quarantine/rejected/` (hash, reasons, file names — never bytes),
 and returns an `ALERT` the harness shows. Promotion stays refused for anything
 that is not `clean`; `clean` requires a detonation that observed nothing and a
 model review that did not escalate.
+
+### The QEMU detonation guest
+
+A `clean` verdict needs a real Windows guest, not just the static checks.
+Install QEMU/KVM (`qemu-system-x86_64`, `qemu-img`) plus `mtools` for the
+unattended-answer floppy, then point MINUS at the base image and the scratch
+space:
+
+```bash
+MINUS_WINDOWS_BASE_IMAGE=/srv/minus/windows/base.qcow2
+MINUS_WINDOWS_WORK_DIR=/srv/minus/windows/run
+```
+
+`minus vm-image` builds the base image once from an **official Microsoft
+Windows 10 x64 ISO** — Enterprise LTSC or the Enterprise Evaluation both work;
+the Evaluation needs no licence at all, and LTSC installs with its published
+KMS client key and runs unactivated for the life of a detonation image. Do not
+use a trimmed "Tiny11"/"Lean11"-style ISO: those remove WinRM, Defender,
+PowerShell and often Sysmon, and a guest without them can neither be driven nor
+produce behaviour that means anything. `minus vm-check` says what is still
+missing before you build.
+
+The guest boots under SeaBIOS with an IDE disk and an e1000 NIC. That is the
+entire requirement: Windows 10 setup carries in-box drivers for both, so the
+unattended install completes with no driver ISO. There is no OVMF/UEFI, no
+emulated TPM and no virtio-win ISO to prepare — those are the things that turn
+a one-off image build into an afternoon of driver wrangling, and for a
+short detonation I/O speed is not what you are short of. A virtio-win ISO is
+optional only if you deliberately want faster disk I/O.
+
+The runner invokes `qemu-system-x86_64` (override with `MINUS_WINDOWS_QEMU`),
+boots an immutable base plus a throwaway per-run overlay, and never exposes a
+host share — do not add one back for convenience. The guest's only network is
+QEMU's `user,restrict=on` device with a single host→guest WinRM forward; keep it
+that way rather than bridging the NIC, because the point of the guest is that it
+has no route out.
+
+The base image is a 64 GiB sparse qcow2 that Windows fills out to roughly 20–30
+GiB of real blocks once installed. Put `MINUS_WINDOWS_BASE_IMAGE` and
+`MINUS_WINDOWS_WORK_DIR` on an ext4 volume with that much room — the ext4 root
+is usually the easiest (check `df`; this machine's root has about 62 GiB free).
+Do not put them on an NTFS partition shared with Windows. A hibernated or
+Fast-Startup volume still has Windows' journal open, so mounting it read-write
+lets Linux's NTFS driver replay a journal Windows still holds and corrupts the
+filesystem for both systems; the images would also compete with Windows for
+free space. If NTFS is the only large volume you have, disable Fast Startup,
+shut Windows down fully, mount read-write, and treat it as a stopgap.
+
+`MINUS_WINDOWS_MIN_FREE_BYTES` (default 20 GiB) is checked before a run starts,
+so a nearly-full disk fails before QEMU boots rather than mid-detonation. The
+Windows ISO is only an input to the image build: once `minus vm-image` has
+finished, it can be deleted, because every run boots the base image and a
+throwaway overlay.
 
 ## MCP server
 
