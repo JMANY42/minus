@@ -3,7 +3,7 @@
 Three pieces, deliberately kept out of `app.py`:
 
   * `ProjectTree` hides the directories a developer never wants to click
-    (.git, .venv, caches, the Rust target dir) while still letting the tree
+    (.git, .venv, caches, build output) while still letting the tree
     lazy-load everything else.
   * `ExplorerPane` is the left-docked widget: a diffs button, the tree, and a
     syntax-highlighted preview. Its host lives in `app.py`, which mounts it in
@@ -40,7 +40,6 @@ HIDDEN_DIRS = {
     ".pytest_cache",
     ".ruff_cache",
     "node_modules",
-    "target",
     "logs",
     "memory",
     "quarantine",

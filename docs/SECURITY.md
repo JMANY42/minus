@@ -18,8 +18,7 @@ needs a reason in its description.
   is redacted from every client output and error; the client command is allowed a
   passwordless `sudo -n` retry through one sudoers drop-in because a fresh
   `airvpn` group is not in the current login session.
-- `.env` is rewritten atomically at 0600 (`services/env_file.py`, Rust
-  `envfile.rs`); a value that was never set is never invented.
+- `.env` is rewritten atomically at 0600 (`services/env_file.py`); a value that was never set is never invented.
 - Exposed secrets are rotated by the owner, not patched around: treat any value
   pasted into a chat, a shell history or a log as burned.
 
@@ -200,7 +199,7 @@ JSON-RPC; logs go to stderr and the run log.
 ## Untrusted input and tool execution
 
 - Tool arguments are validated against generated schemas before the body runs
-  (`tools/registry.py`, Rust `registry.rs`); a disabled tool cannot be dispatched.
+  (`tools/registry.py`); a disabled tool cannot be dispatched.
 - Coding tools are confined to the session workspace by
   `resolve_workspace_path` (resolve before containment), which rejects absolute
   paths, `..`, and symlinks out.

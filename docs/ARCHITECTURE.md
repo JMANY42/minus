@@ -233,11 +233,6 @@ live. It covers model names, retry/round budgets, deep-tier knobs, `relevance_th
 writes `.env` through `services/env_file.py::update_env_file`, which rewrites only the changed
 lines so comments, ordering and unknown keys survive.
 
-A second Rust control client lives beside the server: `rust/minus-core/src/bin/minusctl.rs`
-drives `status`, `say`, `tools`, `facts`, `config` and `model` over the same NDJSON protocol, with an
-interactive prompt when run bare. It shares `protocol.rs` and `client.rs` with the core, so the
-frame handling has one implementation on each side.
-
 `minus --no-mic --no-audio` runs a real conversation without PortAudio or Kokoro: the text-only
 speaker (`audio/console.py`) prints replies and the TTS fields are dropped from the live-config
 table rather than pretended. Without the `embeddings` extra, `MemoryService` says so once at
