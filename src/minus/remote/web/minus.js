@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  var config = window.__MINUS_JELLYFIN__;
+  var config = window.__MINUS_REMOTE__;
   if (!config || !config.base) return;
   if (document.querySelector('[data-minus="fab"]')) return;
 
@@ -33,7 +33,9 @@
   var STYLE = `
     .minus-fab,
     .minus-overlay,
-    .minus-overlay * {
+    .minus-overlay *,
+    .minus-toasts,
+    .minus-toasts * {
       box-sizing: border-box;
     }
     .minus-fab {
@@ -76,7 +78,7 @@
     .minus-overlay[hidden],
     .minus-modal [hidden],
     .minus-row [hidden],
-    .minus-job [hidden] {
+    .minus-toasts [hidden] {
       display: none !important;
     }
 
@@ -251,55 +253,140 @@
       text-align: right;
     }
 
-    .minus-job {
-      margin-bottom: 12px;
-      padding: 11px 12px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 10px;
-      background: #0d1218;
-    }
-    .minus-job-head {
+    .minus-toasts {
+      position: fixed !important;
+      top: 16px;
+      right: 16px;
+      z-index: 2147483002;
       display: flex;
-      align-items: center;
-      justify-content: space-between;
+      flex-direction: column;
       gap: 10px;
+      width: min(380px, calc(100vw - 24px));
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     }
-    .minus-job-title { font-size: 13px; font-weight: 650; }
-    .minus-job-state {
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.1);
-      color: #dbe4ef;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
+    .minus-toast {
+      padding: 12px 13px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 12px;
+      background: #151a20;
+      color: #eef2f7;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
     }
-    .minus-job[data-state="error"] .minus-job-state { background: rgba(255, 90, 90, 0.2); color: #ffb0b0; }
-    .minus-job[data-state="done"] .minus-job-state { background: rgba(80, 210, 140, 0.2); color: #a9f0c8; }
-    .minus-job-meta {
-      margin-top: 4px;
-      color: #7f8b9a;
-      font-size: 11.5px;
+    .minus-toast[data-state="error"],
+    .minus-toast[data-state="slow"] { border-color: rgba(255, 90, 90, 0.55); }
+    .minus-toast-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .minus-toast-heading {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .minus-toast-title {
+      font-size: 13px;
+      font-weight: 650;
       overflow-wrap: anywhere;
     }
-    .minus-job-detail {
-      margin-top: 5px;
+    .minus-toast-stage {
+      margin-top: 3px;
+      color: #9fb0c3;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .minus-toast-detail {
+      margin-top: 2px;
+      color: #cfd8e3;
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .minus-toast-actions {
+      display: flex;
+      flex: 0 0 auto;
+      gap: 4px;
+    }
+    .minus-toast-toggle,
+    .minus-toast-close {
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: 0;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #eef2f7;
+      font-size: 15px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .minus-toast-toggle:hover,
+    .minus-toast-close:hover { background: rgba(255, 255, 255, 0.16); }
+    .minus-toast-close { color: #ffb0b0; }
+    .minus-toast-meter {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 9px;
+    }
+    .minus-toast-track {
+      position: relative;
+      flex: 1 1 auto;
+      height: 7px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+    .minus-toast-fill {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: ${PRIMARY};
+      transition: width 240ms ease;
+    }
+    .minus-toast[data-state="error"] .minus-toast-fill,
+    .minus-toast[data-state="slow"] .minus-toast-fill { background: #ff6b6b; }
+    .minus-toast[data-state="done"] .minus-toast-fill { background: #50d28c; }
+    .minus-toast-percent {
+      flex: 0 0 auto;
+      min-width: 34px;
+      color: #b9c6d5;
+      font-size: 11.5px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .minus-toast-meta {
+      margin-top: 6px;
+      color: #8d99a8;
+      font-size: 11.5px;
+      font-variant-numeric: tabular-nums;
+    }
+    .minus-toast-outcome {
+      margin-top: 8px;
       color: #cfd8e3;
       font-size: 12.5px;
       line-height: 1.45;
+      white-space: pre-line;
       overflow-wrap: anywhere;
     }
-    .minus-job-result { margin-top: 6px; }
-    .minus-job-line {
-      color: #a9b4c2;
-      font-size: 12.5px;
-      line-height: 1.45;
+    .minus-toast-outcome[data-tone="ok"] { color: #a9f0c8; }
+    .minus-toast-outcome[data-tone="error"] { color: #ff9a9a; }
+    .minus-toast-trace {
+      max-height: 160px;
+      margin-top: 8px;
+      padding-top: 7px;
+      overflow-y: auto;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .minus-toast-trace-row {
+      color: #8d99a8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10.5px;
+      line-height: 1.5;
       overflow-wrap: anywhere;
     }
-    .minus-job-line[data-tone="ok"] { color: #8be3b0; }
-    .minus-job-line[data-tone="error"] { color: #ff9a9a; }
-    .minus-job-line[data-tone="warn"] { color: #e8cf9a; }
 
     .minus-inline {
       display: flex;
@@ -418,8 +505,11 @@
   var input;
   var resultsBox;
   var statusBox;
-  var jobBox;
   var lastFocused = null;
+  var toastStack = null;
+  var toasts = {};
+  var dismissedJobs = {};
+  var toastSeq = 0;
 
   function buildLauncher() {
     var fab = el('button', 'minus-fab');
@@ -481,11 +571,6 @@
     statusBox.setAttribute('role', 'status');
     statusBox.setAttribute('aria-live', 'polite');
     modal.appendChild(statusBox);
-
-    jobBox = el('div', 'minus-job');
-    jobBox.setAttribute('data-minus', 'job');
-    jobBox.hidden = true;
-    modal.appendChild(jobBox);
 
     resultsBox = el('div', 'minus-results');
     resultsBox.setAttribute('data-minus', 'results');
@@ -703,37 +788,275 @@
         }
         setStatus('Download started. Minus checks it before anything reaches the library.', 'ok');
         button.textContent = 'Downloading';
-        pollJob(payload.job);
+        pollJob(payload.job, candidate.title || query);
       })
       .catch(function (error) {
         setStatus('Download failed: ' + error.message, 'error');
-        renderJob({
-          state: 'error',
-          stage: 'grab',
-          detail: error.message,
-        });
         button.disabled = false;
         button.textContent = previous;
       });
   }
 
-  var pollSeq = 0;
+  // A download outlives the modal: closing the dialog or navigating inside
+  // Jellyfin must not hide the only live view of a job, so the toasts hang off
+  // <body> and are never rebuilt by the page observer. One toast per job id;
+  // a dismissed id stays dismissed, even if a straggling poll resolves later.
+  function buildToasts() {
+    toastStack = el('div', 'minus-toasts');
+    toastStack.setAttribute('data-minus', 'toast');
+    toastStack.setAttribute('role', 'status');
+    toastStack.setAttribute('aria-live', 'polite');
+    document.body.appendChild(toastStack);
+  }
 
-  function pollJob(jobId) {
-    pollSeq += 1;
-    var seq = pollSeq;
+  function pad2(value) {
+    return (value < 10 ? '0' : '') + value;
+  }
+
+  function formatDuration(totalSeconds) {
+    var total = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    var hours = Math.floor(total / 3600);
+    var minutes = Math.floor((total % 3600) / 60);
+    var seconds = total % 60;
+    if (hours) return hours + 'h ' + pad2(minutes) + 'm';
+    if (minutes) return minutes + 'm ' + pad2(seconds) + 's';
+    return seconds + 's';
+  }
+
+  function formatClock(value) {
+    var date = value ? new Date(value) : null;
+    if (!date || isNaN(date.getTime())) return '--:--:--';
+    return pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
+  }
+
+  function toastRecord(jobId, title) {
+    if (toasts[jobId]) return toasts[jobId];
+
+    var node = el('article', 'minus-toast');
+    node.setAttribute('data-minus', 'toast-item');
+    node.setAttribute('data-job', jobId);
+    node.setAttribute('data-state', 'queued');
+
+    var head = el('div', 'minus-toast-head');
+    var heading = el('div', 'minus-toast-heading');
+    var titleEl = el('div', 'minus-toast-title', title || 'Minus download');
+    var stageEl = el('div', 'minus-toast-stage', 'queued');
+    var detailEl = el('div', 'minus-toast-detail', '');
+    detailEl.hidden = true;
+    heading.appendChild(titleEl);
+    heading.appendChild(stageEl);
+    heading.appendChild(detailEl);
+    head.appendChild(heading);
+
+    var toggle = el('button', 'minus-toast-toggle', '⌄');
+    toggle.type = 'button';
+    toggle.setAttribute('data-minus', 'toast-toggle');
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', 'Show download details');
+
+    var close = el('button', 'minus-toast-close', '×');
+    close.type = 'button';
+    close.setAttribute('data-minus', 'toast-close');
+    close.setAttribute('aria-label', 'Dismiss download');
+    close.hidden = true;
+    close.addEventListener('click', function () {
+      dismissToast(jobId);
+    });
+
+    var actions = el('div', 'minus-toast-actions');
+    actions.appendChild(toggle);
+    actions.appendChild(close);
+    head.appendChild(actions);
+    node.appendChild(head);
+
+    var meter = el('div', 'minus-toast-meter');
+    var track = el('div', 'minus-toast-track');
+    track.setAttribute('data-minus', 'toast-bar');
+    track.setAttribute('role', 'progressbar');
+    track.setAttribute('aria-valuemin', '0');
+    track.setAttribute('aria-valuemax', '100');
+    track.setAttribute('aria-valuenow', '0');
+    var fill = el('div', 'minus-toast-fill');
+    track.appendChild(fill);
+    var percent = el('span', 'minus-toast-percent', '0%');
+    meter.appendChild(track);
+    meter.appendChild(percent);
+    node.appendChild(meter);
+
+    var meta = el('div', 'minus-toast-meta', 'estimating…');
+    node.appendChild(meta);
+
+    var outcome = el('div', 'minus-toast-outcome', '');
+    outcome.hidden = true;
+    node.appendChild(outcome);
+
+    var trace = el('div', 'minus-toast-trace', '');
+    trace.setAttribute('data-minus', 'toast-trace');
+    trace.hidden = true;
+    node.appendChild(trace);
+
+    var record = {
+      id: jobId,
+      title: title || '',
+      node: node,
+      titleEl: titleEl,
+      stageEl: stageEl,
+      detailEl: detailEl,
+      toggle: toggle,
+      close: close,
+      track: track,
+      fill: fill,
+      percent: percent,
+      meta: meta,
+      outcome: outcome,
+      trace: trace,
+      expanded: false,
+      traceKey: '',
+      seq: 0,
+      timer: null,
+      progress: 0,
+    };
+    toggle.addEventListener('click', function () {
+      record.expanded = !record.expanded;
+      trace.hidden = !record.expanded;
+      toggle.setAttribute('aria-expanded', record.expanded ? 'true' : 'false');
+      toggle.setAttribute('aria-label', record.expanded ? 'Hide download details' : 'Show download details');
+      toggle.textContent = record.expanded ? '⌃' : '⌄';
+    });
+
+    toasts[jobId] = record;
+    toastStack.appendChild(node);
+    return record;
+  }
+
+  function renderTrace(record, events) {
+    clear(record.trace);
+    if (!events.length) {
+      record.trace.appendChild(el('div', 'minus-toast-trace-row', 'No milestones yet.'));
+      return;
+    }
+    // The trace is a glance, not an archive: the last 40 rows cover a normal
+    // download and keep the DOM bounded when progress events are frequent.
+    var start = Math.max(0, events.length - 40);
+    for (var i = start; i < events.length; i += 1) {
+      var event = events[i] || {};
+      var text = formatClock(event.at) + ' · ' + String(event.stage || '');
+      if (event.detail) text += ' · ' + String(event.detail);
+      record.trace.appendChild(el('div', 'minus-toast-trace-row', text));
+    }
+    record.trace.scrollTop = record.trace.scrollHeight;
+  }
+
+  function renderToast(record, job) {
+    job = job || {};
+    var state = String(job.state || '').toLowerCase();
+    record.node.setAttribute('data-state', state || 'running');
+
+    var name = job.name ? String(job.name) : record.title;
+    if (name) record.titleEl.textContent = name;
+
+    var stage = job.stage ? String(job.stage) : 'working';
+    record.stageEl.textContent = stage;
+    var detail = job.detail ? String(job.detail) : '';
+    record.detailEl.textContent = detail;
+    record.detailEl.hidden = !detail;
+
+    var progress = Number(job.progress);
+    if (!isFinite(progress)) progress = state === 'done' ? 1 : 0;
+    progress = Math.max(0, Math.min(1, progress));
+    record.progress = progress;
+    var percent = Math.round(progress * 100);
+    record.fill.style.width = percent + '%';
+    record.track.setAttribute('aria-valuenow', String(percent));
+    record.percent.textContent = percent + '%';
+
+    var meta = [];
+    var settled = state === 'done' || state === 'error';
+    // A finished job has no ETA, and saying "estimating…" after it landed is
+    // noise; the outcome line below is the answer at that point.
+    if (!settled) {
+      if (typeof job.eta_seconds === 'number' && isFinite(job.eta_seconds)) {
+        meta.push('ETA ' + formatDuration(job.eta_seconds));
+      } else {
+        meta.push('estimating…');
+      }
+    }
+    if (typeof job.elapsed_seconds === 'number' && isFinite(job.elapsed_seconds)) {
+      meta.push(formatDuration(job.elapsed_seconds) + ' elapsed');
+    }
+    record.meta.textContent = meta.join(' · ');
+
+    if (state === 'error' || state === 'slow') {
+      var resultError =
+        job.result && typeof job.result === 'object' && job.result.error
+          ? String(job.result.error)
+          : '';
+      record.outcome.textContent = job.error
+        ? String(job.error)
+        : resultError || detail || 'download failed';
+      record.outcome.setAttribute('data-tone', 'error');
+      record.outcome.hidden = false;
+      record.close.hidden = false;
+    } else if (state === 'done') {
+      var lines = describeResult(job.result, job);
+      var texts = [];
+      for (var i = 0; i < lines.length; i += 1) texts.push(lines[i].text);
+      var status = job.result && job.result.status ? String(job.result.status) : '';
+      if (!texts.length) texts.push(detail || status || 'Done.');
+      record.outcome.textContent = texts.join('\n');
+      record.outcome.setAttribute('data-tone', 'ok');
+      record.outcome.hidden = false;
+      record.close.hidden = false;
+    } else {
+      record.outcome.textContent = '';
+      record.outcome.hidden = true;
+      record.close.hidden = true;
+    }
+
+    var events = Array.isArray(job.events) ? job.events : [];
+    var traceKey = JSON.stringify(events);
+    if (traceKey !== record.traceKey) {
+      record.traceKey = traceKey;
+      renderTrace(record, events);
+    }
+  }
+
+  function dismissToast(jobId) {
+    dismissedJobs[jobId] = true;
+    var record = toasts[jobId];
+    if (!record) return;
+    record.seq += 1;
+    if (record.timer) window.clearTimeout(record.timer);
+    if (record.node.parentNode) record.node.parentNode.removeChild(record.node);
+    delete toasts[jobId];
+  }
+
+  function pollJob(jobId, title) {
+    if (!jobId || dismissedJobs[jobId]) return;
+    var record = toastRecord(jobId, title);
+    toastSeq += 1;
+    record.seq = toastSeq;
+    var seq = record.seq;
     var started = Date.now();
-    jobBox.hidden = false;
-    renderJob({ id: jobId, state: 'queued', stage: 'queued', detail: 'Waiting for the pipeline…' });
+    if (record.timer) window.clearTimeout(record.timer);
+    renderToast(record, {
+      id: jobId,
+      state: 'queued',
+      stage: 'queued',
+      detail: 'Waiting for the pipeline…',
+      progress: 0,
+      events: [],
+    });
 
     function tick() {
-      if (seq !== pollSeq) return;
+      if (seq !== record.seq || dismissedJobs[jobId]) return;
       if (Date.now() - started > JOB_CAP_MS) {
-        renderJob({
+        renderToast(record, {
           id: jobId,
           state: 'slow',
           stage: 'timeout',
           detail: 'Still running after 30 minutes. Check the Minus dashboard for the outcome.',
+          progress: record.progress,
         });
         return;
       }
@@ -743,55 +1066,26 @@
           return response.json();
         })
         .then(function (job) {
-          if (seq !== pollSeq) return;
-          renderJob(job);
+          if (seq !== record.seq || dismissedJobs[jobId]) return;
+          renderToast(record, job);
           var state = String((job && job.state) || '').toLowerCase();
           if (state === 'done' || state === 'error') return;
-          window.setTimeout(tick, POLL_MS);
+          record.timer = window.setTimeout(tick, POLL_MS);
         })
         .catch(function (error) {
-          if (seq !== pollSeq) return;
-          renderJob({
+          if (seq !== record.seq || dismissedJobs[jobId]) return;
+          renderToast(record, {
             id: jobId,
             state: 'error',
             stage: 'poll',
             detail: error.message,
+            error: error.message,
+            progress: record.progress,
           });
         });
     }
 
     tick();
-  }
-
-  function renderJob(job) {
-    job = job || {};
-    jobBox.hidden = false;
-    jobBox.setAttribute('data-state', String(job.state || ''));
-    clear(jobBox);
-
-    var head = el('div', 'minus-job-head');
-    head.appendChild(el('span', 'minus-job-title', 'Minus download'));
-    head.appendChild(el('span', 'minus-job-state', String(job.state || 'working')));
-    jobBox.appendChild(head);
-
-    var meta = [];
-    if (job.id) meta.push(String(job.id));
-    if (job.stage) meta.push(String(job.stage));
-    if (meta.length) jobBox.appendChild(el('div', 'minus-job-meta', meta.join(' · ')));
-    if (job.detail) jobBox.appendChild(el('div', 'minus-job-detail', String(job.detail)));
-
-    var lines = describeResult(job.result, job);
-    var state = String(job.state || '').toLowerCase();
-    if (!lines.length && state === 'done') lines.push({ text: 'Done.', tone: 'ok' });
-    if (lines.length) {
-      var box = el('div', 'minus-job-result');
-      for (var i = 0; i < lines.length; i += 1) {
-        var line = el('div', 'minus-job-line', lines[i].text);
-        line.setAttribute('data-tone', lines[i].tone || 'muted');
-        box.appendChild(line);
-      }
-      jobBox.appendChild(box);
-    }
   }
 
   function describeResult(result, job) {
@@ -1085,6 +1379,7 @@
     if (document.querySelector('[data-minus="fab"]')) return;
     injectStyles();
     buildLauncher();
+    buildToasts();
     buildModal();
     watchPage();
     window.addEventListener('hashchange', onRouteChange);

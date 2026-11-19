@@ -159,10 +159,11 @@ def test_ingest_adds_waits_stages_and_scans_in_order(tmp_path, monkeypatch):
     assert add[3] == str(tmp_path / "quarantine" / "incoming")
     assert [call[0] for call in client.calls[2:]] == ["torrent", "torrent", "torrent"]
 
-    assert [kind for kind, _ in events] == ["staged", "verdict"]
+    # `added` lands as soon as the hash exists, before the bytes are staged.
+    assert [kind for kind, _ in events] == ["added", "staged", "verdict"]
     assert events[0][1]["torrent_hash"] == HASH
-    assert events[0][1]["files"] == 1
-    assert events[1][1]["verdict"]["label"] == "needs_review"
+    assert events[1][1]["files"] == 1
+    assert events[2][1]["verdict"]["label"] == "needs_review"
 
     assert (tmp_path / "quarantine" / HASH / "manifest.json").is_file()
     assert not (tmp_path / "library").exists()
@@ -228,7 +229,9 @@ def test_a_malicious_scan_deletes_the_payload_and_emits_an_alert(tmp_path, monke
     assert "ALERT: malicious torrent" in result["alert"]
     assert result["error"] is None
 
-    assert [kind for kind, _ in events] == ["staged", "verdict", "malicious_deleted"]
+    # `added` carries the hash as soon as qBittorrent knows it, so an observer
+    # can follow the transfer instead of waiting for the bytes to land.
+    assert [kind for kind, _ in events] == ["added", "staged", "verdict", "malicious_deleted"]
     deleted = events[-1][1]
     assert deleted["deleted"] is True
     assert deleted["torrent_hash"] == HASH

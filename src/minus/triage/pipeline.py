@@ -461,6 +461,56 @@ class TriagePipeline:
             result.update(summary)
             return summary
 
+    def _require_vpn(self, op_id: str, torrent_hash: str) -> None:
+        """Refuse when the tunnel is down, before a hash or a byte exists.
+
+        Two entry points need the same decision: `ingest` calls this before the
+        torrent is added, because a refused grab that had already added one
+        left a 0% entry in qBittorrent that would start downloading the moment
+        the tunnel came back, outside the pipeline's sight; `download` calls it
+        again for direct callers that never go through `ingest`.
+        """
+        from minus.services.vpn import VpnError, require_torrent_tunnel, require_tunnel
+
+        client = self.client
+        if client is None:
+            raise TriageError("qBittorrent is not configured (set MINUS_QBITTORRENT_URL).")
+
+        try:
+            if self.qbittorrent_vpn_interface:
+                require_torrent_tunnel(client, self.qbittorrent_vpn_interface)
+            elif self.vpn_interface:
+                require_tunnel(self.vpn_interface)
+            else:
+                self._trace(
+                    op_id,
+                    "vpn",
+                    "preflight.refused",
+                    torrent_hash,
+                    reason="no VPN interface configured",
+                )
+                raise TriageError(
+                    "VPN enforcement is on but no interface is configured "
+                    "(MINUS_QBITTORRENT_VPN_INTERFACE or MINUS_VPN_INTERFACE); "
+                    "no VPN interface configured means no download is safe."
+                )
+        except VpnError as exc:
+            self._trace(
+                op_id,
+                "vpn",
+                "preflight.refused",
+                torrent_hash,
+                reason=str(exc),
+            )
+            raise TriageError(str(exc)) from exc
+        self._trace(
+            op_id,
+            "vpn",
+            "preflight.done",
+            torrent_hash,
+            interface=self.qbittorrent_vpn_interface or self.vpn_interface,
+        )
+
     def _download(self, torrent_hash: str, *, op_id: str, expected_title: str = "") -> dict:
         if self.client is None:
             self._trace(
@@ -476,47 +526,12 @@ class TriagePipeline:
         # a client call is not worth making for something that cannot be staged.
         root = self.root(torrent_hash)
 
-        # Fail closed: enforcement on with no interface named is a
-        # misconfiguration, not permission to fetch over the raw route. The
-        # qBittorrent binding wins when both are set: its process is the one
-        # that downloads, so its own setting is the stronger assertion.
+        # Fail closed before anything else: enforcement on with no interface
+        # named is a misconfiguration, not permission to fetch over the raw
+        # route. The qBittorrent binding wins when both are set: its process is
+        # the one that downloads, so its own setting is the stronger assertion.
         if self.require_vpn:
-            from minus.services.vpn import VpnError, require_torrent_tunnel, require_tunnel
-
-            try:
-                if self.qbittorrent_vpn_interface:
-                    require_torrent_tunnel(self.client, self.qbittorrent_vpn_interface)
-                elif self.vpn_interface:
-                    require_tunnel(self.vpn_interface)
-                else:
-                    self._trace(
-                        op_id,
-                        "vpn",
-                        "preflight.refused",
-                        torrent_hash,
-                        reason="no VPN interface configured",
-                    )
-                    raise TriageError(
-                        "VPN enforcement is on but no interface is configured "
-                        "(MINUS_QBITTORRENT_VPN_INTERFACE or MINUS_VPN_INTERFACE); "
-                        "no VPN interface configured means no download is safe."
-                    )
-            except VpnError as exc:
-                self._trace(
-                    op_id,
-                    "vpn",
-                    "preflight.refused",
-                    torrent_hash,
-                    reason=str(exc),
-                )
-                raise TriageError(str(exc)) from exc
-            self._trace(
-                op_id,
-                "vpn",
-                "preflight.done",
-                torrent_hash,
-                interface=self.qbittorrent_vpn_interface or self.vpn_interface,
-            )
+            self._require_vpn(op_id, torrent_hash)
 
         info = self.client.torrent(torrent_hash)
         progress = float(info.get("progress") or 0.0)
@@ -1516,6 +1531,13 @@ class TriagePipeline:
         torrent_hash = ""
         stage = "add"
         try:
+            # The tunnel is checked before the add, not only in `_download`:
+            # a refused ingest that had already handed qBittorrent a magnet
+            # leaves a torrent behind, and it starts fetching by itself once
+            # the tunnel returns -- bytes the pipeline never saw.
+            if self.require_vpn:
+                stage = "vpn"
+                self._require_vpn(op_id, "")
             # A magnet names its own hash, so it can be matched against the
             # list qBittorrent already returns -- adding it again would either
             # fail or duplicate the bytes. There is deliberately no equivalent
@@ -1546,6 +1568,11 @@ class TriagePipeline:
                 torrent_hash = self.find_new_torrent(before, url)
             stage = "find"
             self._trace(op_id, "find", "find.done", torrent_hash, url=url)
+            # The hash is the only handle an observer has on a transfer that is
+            # still running; discovering it after the download would leave the
+            # bridge with nothing to report until the bytes were already on
+            # disk. Emitted for both paths (fresh add and a re-used torrent).
+            self._notify("added", {"torrent_hash": torrent_hash})
             if wait:
                 stage = "wait"
                 info = self.wait_for_completion(torrent_hash)
