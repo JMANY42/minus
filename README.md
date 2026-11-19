@@ -418,9 +418,11 @@ frontends, not a Jellyfin integration that happens to be reachable elsewhere.
 
 Nothing in it reimplements the pipeline: search is
 `DiscoveryTools.torrent_search`, and a grab runs `ensure_running`,
-`ingest(detonate=True, release=True)` and `promote` only for a clean,
-non-low-confidence result. The browser names an infohash and the bridge
-re-resolves it, so a page cannot push a URL of its choosing into quarantine.
+`ingest(detonate=True, release=False)` and then `promote` only for a clean,
+non-low-confidence result. `release=False` is deliberate: releasing inside the
+pipeline would promote any clean verdict and skip that low-confidence gate.
+The browser names an infohash and the bridge re-resolves it, so a page cannot
+push a URL of its choosing into quarantine.
 
 ```bash
 minus bridge serve                     # 127.0.0.1:8099, --frontend jellyfin

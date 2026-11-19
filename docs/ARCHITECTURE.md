@@ -578,3 +578,26 @@ no dependency. `build_registry` registers the built-in, alarm, triage, VPN and (
 Google groups; `escalate` is excluded because it needs a live conversation and a result queue, and
 coding tools are excluded because an MCP client has no approval UI. Entry points: `minus mcp`,
 `minus-mcp`, `python -m minus.mcp`, and the shipped `.mcp.json`.
+
+## 17. The remote bridge
+
+`src/minus/remote/` is the optional loopback surface over download mode, split so each layer can
+be used without the one above it. `service.py` holds `DownloadService` (search, grab, job
+bookkeeping, the qBittorrent sampler); `http.py` wraps one service in `HttpBridge` (routing,
+token, CORS); `frontends/` describes the page allowed to load `web/minus.js`. Imports point from
+transport to capability: `http.py` imports `service.py` and `frontends/`, while `service.py` and
+`frontends/` import neither the transport nor each other. The pipeline is built lazily through
+`assembly.build_triage_pipeline`, so a grab is the same `ingest(detonate=True, release=False)` and
+conditional `promote` the harness runs: the bridge is one consumer of the triage pipeline, not a
+second implementation. `release=False` keeps the library decision here, where the low-confidence
+gate lives. `minus bridge …` is the only wiring in `cli.py`, imported lazily. The
+contract is `docs/WEB_BRIDGE.md`.
+
+- `service.py` — `DownloadService`, `DownloadError`; imports no HTTP, so a sibling agent can call
+  it in-process.
+- `http.py` — `HttpBridge`: the socket, per-process token, CORS and 64 KiB body cap; adds wire
+  format only.
+- `frontends/` — the `Frontend` protocol, `FrontendError`, the `FRONTENDS` registry, and the
+  `jellyfin`/`generic` installers.
+- `web/minus.js` — one buildless browser client, prefixed with `window.__MINUS_REMOTE__` when
+  served.
