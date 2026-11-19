@@ -8,6 +8,11 @@ tag, a single `.minus-backup` copy written the first time, and a `remove` that
 restores that backup when there is one instead of trying to reverse a string
 edit it cannot see.
 
+The marker used to be `data-minus-jellyfin`. It is now `data-minus-remote` so
+the tag says what it is on any app, but `install` still recognizes the old one:
+a page patched by an earlier build must be replaced, not patched a second time,
+or the browser would load the client twice.
+
 Permissions are not swallowed: `/usr/share/jellyfin/web` belongs to root, and
 a silent failure would leave the user believing the bridge was installed. The
 error names sudo because that is the only fix.
@@ -18,26 +23,25 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from minus.errors import MinusError
+from minus.remote.frontends import FrontendError
 
-# The run-time contract the web UI is written against: the script URL is served
-# by the bridge, and the attribute is what the patcher looks for on a re-run or
-# a removal (including on a file it did not write in this process).
-SCRIPT_URL = "http://127.0.0.1:8099/minus.js"
-MARKER = "data-minus-jellyfin"
+# Where the CLI's tag command and this installer assume the bridge listens.
+DEFAULT_BASE_URL = "http://127.0.0.1:8099"
+SCRIPT_URL = f"{DEFAULT_BASE_URL}/minus.js"
+MARKER = "data-minus-remote"
+LEGACY_MARKER = "data-minus-jellyfin"
 BACKUP_SUFFIX = ".minus-backup"
 
 # Any marked tag, including the whitespace it was inserted with, so a re-run
 # replaces rather than accumulates and a removal leaves no blank line behind.
+# Both markers match: a legacy tag is still ours to replace or remove.
 _TAG_RE = re.compile(
-    r"[ \t]*<script\b[^>]*\bdata-minus-jellyfin\b[^>]*>\s*</script>\s*",
+    r"[ \t]*<script\b[^>]*\b(?:data-minus-remote|data-minus-jellyfin)\b[^>]*>\s*</script>\s*",
     re.IGNORECASE,
 )
 _HEAD_RE = re.compile(r"</head\s*>", re.IGNORECASE)
 
-
-class JellyfinError(MinusError):
-    """jellyfin-web's index.html could not be read, patched or restored."""
+_ASSET = Path(__file__).resolve().parent.parent / "web" / "minus.js"
 
 
 def index_html(web_dir: Path) -> Path:
@@ -48,8 +52,12 @@ def _tag(script_url: str) -> str:
     return f'<script defer src="{script_url}" {MARKER}="1"></script>'
 
 
+def _script_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/minus.js"
+
+
 def status(web_dir: Path) -> bool:
-    """Whether the bridge tag is present; a missing index.html is "not"."""
+    """Whether a bridge tag is present; a missing index.html is "not"."""
     try:
         return bool(_TAG_RE.search(index_html(web_dir).read_text(encoding="utf-8")))
     except OSError:
@@ -60,13 +68,15 @@ def install(web_dir: Path, script_url: str = SCRIPT_URL) -> bool:
     """Insert the marked script tag; True when the file changed.
 
     Idempotent: two installs leave exactly one tag, and the backup still holds
-    the bytes from before the first one.
+    the bytes from before the first one. A tag carrying the legacy marker is
+    stripped with the current one, so upgrading in place cannot double-load the
+    client.
     """
     path = index_html(web_dir)
     try:
         original = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise JellyfinError(f"cannot read {path}: {exc}") from exc
+        raise FrontendError(f"cannot read {path}: {exc}") from exc
 
     # Strip every marked tag first, so a file that was patched by hand or by an
     # older bridge still ends up with one tag in the canonical position.
@@ -99,23 +109,23 @@ def remove(web_dir: Path) -> bool:
         try:
             restored = backup.read_text(encoding="utf-8")
         except OSError as exc:
-            raise JellyfinError(f"cannot read {backup}: {exc}") from exc
+            raise FrontendError(f"cannot read {backup}: {exc}") from exc
         _write(path, restored, path)
         try:
             backup.unlink()
         except PermissionError as exc:
-            raise JellyfinError(
+            raise FrontendError(
                 f"cannot remove {backup}: permission denied. Re-run with sudo "
-                f"(e.g. sudo minus jellyfin web remove --web-dir {path.parent})"
+                f"(e.g. sudo minus bridge remove --web-dir {path.parent})"
             ) from exc
         except OSError as exc:
-            raise JellyfinError(f"cannot remove {backup}: {exc}") from exc
+            raise FrontendError(f"cannot remove {backup}: {exc}") from exc
         return True
 
     try:
         current = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise JellyfinError(f"cannot read {path}: {exc}") from exc
+        raise FrontendError(f"cannot read {path}: {exc}") from exc
     stripped = _TAG_RE.sub("", current)
     if stripped == current:
         return False
@@ -128,9 +138,36 @@ def _write(path: Path, text: str, owned: Path) -> None:
     try:
         path.write_text(text, encoding="utf-8")
     except PermissionError as exc:
-        raise JellyfinError(
+        raise FrontendError(
             f"cannot write {path}: permission denied. Re-run with sudo "
-            f"(e.g. sudo minus jellyfin web install --web-dir {owned.parent})"
+            f"(e.g. sudo minus bridge install --web-dir {owned.parent})"
         ) from exc
     except OSError as exc:
-        raise JellyfinError(f"cannot write {path}: {exc}") from exc
+        raise FrontendError(f"cannot write {path}: {exc}") from exc
+
+
+class JellyfinFrontend:
+    """jellyfin-web's static bundle, patched in place."""
+
+    name = "jellyfin"
+
+    def asset_path(self) -> Path:
+        return _ASSET
+
+    def script_tag(self, base_url: str) -> str:
+        return _tag(_script_url(base_url))
+
+    def install(self, web_dir: Path) -> bool:
+        return install(web_dir)
+
+    def status(self, web_dir: Path) -> bool:
+        return status(web_dir)
+
+    def remove(self, web_dir: Path) -> bool:
+        return remove(web_dir)
+
+    def notes(self) -> str:
+        return (
+            "one script tag is written into index.html; re-run install after a "
+            "jellyfin-web upgrade replaces that file"
+        )
