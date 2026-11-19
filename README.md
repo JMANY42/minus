@@ -446,7 +446,7 @@ The Jellyfin frontend patches `index.html` (one tag, idempotent,
 client adds a launcher in the bottom-right and a bar when a library search
 finds nothing. The generic frontend has no file to patch: it prints the tag.
 
-Every grab keeps a toast in the top-right until it settles: a progress bar,
+Every grab keeps a toast in the bottom-left until it settles: a progress bar,
 elapsed time, an ETA while qBittorrent reports one for the transfer, and an
 expandable trace of the pipeline's milestones (added, staged, verdict,
 promoted). A refused grab is reported as one -- `state: error` carrying the

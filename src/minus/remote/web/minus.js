@@ -255,8 +255,8 @@
 
     .minus-toasts {
       position: fixed !important;
-      top: 16px;
-      right: 16px;
+      left: 16px;
+      bottom: 16px;
       z-index: 2147483002;
       display: flex;
       flex-direction: column;
