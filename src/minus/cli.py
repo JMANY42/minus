@@ -279,6 +279,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only print the credentials, leaving .env alone",
     )
 
+    jellyfin = subcommands.add_parser(
+        "jellyfin", help="Serve MINUS's search to jellyfin-web, or patch its index.html"
+    )
+    jellyfin_actions = jellyfin.add_subparsers(dest="jellyfin_action")
+    jellyfin_serve = jellyfin_actions.add_parser(
+        "serve", help="Run the loopback bridge the jellyfin-web script talks to"
+    )
+    # Loopback only, and not a Settings field: a torrent bridge on a public
+    # interface is a remote execution surface, so the host/port live here.
+    jellyfin_serve.add_argument("--host", default="127.0.0.1", help="Bind address")
+    jellyfin_serve.add_argument("--port", type=int, default=8099, help="Bind port")
+    jellyfin_serve.add_argument(
+        "--token",
+        default="",
+        help="Fixed API token (default: a fresh one per process, published in /minus.js)",
+    )
+    jellyfin_web = jellyfin_actions.add_parser(
+        "web", help="Patch jellyfin-web's index.html so the page loads the bridge script"
+    )
+    jellyfin_web_actions = jellyfin_web.add_subparsers(dest="web_action")
+    for name, action_help in (
+        ("install", "Insert the marked script tag and keep a one-time backup"),
+        ("remove", "Restore the backup, or strip the tag when there is none"),
+        ("status", "Report whether the bridge tag is installed"),
+    ):
+        action = jellyfin_web_actions.add_parser(name, help=action_help)
+        action.add_argument(
+            "--web-dir",
+            default="/usr/share/jellyfin/web",
+            help="jellyfin-web's static directory (the one holding index.html)",
+        )
+
     return parser
 
 
@@ -495,6 +527,56 @@ def run_vpn_command(args) -> int:
                 reason = binding.get("error") or binding.get("reason") or "not bound"
                 print(f"qBittorrent: {reason}")
     return 0 if snapshot.healthy or args.action == "status" else 1
+
+
+def _serve_jellyfin(args) -> int:
+    """Run the loopback bridge in the foreground until interrupted."""
+    from minus.jellyfin.server import Bridge
+
+    settings = load_settings()
+    bridge = Bridge(settings, args.host, args.port, token=args.token or None)
+    # The token is deliberately not printed: it lives in /minus.js, where the
+    # page that may use it reads it, and a terminal scrollback is a second copy.
+    print(f"jellyfin bridge: {bridge.base_url}")
+    print(f"script:          {bridge.base_url}/minus.js")
+    print("install:         minus jellyfin web install --web-dir /usr/share/jellyfin/web")
+    bridge.serve_forever()
+    return 0
+
+
+def run_jellyfin_command(args) -> int:
+    """Serve the bridge, or patch jellyfin-web's index.html.
+
+    The bridge imports nothing from the harness, and this command imports the
+    bridge lazily so `minus memory` on a box without the pipeline still starts.
+    """
+    from minus.errors import MinusError
+
+    if getattr(args, "jellyfin_action", None) == "serve":
+        try:
+            return _serve_jellyfin(args)
+        except (MinusError, OSError) as exc:
+            print(f"jellyfin: {exc}")
+            return 1
+
+    from minus.jellyfin.install import install, remove, status
+
+    web_dir = Path(getattr(args, "web_dir", "/usr/share/jellyfin/web"))
+    action = getattr(args, "web_action", None) or "status"
+    try:
+        if action == "install":
+            changed = install(web_dir)
+            print(f"{'patched' if changed else 'already patched'}: {web_dir / 'index.html'}")
+        elif action == "remove":
+            changed = remove(web_dir)
+            print(f"{'restored' if changed else 'nothing to remove'}: {web_dir / 'index.html'}")
+        else:
+            state = "installed" if status(web_dir) else "not installed"
+            print(f"{state}: {web_dir / 'index.html'}")
+        return 0
+    except (MinusError, OSError) as exc:
+        print(f"jellyfin: {exc}")
+        return 1
 
 
 def run_qbt_command(args) -> int:
@@ -984,6 +1066,9 @@ def main() -> None:
 
     if args.command == "qbt":
         raise SystemExit(run_qbt_command(args))
+
+    if args.command == "jellyfin":
+        raise SystemExit(run_jellyfin_command(args))
 
     if args.command == "triage":
         raise SystemExit(run_triage_command(args))
