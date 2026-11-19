@@ -100,12 +100,14 @@ def redirect_console(retention: int = 30) -> Path:
     """
     directory = logs_dir()
     directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(directory, 0o700)
     prune_old_logs(directory, retention, CONSOLE_PREFIX)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     path = directory / f"{CONSOLE_PREFIX}-{timestamp}-{os.getpid()}.log"
 
-    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.dup2(handle, 1)
         os.dup2(handle, 2)
@@ -115,9 +117,10 @@ def redirect_console(retention: int = 30) -> Path:
     # Writing to a file rather than a terminal, Python switches to block
     # buffering, and a tailing reader would see nothing until 4K had piled up.
     for stream in (sys.stdout, sys.stderr):
-        if stream is not None:
+        reconfigure = getattr(stream, "reconfigure", None) if stream is not None else None
+        if reconfigure is not None:
             with contextlib.suppress(AttributeError, ValueError):
-                stream.reconfigure(line_buffering=True)
+                reconfigure(line_buffering=True)
 
     return path
 
@@ -142,6 +145,8 @@ def setup_logging(
     """
     directory = logs_dir()
     directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(directory, 0o700)
     prune_old_logs(directory, retention, prefix)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
@@ -155,6 +160,9 @@ def setup_logging(
     suppress_filter = _ModuleSuppressFilter(_SUPPRESSED_ORIGINS)
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    # The run log records transcripts, which are personal data.
+    with contextlib.suppress(OSError):
+        os.chmod(log_file, 0o600)
     file_handler.setFormatter(formatter)
     file_handler.setLevel(level)
     file_handler.addFilter(suppress_filter)

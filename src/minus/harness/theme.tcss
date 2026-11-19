@@ -1,0 +1,275 @@
+/* A quiet dark surface, separators rather than borders.
+ *
+ * The dashboard's stylesheet restricts itself to ansi_* names because it is
+ * built for a Linux VT. The harness is a Textual-only view, so it can use hex
+ * and get the neutral greys the console would flatten anyway. There are no
+ * box-drawing characters here on purpose: vertical space belongs to the
+ * transcript, and a border around every pane spends four rows saying nothing.
+ */
+
+Screen {
+    layout: vertical;
+    background: #0b0d10;
+    color: #c9d0da;
+}
+
+#topbar {
+    height: 1;
+    padding: 0 1;
+    background: #101319;
+    color: #c9d0da;
+}
+
+#body {
+    height: 1fr;
+}
+
+/* One zero-size dock on the left. The explorer is mounted into it when it is
+ * opened, and the active class is what gives it room; hiding is just removing
+ * the class, so the pane keeps its tree, preview and scroll position. */
+.dock {
+    background: #0e1116;
+}
+
+#dock-left {
+    width: 0;
+}
+
+#dock-left.-active {
+    width: 54;
+}
+
+#explorer {
+    width: 1fr;
+    height: 1fr;
+    background: #0e1116;
+}
+
+#dock-left #explorer {
+    border-right: solid #1d222a;
+}
+
+#explorer-toolbar {
+    height: 3;
+}
+
+.dockbtn {
+    height: 3;
+    min-width: 8;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: #151b24;
+    color: #9aa4b2;
+}
+
+.dockbtn:hover {
+    background: #243247;
+    color: #e8edf5;
+}
+
+#explorer-main {
+    width: 1fr;
+    height: 1fr;
+}
+
+/* The tree is the sidebar: it keeps the 22-column rhythm of the modes rail,
+ * and the code view takes every remaining column and the full height. */
+#explorer-tree-pane {
+    width: 1fr;
+    height: 1fr;
+    border-right: solid #2a323e;
+}
+
+/* Once a file or diff is open, the tree becomes the sidebar and the code
+ * view takes every remaining column and the full height. */
+#explorer.-preview #explorer-tree-pane {
+    width: 22;
+}
+
+#file-tree {
+    width: 1fr;
+    height: 1fr;
+    background: transparent;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+#file-preview {
+    width: 1fr;
+    height: 1fr;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 1;
+}
+
+#left {
+    width: 22;
+    padding: 0 1;
+    background: #0e1116;
+    border-right: solid #1d222a;
+}
+
+#center {
+    width: 1fr;
+    padding: 0 1;
+    background: #0b0d10;
+}
+
+#right {
+    width: 28;
+    padding: 0 1;
+    background: #0e1116;
+    border-left: solid #1d222a;
+}
+
+.rail-title {
+    height: 1;
+    color: #687386;
+    text-style: bold;
+}
+
+#conversation {
+    height: 1fr;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+}
+
+/* The collapsed state is one line directly above the prompt. Clicking it
+ * opens the trace in place, so the conversation keeps its scroll position. */
+#thinking-bar {
+    height: 1;
+    padding: 0 1;
+    background: #0e1116;
+    color: #6b7280;
+}
+
+#thinking-bar:hover {
+    background: #151b24;
+    color: #c9d0da;
+}
+
+#thinking-trace {
+    display: none;
+    height: 12;
+    padding: 0 1;
+    background: #0b0d10;
+    color: #9aa4b2;
+    border-top: solid #1d222a;
+    scrollbar-size-vertical: 1;
+}
+
+#thinking-trace.-open {
+    display: block;
+}
+
+#activity {
+    height: 1fr;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+}
+
+#alerts {
+    height: auto;
+    max-height: 10;
+    background: transparent;
+    scrollbar-size-vertical: 1;
+}
+
+#mode-list {
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+#mode-list > .option-list--option {
+    padding: 0 1;
+    color: #9aa4b2;
+}
+
+#mode-list > .option-list--option-highlighted {
+    color: #e8edf5;
+    background: #1b2230;
+    text-style: bold;
+}
+
+#mode-list:focus {
+    border: none;
+    background-tint: transparent;
+}
+
+#mode-list:focus > .option-list--option-highlighted {
+    color: #f8fafc;
+    background: #243247;
+}
+
+#bottom {
+    height: 3;
+    padding: 0 1;
+    background: #101319;
+    border-top: solid #1d222a;
+}
+
+#prompt {
+    height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #e8edf5;
+}
+
+#prompt:focus {
+    border: none;
+    background-tint: transparent;
+}
+
+#hints {
+    height: 1;
+    color: #5f6b7c;
+}
+
+/* Approval is the one modal, so it may have a border: it is a distinct
+ * decision, not another pane in the flow. */
+ApprovalScreen {
+    align: center middle;
+    background: #05070a;
+}
+
+#approval {
+    width: 68;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    background: #12161d;
+    border: solid #2a323e;
+}
+
+.approval-kicker {
+    height: 1;
+    color: #fb7185;
+    text-style: bold;
+}
+
+#approval-action {
+    height: auto;
+    color: #f8fafc;
+    text-style: bold;
+}
+
+#approval-detail {
+    height: auto;
+    margin-top: 1;
+    color: #9aa4b2;
+}
+
+#approval-buttons {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+
+#approval-buttons Button {
+    min-width: 9;
+    margin-left: 1;
+}

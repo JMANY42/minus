@@ -66,6 +66,14 @@ class MemoryService:
         self._store = (
             self.store if self.store is not None else SqliteFactStore(DEFAULT_SEMANTIC_MEMORY_DB)
         )
+        probe = getattr(self._store, "embeddings_available", None)
+        self._embeddings = bool(probe()) if callable(probe) else True
+        if not self._embeddings:
+            logger.warning(
+                "Semantic memory is unavailable: the embeddings extra is not installed "
+                "(uv sync --extra embeddings). Conversations still record and condense; "
+                "facts are neither retrieved nor stored."
+            )
 
     def _open_transcript(self) -> None:
         self.started_at = datetime.now(UTC)
@@ -108,6 +116,10 @@ class MemoryService:
     # ---- Facts ----
 
     def extract_facts(self, condensed_conversation: dict | None) -> list[dict]:
+        if not self._embeddings:
+            # Extraction is an LLM call whose result could not be stored.
+            logger.info("Skipping fact extraction: embeddings are unavailable.")
+            return []
         if condensed_conversation is None:
             logger.info("Skipping fact extraction: no condensed conversation.")
             return []
@@ -131,6 +143,9 @@ class MemoryService:
         )
 
     def store_facts(self, facts: list[dict]) -> None:
+        if not self._embeddings:
+            logger.info("Skipping fact storage: embeddings are unavailable.")
+            return
         for fact in facts:
             logger.info("Adding fact to semantic memory: %s", fact)
             self._store.add_fact(
@@ -154,6 +169,8 @@ class MemoryService:
         threshold: float | None = None,
     ) -> list:
         """Stored facts close enough to `query` to be worth injecting into context."""
+        if not self._embeddings:
+            return []
         top_k = self.fact_search_top_k if top_k is None else top_k
         threshold = self.relevance_threshold if threshold is None else threshold
 

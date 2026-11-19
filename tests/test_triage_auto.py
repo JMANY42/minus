@@ -1,0 +1,394 @@
+"""The whole torrent flow against a scripted client, with no network.
+
+The client is a stand-in because qBittorrent's job here is only to report
+progress and hand back a content path; the bytes, the staging, the manifest and
+the verdict are the pipeline's own and are exercised for real.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from minus.errors import ToolExecutionError
+from minus.tools.triage import TriageTools
+from minus.triage import pipeline as pipeline_module
+from minus.triage.pipeline import TriageError, TriagePipeline
+from minus.triage.sandbox import SandboxReport
+from minus.triage.scoring import CLEAN, MALICIOUS, Verdict
+from minus.triage.static import FileReport, StaticReport
+
+HASH = "d" * 40
+MAGNET = f"magnet:?xt=urn:btih:{HASH}&dn=Movie"
+
+
+class DetonatingSandbox:
+    """A guest that ran and observed nothing; tests patch `decide` clean."""
+
+    name = "fake-guest"
+
+    def run(self, artifacts, *, timeout, review=False, keep=None):
+        return SandboxReport(engine=self.name, detonated=True, completed=True)
+
+
+class ScriptedClient:
+    """Reports a scripted progress sequence and the same completed content."""
+
+    def __init__(
+        self,
+        content: Path,
+        progress: tuple[float, ...] = (0.5, 1.0),
+        delete_error: Exception | None = None,
+    ) -> None:
+        self.content = content
+        self.progress = list(progress)
+        self.items: list[dict] = []
+        self.calls: list = []
+        self.delete_error = delete_error
+        self.deleted: list[tuple[str, bool]] = []
+
+    def torrents(self, **filters: str) -> list[dict]:
+        self.calls.append("torrents")
+        return [dict(item) for item in self.items]
+
+    def add_torrent(
+        self,
+        urls: list[str],
+        *,
+        paused: bool = True,
+        save_path: str | None = None,
+    ) -> str:
+        self.calls.append(("add_torrent", tuple(urls), paused, save_path))
+        self.items.append({"hash": HASH, "name": "Movie", "progress": 0.0})
+        return "Ok."
+
+    def torrent(self, torrent_hash: str) -> dict:
+        self.calls.append(("torrent", torrent_hash))
+        if len(self.progress) > 1:
+            current = self.progress.pop(0)
+        else:
+            current = self.progress[0] if self.progress else 1.0
+        return {
+            "hash": torrent_hash,
+            "name": "Movie",
+            "progress": current,
+            "size": 5,
+            "content_path": str(self.content),
+            "save_path": str(self.content.parent),
+        }
+
+    def delete_torrent(self, torrent_hash: str, delete_files: bool = True) -> None:
+        self.calls.append(("delete_torrent", torrent_hash, delete_files))
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append((torrent_hash, delete_files))
+
+
+def _static(flags: list[str] | None = None, score: int = 0) -> StaticReport:
+    return StaticReport(
+        root="/quarantine",
+        files=[
+            FileReport(
+                relative="Movie/movie.mp4",
+                size=5,
+                sha256="0" * 64,
+                kind="text",
+                entropy=1.0,
+                flags=list(flags or []),
+            )
+        ],
+        flags=list(flags or []),
+        score=score,
+    )
+
+
+def _pipeline(tmp_path: Path, client: ScriptedClient, events: list, **kwargs) -> TriagePipeline:
+    return TriagePipeline(
+        quarantine=tmp_path / "quarantine",
+        library=tmp_path / "library",
+        client=client,
+        require_vpn=False,
+        poll_seconds=0.001,
+        notify=lambda kind, payload: events.append((kind, payload)),
+        **kwargs,
+    )
+
+
+def _content(tmp_path: Path) -> Path:
+    content = tmp_path / "downloads" / "Movie"
+    content.mkdir(parents=True)
+    (content / "movie.mp4").write_bytes(b"hello")
+    return content
+
+
+def _promote_clean(tmp_path: Path, monkeypatch, client: ScriptedClient, **kwargs) -> dict:
+    """Ingest a scripted torrent whose verdict is clean, then release it."""
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    monkeypatch.setattr(
+        pipeline_module,
+        "decide",
+        lambda *args, **options: Verdict(CLEAN, 0, True, ()),
+    )
+    pipeline = _pipeline(tmp_path, client, [], sandbox=DetonatingSandbox(), **kwargs)
+    assert pipeline.ingest(MAGNET)["status"] == CLEAN
+    return pipeline.promote(HASH)
+
+
+def test_ingest_adds_waits_stages_and_scans_in_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    client = ScriptedClient(_content(tmp_path))
+    events: list = []
+    pipeline = _pipeline(tmp_path, client, events)
+
+    result = pipeline.ingest(MAGNET)
+
+    assert result["status"] == "needs_review"
+    assert result["torrent_hash"] == HASH
+    assert result["name"] == "Movie"
+    assert result["files"] == 1
+    assert result["alert"] is None
+    assert result["error"] is None
+    assert result["verdict"]["label"] == "needs_review"
+
+    assert client.calls[0] == "torrents"
+    add = client.calls[1]
+    assert add[0] == "add_torrent"
+    assert add[1] == (MAGNET,)
+    assert add[2] is False
+    assert add[3] == str(tmp_path / "quarantine" / "incoming")
+    assert [call[0] for call in client.calls[2:]] == ["torrent", "torrent", "torrent"]
+
+    # `added` lands as soon as the hash exists, before the bytes are staged.
+    assert [kind for kind, _ in events] == ["added", "staged", "verdict"]
+    assert events[0][1]["torrent_hash"] == HASH
+    assert events[1][1]["files"] == 1
+    assert events[2][1]["verdict"]["label"] == "needs_review"
+
+    assert (tmp_path / "quarantine" / HASH / "manifest.json").is_file()
+    assert not (tmp_path / "library").exists()
+
+
+def test_ingest_release_promotes_a_clean_verdict_and_removes_the_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    monkeypatch.setattr(
+        pipeline_module,
+        "decide",
+        lambda *args, **options: Verdict(CLEAN, 0, True, ()),
+    )
+    client = ScriptedClient(_content(tmp_path))
+    pipeline = _pipeline(tmp_path, client, [], sandbox=DetonatingSandbox())
+
+    result = pipeline.ingest(MAGNET, release=True)
+
+    assert result["status"] == CLEAN
+    assert result["release"]["promoted"] is True
+    moved = Path(result["release"]["moved_to"])
+    assert moved.name == "movie.mp4"
+    assert moved.read_bytes() == b"hello"
+    assert client.deleted == [(HASH, True)]
+    assert not (tmp_path / "quarantine" / HASH / "files" / "Movie").exists()
+
+
+def test_ingest_release_leaves_needs_review_in_quarantine(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    client = ScriptedClient(_content(tmp_path))
+    pipeline = _pipeline(tmp_path, client, [])
+
+    result = pipeline.ingest(MAGNET, release=True)
+
+    assert result["status"] == "needs_review"
+    assert result["release"]["promoted"] is False
+    assert "needs_review" in result["release"]["reason"]
+    assert not (tmp_path / "library").exists()
+    assert (tmp_path / "quarantine" / HASH / "files" / "Movie" / "movie.mp4").is_file()
+    assert client.deleted == []
+
+
+def test_a_malicious_scan_deletes_the_payload_and_emits_an_alert(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        pipeline_module,
+        "analyse",
+        lambda root: _static(flags=["windows-pe"], score=9),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "decide",
+        lambda static, run, *, require_detonation=True, review=None: Verdict(
+            MALICIOUS, 9, True, ("defender detection: Trojan:Win32/X",)
+        ),
+    )
+    client = ScriptedClient(_content(tmp_path))
+    events: list = []
+    pipeline = _pipeline(tmp_path, client, events)
+
+    result = pipeline.ingest(MAGNET)
+
+    assert result["status"] == "malicious"
+    assert result["verdict"]["label"] == MALICIOUS
+    assert "ALERT: malicious torrent" in result["alert"]
+    assert result["error"] is None
+
+    # `added` carries the hash as soon as qBittorrent knows it, so an observer
+    # can follow the transfer instead of waiting for the bytes to land.
+    assert [kind for kind, _ in events] == ["added", "staged", "verdict", "malicious_deleted"]
+    deleted = events[-1][1]
+    assert deleted["deleted"] is True
+    assert deleted["torrent_hash"] == HASH
+    assert "ALERT" in deleted["alert"]
+    assert Path(deleted["rejected_record"]).is_file()
+
+    # The bytes are gone; the record is not.
+    assert not (tmp_path / "quarantine" / HASH).exists()
+    record = Path(deleted["rejected_record"]).read_text()
+    assert "Trojan:Win32/X" in record
+
+
+def test_a_timeout_names_the_progress_instead_of_hanging(tmp_path):
+    client = ScriptedClient(_content(tmp_path), progress=(0.5,))
+    pipeline = _pipeline(tmp_path, client, [])
+
+    with pytest.raises(TriageError) as caught:
+        pipeline.wait_for_completion(HASH, timeout=0.01, poll=0.001)
+
+    assert "50%" in str(caught.value)
+
+
+def test_ingest_returns_failure_instead_of_raising_on_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    client = ScriptedClient(_content(tmp_path), progress=(0.5,))
+    pipeline = _pipeline(tmp_path, client, [], download_timeout=0.01)
+
+    result = pipeline.ingest(MAGNET)
+
+    assert result["status"] == "failed"
+    assert "50%" in result["error"]
+    # The torrent is still in qBittorrent; the caller needs its hash.
+    assert result["torrent_hash"] == HASH
+
+
+def test_find_new_torrent_reads_the_hash_out_of_a_magnet(tmp_path):
+    client = ScriptedClient(_content(tmp_path))
+    pipeline = _pipeline(tmp_path, client, [])
+
+    assert pipeline.find_new_torrent(set(), MAGNET) == HASH
+    assert client.calls == []
+
+
+def test_find_new_torrent_polls_for_an_http_url(tmp_path):
+    content = _content(tmp_path)
+    client = ScriptedClient(content)
+    client.items = []
+    pipeline = _pipeline(tmp_path, client, [])
+
+    def add_later():
+        client.items.append({"hash": HASH, "name": "Movie"})
+
+    # The first poll sees nothing, the second sees the torrent that appeared.
+    original = client.torrents
+    calls = {"count": 0}
+
+    def torrents(**filters):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            add_later()
+        return original(**filters)
+
+    client.torrents = torrents  # type: ignore[method-assign]
+
+    assert (
+        pipeline.find_new_torrent(
+            set(), "http://example.test/movie.torrent", timeout=0.1, poll=0.001
+        )
+        == HASH
+    )
+
+
+def test_an_observer_error_does_not_break_the_stage(tmp_path):
+    pipeline = TriagePipeline(quarantine=tmp_path / "q", library=tmp_path / "l")
+
+    def broken(kind, payload):
+        raise RuntimeError("rendering failed")
+
+    pipeline.notify = broken
+    pipeline._notify("staged", {"torrent_hash": HASH})  # must not raise
+
+
+def test_torrent_ingest_tool_refuses_paths_before_touching_the_client(tmp_path):
+    client = ScriptedClient(_content(tmp_path))
+    tool = TriageTools(_pipeline(tmp_path, client, []))
+
+    with pytest.raises(ToolExecutionError) as caught:
+        tool.torrent_ingest("/home/user/file.torrent")
+
+    assert "magnet" in str(caught.value)
+    assert client.calls == []
+
+
+def test_torrent_progress_reports_only_the_fields_a_decision_needs(tmp_path):
+    client = ScriptedClient(_content(tmp_path), progress=(1.0,))
+    client.items = [{"hash": HASH, "name": "Movie", "progress": 1.0}]
+    tool = TriageTools(_pipeline(tmp_path, client, []))
+
+    assert tool.torrent_progress(HASH) == {
+        "hash": HASH,
+        "name": "Movie",
+        "progress": 1.0,
+        "state": None,
+        "eta": None,
+        "size": 5,
+    }
+
+
+def test_a_clean_promotion_deletes_the_torrent_and_its_files(tmp_path, monkeypatch):
+    client = ScriptedClient(_content(tmp_path))
+    promoted = _promote_clean(tmp_path, monkeypatch, client)
+
+    assert Path(promoted["moved_to"]).is_file()
+    assert promoted["cleanup"] == {"deleted": True}
+    assert client.deleted == [(HASH, True)]
+    assert ("delete_torrent", HASH, True) in client.calls
+
+
+def test_a_malicious_rejection_deletes_the_torrent_and_its_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        pipeline_module,
+        "analyse",
+        lambda root: _static(flags=["windows-pe"], score=9),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "decide",
+        lambda static, run, *, require_detonation=True, review=None: Verdict(
+            MALICIOUS, 9, True, ("defender detection: Trojan:Win32/X",)
+        ),
+    )
+    client = ScriptedClient(_content(tmp_path))
+    events: list = []
+    pipeline = _pipeline(tmp_path, client, events)
+
+    result = pipeline.ingest(MAGNET)
+
+    assert result["status"] == "malicious"
+    assert client.deleted == [(HASH, True)]
+    assert events[-1][0] == "malicious_deleted"
+    assert events[-1][1]["cleanup"] == {"deleted": True}
+
+
+def test_auto_cleanup_off_keeps_the_torrent_in_qbittorrent(tmp_path, monkeypatch):
+    client = ScriptedClient(_content(tmp_path))
+    promoted = _promote_clean(tmp_path, monkeypatch, client, auto_cleanup=False)
+
+    assert Path(promoted["moved_to"]).is_file()
+    assert promoted["cleanup"] == {"skipped": True, "reason": "auto cleanup is disabled"}
+    assert client.deleted == []
+    assert not any(isinstance(call, tuple) and call[0] == "delete_torrent" for call in client.calls)
+
+
+def test_a_delete_failure_leaves_the_promotion_successful(tmp_path, monkeypatch):
+    client = ScriptedClient(_content(tmp_path), delete_error=RuntimeError("qBittorrent went away"))
+    promoted = _promote_clean(tmp_path, monkeypatch, client)
+
+    assert Path(promoted["moved_to"]).is_file()
+    assert promoted["cleanup"] == {"deleted": False, "error": "qBittorrent went away"}
+    assert client.deleted == []

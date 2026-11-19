@@ -45,6 +45,7 @@ SDK's response shape.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,6 +111,11 @@ class ToolLoop:
     # The ceiling that makes free failed rounds safe. Derived from the budget
     # rather than configured, since the two only ever move together.
     max_attempts: int = field(default=0)
+    # Optional UI seam: called with ("tool_start"|"tool_end"|"tool_error", payload).
+    # A harness draws the agent's activity from it; voice and coding callers pass
+    # nothing and pay nothing. Failures are swallowed because a rendering bug
+    # must never take down a conversation.
+    observer: Callable[[str, dict[str, Any]], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.max_attempts:
@@ -130,6 +136,14 @@ class ToolLoop:
     def _schemas(self) -> list[dict] | None:
         return self.tools.schemas() if self.tools is not None else None
 
+    def _notify(self, event: str, payload: dict[str, Any]) -> None:
+        if self.observer is None:
+            return
+        try:
+            self.observer(event, payload)
+        except Exception:  # pragma: no cover - a UI must not break the loop
+            logger.debug("Observer failed on %s", event, exc_info=True)
+
     # ---- Tools ----
 
     def _run_tool_call(self, tool_call) -> bool:
@@ -143,6 +157,7 @@ class ToolLoop:
             )
             return True
 
+        self._notify("tool_start", {"name": tool_call.name, "arguments": tool_call.arguments})
         try:
             result = self.tools.dispatch(tool_call.name, tool_call.arguments)
         # ToolError covers unknown tools, bad arguments and failures inside a
@@ -150,12 +165,14 @@ class ToolLoop:
         # ways the registry cannot wrap. Anything else is a genuine bug.
         except (ToolError, OSError) as exc:
             logger.warning("Tool %s failed: %s", tool_call.name, exc)
+            self._notify("tool_error", {"name": tool_call.name, "error": str(exc)})
             self.transcript.append(
                 Message.tool_result(tool_call.id, tool_failure_message(tool_call.name, exc))
             )
             return True
 
         logger.debug("Tool result for %s:\n%s", tool_call.name, pretty_json(result))
+        self._notify("tool_end", {"name": tool_call.name, "result": result})
         self.transcript.append(Message.tool_result(tool_call.id, result))
         return False
 
@@ -175,12 +192,25 @@ class ToolLoop:
 
     # ---- The loop ----
 
+    def _notify_thought(self, completion, round_number: int) -> None:
+        """Surface a provider-supplied reasoning trace, when there is one.
+
+        DeepSeek's reasoner returns `reasoning_content`; most other models do
+        not. This is an event for a UI, not part of the transcript: the model's
+        private reasoning is not sent back to it on the next round.
+        """
+        raw_message = completion.choices[0].message
+        reasoning = getattr(raw_message, "reasoning_content", None)
+        if reasoning:
+            self._notify("thought", {"text": str(reasoning), "round": round_number})
+
     def _final(self, completion) -> Message:
         """Append the answer the model finished on, and hand it back."""
         raw_message = completion.choices[0].message
         # validate_completion guarantees non-blank content when there are no
         # tool calls, so .strip() is safe here.
         text = (raw_message.content or "").strip()
+        self._notify("answer", {"text": text})
         return self.transcript.append(Message.from_completion(raw_message, content=text))
 
     def _forced_answer(self) -> Message:
@@ -192,7 +222,10 @@ class ToolLoop:
         """
         logger.warning("Round budget of %s spent; forcing an answer.", self.max_tool_rounds)
         try:
-            message = self._final(self._complete(tools=None))
+            self._notify("thinking", {"round": self.max_tool_rounds + 1, "forced": True})
+            completion = self._complete(tools=None)
+            self._notify_thought(completion, self.max_tool_rounds + 1)
+            message = self._final(completion)
         except LLMError as exc:
             raise GenerationFailedError(
                 f"Tool call limit reached and the final answer could not be generated: {exc}"
@@ -213,8 +246,11 @@ class ToolLoop:
             if completed_tool_rounds >= self.max_tool_rounds:
                 break
 
+            round_number = completed_tool_rounds + 1
+            self._notify("thinking", {"round": round_number})
             try:
                 completion = self._complete(tools=schemas)
+                self._notify_thought(completion, round_number)
             except LLMError as exc:
                 # Spend an attempt but not a round: the dead end is now in the
                 # transcript, and the next try can see it and go elsewhere.

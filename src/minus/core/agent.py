@@ -34,6 +34,7 @@ class Conversation:
         memory: Any | None = None,
         system_prompt: str = SYSTEM_PROMPT,
         fact_top_k: int = 5,
+        observer: Any | None = None,
     ) -> None:
         """
         Args:
@@ -48,6 +49,7 @@ class Conversation:
         self.max_tool_rounds = max_tool_rounds
         self.system_prompt = system_prompt
         self.fact_top_k = fact_top_k
+        self.observer = observer
         self.transcript = Transcript(memory=self.memory)
 
     # Kept so callers (and tests) can read the transcript as wire dicts.
@@ -92,6 +94,7 @@ class Conversation:
             tools=self.tools,
             system_prompt=self.system_prompt,
             max_tool_rounds=self.max_tool_rounds,
+            observer=self.observer,
         ).run()
         return message.content or ""
 

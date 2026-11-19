@@ -30,12 +30,27 @@ logger = logging.getLogger(__name__)
 SECRETS = frozenset(
     {
         "openrouter_api_key",
+        # A direct provider key (DeepSeek and friends) takes the same route.
+        "llm_api_key",
         # The Google grant is a credential in three parts, and the refresh
         # token is the half that does not expire. All three are withheld for
         # the same reason the API key is: a dashboard has no use for them.
         "google_client_id",
         "google_client_secret",
         "google_refresh_token",
+        # The qBittorrent Web UI password is a credential like the rest: the
+        # dashboard has no use for it and no business writing one.
+        "qbittorrent_password",
+        # The AirVPN account password drives the tunnel; like the downloader's
+        # password it is read from env/.env and never shown over the socket.
+        "airvpn_password",
+        # The Prowlarr key reads the user's indexer list and search results;
+        # the dashboard has no use for it and must not write one.
+        "prowlarr_api_key",
+        "jackett_api_key",
+        # The guest's local administrator password: a credential like the rest,
+        # read only from env/.env and never written by a dashboard.
+        "windows_winrm_password",
     }
 )
 

@@ -15,6 +15,7 @@ persistent semantic memory, speech in and speech out.
 
 ```bash
 uv sync                                          # core + dev tooling
+uv sync --extra harness                          # the interactive `minus` surface
 uv sync --extra audio --extra embeddings         # everything, incl. mic/TTS
 ```
 
@@ -28,12 +29,31 @@ with `MINUS_`-prefixed environment variables — see `src/minus/config.py`.
 ## Run
 
 ```bash
-minus                  # microphone mode
-minus --no-mic         # type instead of talking
+minus                  # the harness: chat, code, download, vpn, sys
+minus voice            # the original microphone assistant
+minus voice --no-mic   # type instead of talking
 minus tools            # list each agent's tools, and which are switched off
 minus memory           # interactively prune stored facts
 minus calibrate        # recompute the fact-relevance threshold
 minus google-auth      # connect a Google account for the task/calendar tools
+```
+
+The harness is the default surface. Type a line to talk to the agent, or use a
+slash command: `/mode code`, `/download <query|magnet|url>`, `/vpn connect`,
+`/triage <hash>`, `/files`, `/doctor`, `/help`. The left rail switches modes; the right
+rail shows tool activity and any quarantine alert. `ctrl+b` opens the file
+explorer, which is always docked on the left: clicking a file shows a
+syntax-highlighted preview and `diffs` shows the working-tree diff. Drag the
+explorer's inner edge to resize the dock, or the divider beside the file tree to
+grow the code view; the tree stays a 22-column sidebar and the code view takes
+the rest. The dock stops with roughly 25-30 columns left for the conversation.
+`minus serve` remains the headless service.
+
+If the shell cannot find `minus`, link the venv script once (then `hash -r` or
+open a new shell):
+
+```bash
+ln -sf "$PWD/.venv/bin/minus" ~/.local/bin/minus
 ```
 
 Against an assistant that is already running:
@@ -44,6 +64,438 @@ minus say "what time is it"   # inject a line, as though it had been spoken
 minus status                  # what it is doing right now
 minus status --watch          # ...and keep printing as that changes
 ```
+
+## Torrents, VPN and quarantine
+
+In download mode a plain line is a search. `/download the great gatsby` (or
+just `the great gatsby` while that mode is selected) queries cheap meta-index
+APIs, ranks the results locally, and sends only the winner through the same
+pipeline as a typed magnet: qBittorrent downloads into `quarantine/incoming`,
+the pipeline copies the finished content into `quarantine/<hash>/`, inspects it,
+asks the agent model to read any code-shaped files, and records a verdict. A
+`clean` verdict from a discovery download is promoted automatically; a magnet
+or `.torrent` URL still bypasses search and goes straight to the pipeline. A
+typed magnet can release a `clean` result in the same call
+(`triage ingest ... --release`; the harness's download mode does this);
+`needs_review` stays in quarantine until the Windows guest has reviewed it
+(`minus triage vm`), `triage_review` has looked at it and
+`triage_promote --accept-review` explicitly accepts it. There is no path from a
+failed scan to the library.
+
+### How discovery picks
+
+The default providers are **Knaben** (a meta-index whose JSON API already
+carries 1337x and The Pirate Bay results), **Bitsearch** (a second index, so a
+repeated infohash is evidence of a real release), **The Pirate Bay** via
+`apibay.org`, and **Nyaa** via RSS. **Internet Archive** is the fallback when
+the trackers produce nothing eligible.
+
+**Prowlarr** and **Jackett** are used when configured. They own the per-site
+definitions, so every site they support becomes searchable without a scraper in
+MINUS — including 1337x and YourBittorrent, which answer plain HTTP with a
+Cloudflare interstitial. Set `MINUS_PROWLARR_URL`/`MINUS_PROWLARR_API_KEY` or
+`MINUS_JACKETT_URL`/`MINUS_JACKETT_API_KEY`; `MINUS_JACKETT_INDEXERS` can target
+specific definitions. Deprecated sites such as RARBG and old Demonoid clones
+are not added.
+
+Ranking is deterministic and cheap — no model call. It rewards exact title
+coverage, seeders, 1080p BluRay/Web-DL, verified uploads, agreement between
+sources, a low Knaben virus score and a legal origin. It rejects CAM/TS
+releases, executable/crack-style names, dead swarms, wrong-year matches,
+category mismatches, and anything larger than `MINUS_TRIAGE_MAX_BYTES`.
+`MINUS_DISCOVERY_MIN_SCORE` (default 45) is the normal cutoff. If nothing
+clears it, a candidate that still passed every hard filter and scores at least
+`MINUS_DISCOVERY_LOW_CONFIDENCE_SCORE` (default 25) is downloaded for the VM to
+back-check and explicitly marked low confidence; it is **never** auto-promoted.
+Below both floors the harness shows the shortlist and downloads nothing.
+
+This ranking is a pre-filter, **not** a trust boundary. Every selected torrent
+still lands in quarantine and still needs the verdict rules; a static-only scan
+is `needs_review`, so without a configured detonation sandbox nothing is
+auto-promoted and the content stays in quarantine. Tune discovery with
+`MINUS_DISCOVERY_PROVIDERS`, `MINUS_DISCOVERY_FALLBACK_PROVIDERS`,
+`MINUS_DISCOVERY_MIN_SCORE`, `MINUS_DISCOVERY_LIMIT`,
+`MINUS_DISCOVERY_PREFERRED_QUALITY` and `MINUS_DISCOVERY_AUTO_PROMOTE`.
+For open indexer coverage set `MINUS_JACKETT_URL` + `MINUS_JACKETT_API_KEY`
+(optionally `MINUS_JACKETT_INDEXERS`), or the Prowlarr equivalents.
+
+Direct scraping of 1337x and YourBittorrent is not used: both answer plain HTTP
+with a Cloudflare interstitial. Demonoid is account-based, has no live public
+API, and its original site closed in 2018; RARBG is gone. Knaben's 1337x
+coverage plus Jackett/Prowlarr definitions are the supported routes to those
+sites. The built-in direct providers are Knaben, Bitsearch, The Pirate Bay
+(`apibay.org`) and Nyaa (RSS).
+
+```bash
+minus qbt setup                # start qBittorrent, loopback WebUI, quarantine paths
+minus qbt status               # version, speeds and recent torrents
+minus vpn status               # provider, interface, route, triage gate
+minus vpn connect              # AirVPN through bluetit/goldcrest
+minus vpn disconnect
+minus triage ingest 'magnet:?xt=urn:btih:...'
+minus triage ingest 'magnet:?xt=urn:btih:...' --release
+                               # move it into library/ only if the verdict is clean
+minus triage download <hash>   # stage a finished torrent into quarantine
+minus triage scan <hash>       # static + host media sample + Windows review if configured
+minus triage verdict <hash>
+minus triage review <hash>     # static facts + sandboxed ffprobe; no promotion
+minus triage preview <hash>    # re-sample frames into quarantine/<hash>/preview/
+minus triage vm <hash>         # open every staged file in the Windows guest; no verdict change
+minus triage vm <hash> --keep movie.mp4
+                               # keep only those; everything else goes to the guest graveyard
+minus triage promote <hash>    # refused unless the verdict is clean; asks qBittorrent
+                               # to delete the torrent and its files (default)
+minus triage promote <hash> --keep movie.mp4
+                               # copy only the kept .mp4 files into library/
+minus triage promote <hash> --accept-review --yes
+                               # manual release of a needs_review item after VM review
+minus triage promote <hash> --accept-review --yes --keep movie.mp4
+                               # ...promoting only the named files
+```
+
+`MINUS_TRIAGE_AUTO_CLEANUP` (on by default) is what removes the download copy:
+after a successful promotion — a `clean` verdict or a manual `--accept-review`
+release — MINUS asks qBittorrent to delete the torrent and the files it
+downloaded, because the content now lives in `library/` and its provenance is under
+`memory/library_provenance/`.
+The same happens after a `malicious` verdict, whose staged payload is deleted
+outright. `needs_review` and `suspicious` keep the download, since it is what
+you would inspect or release next. A cleanup that fails is logged and does not
+undo the promotion or the rejection. Set
+`MINUS_TRIAGE_AUTO_CLEANUP=false` to keep finished downloads until you remove
+them yourself.
+
+`triage review` prints the verdict, static flags, file list and a bounded
+`ffprobe` pass run under bubblewrap (read-only input, no network). It is a
+parser smoke test, not a detonation. `--accept-review` only releases a
+`needs_review` item whose staged files are **passive media/text** (video, audio,
+images, subtitles, plain text) and whose static/airlock flags show no
+executable, script, archive, PDF/Office or other active content. It also
+**requires VM review evidence**: `verdict.json` or `vm_review.json` must record
+that the Windows guest opened or launched at least one file (`sandbox.detonated`
+or `sandbox.opened > 0`). A dry run, a host-only `ffprobe`/frame sample, or a
+scan with `--no-detonate` cannot satisfy that gate; promotion refuses and names
+`minus triage vm` as the missing step. The provenance records the accepting
+user, time, reason, `detonated` and `vm_reviewed: true`. `suspicious`,
+`malicious` and any active-content payload are never releasable this way.
+Without `--yes` the terminal asks you to type the first eight characters of the
+hash.
+
+### Windows review, including media
+
+The detonation guest can also review files that are not Windows programs. In
+review mode it reads every non-empty staged file from a **read-only CD** (an
+ISO labelled `MINUS_REVIEW`), opens each one with the Windows application a
+person would use, and records process, network, file, registry and Defender
+evidence. Video is opened in the portable VLC installed in the base image
+(or Windows Media Player when VLC is absent), images in Paint, text and
+subtitles in Notepad, and anything else through the shell association.
+Only an explicit handler that stays alive counts as opened; the shell
+association may be the "how do you want to open this file?" dialog and is never
+counted. Launchable shapes (`.exe`, `.ps1`, `.lnk`, …) are executed; everything
+else is opened, because opening a movie in a player exercises the parser path
+its viewer would take. A missing CD or a file the guest never opened leaves
+the review incomplete, so it cannot make the verdict `clean`.
+
+The read-only CD exists because of size: the WinRM upload used for detonation is
+bounded by `MINUS_WINDOWS_MAX_ARTIFACT_BYTES` (64 MiB by default, per file and
+in total), while the ISO channel carries files up to the ISO9660 level-3
+single-file limit just under 4 GiB. A 2 GiB movie never becomes a million WinRM
+chunks; anything over that ISO limit is refused before an image is written.
+QEMU mounts the ISO read-only, so the guest can read it but cannot write back
+to the host's copy.
+
+```bash
+minus triage scan <hash>        # review mode runs automatically when the guest is ready
+minus triage vm <hash>          # run the review without touching the verdict
+minus triage vm <hash> --keep movie.mp4
+```
+
+`scan` uses review mode automatically when a base image is configured, the
+guest is ready (including `pycdlib`), and `MINUS_TRIAGE_VM_REVIEW` is on;
+`--no-detonate` skips it. `minus triage vm` is
+the standalone version: it writes `quarantine/<hash>/vm_review.json` and leaves
+`verdict.json` alone, which is what an operator re-reads before accepting a
+`needs_review` item. Opening a movie counts as a detonation only when the guest
+reports it opened; a guest that opens nothing leaves the verdict at
+`needs_review`.
+
+Review also decides what the torrent is for. With no `--keep`, the primary-file
+rule applies: every video, else every audio file, else every file. Files named
+in `--keep` (relative paths or basenames) override that. Everything not kept is
+moved into the guest's graveyard (`C:\triage\graveyard` inside the throwaway
+overlay) and is not part of the review's working set; after a successful
+promotion the staged host tree is deleted too, so only the kept files and the
+library provenance remain. Promotion computes its own selection from the host
+manifest, so promotion refuses a selection that includes a file the review did
+not keep rather than copying it. Pass the same `--keep` list to `triage promote`.
+A `--keep` entry that matches nothing is refused rather than silently promoting
+everything.
+
+VM review is evidence, not a guarantee: a clean result means the guest opened
+the file and nothing suspicious was observed, not that the file is provably
+safe. See `docs/VM_REVIEW.md` for the image build, Sysmon setup, environment
+knobs and the evidence format.
+
+### What lands in the library
+
+`library/` holds **only flat `.mp4` files**: `library/<movie>.mp4`, no release
+folders, artwork, subtitles or sidecars. The 0600 provenance JSON (verdict,
+manifest, VM review, and for a manual acceptance the operator/time/reason) is
+written under `memory/library_provenance/<slug>.provenance.json`, outside the
+tree Jellyfin scans. Point a Jellyfin library at `library/` and it sees movies
+only. A promotion with no `.mp4` is refused; non-MP4 files stay in the guest/
+staged graveyard.
+
+### Previewing media on the host
+
+The Windows guest answers "what does opening this do"; it does not sample frames
+or compare a title. That is a separate, cheaper host check: ffprobe and ffmpeg
+run under bubblewrap with the staged tree read-only and a separate frame
+directory writable. That is parser containment, not a VM — the files stay in
+quarantine and nothing is executed.
+
+```bash
+minus triage preview <hash> --frames 6 --title "the great gatsby 2013"
+```
+
+Frames and a contact sheet land in `quarantine/<hash>/preview/`. `--title` is
+optional and advisory: it only decides whether the sampled file resembles what
+you asked for, reported as `media:title-mismatch`. `triage_review` and
+`triage_preview` both return the sampled paths, so a vision-capable agent opens
+the frames instead of guessing from a filename. They show what the file is, not
+that it is safe — promotion still follows the verdict gate.
+
+### Watching a download
+
+Every stage appends a line to `quarantine/trace.jsonl` —
+`{ts, op_id, stage, event, torrent_hash, duration_ms, data}` — so what happened
+is still readable after the terminal has scrolled on:
+
+```bash
+minus triage trace                # the most recent events, across torrents
+minus triage trace <hash>         # just this torrent
+tail -f quarantine/trace.jsonl    # follow a run while it is happening
+```
+
+`minus triage trace` needs no hash because "did the sandbox run?" is a question
+you ask before knowing which torrent to blame; the same record backs the
+`triage_trace` MCP tool.
+
+An agent client can drive the whole flow over MCP without the dashboard:
+`torrent_search` → `torrent_ingest` → `triage_verdict` → `triage_review` →
+`triage_vm_review` → `triage_promote(accept_review=true, reason=...)`.
+`triage_review` reports the facts and whether manual release is allowed;
+`triage_vm_review` opens the staged files in the Windows guest and writes
+`vm_review.json`; `triage_promote` still refuses anything but `clean` unless the
+operator explicitly accepts a passive `needs_review` item after that evidence
+exists.
+
+Configuration lives in `.env` (0600, gitignored): `MINUS_AIRVPN_USERNAME`,
+`MINUS_AIRVPN_PASSWORD`, `MINUS_QBITTORRENT_URL`,
+`MINUS_QBITTORRENT_PASSWORD`, and the `MINUS_TRIAGE_*` knobs. The AirVPN
+password is never returned by the control socket, logged, or included in an
+error string.
+
+With credentials present, the harness brings the tunnel up on launch when
+`MINUS_VPN_AUTOCONNECT` is on (the default) and no healthy tunnel already
+exists, then binds qBittorrent to the discovered interface. Opening the harness
+twice does not start a second client; `/vpn status` shows what happened.
+
+AirVPN's WireGuard mode needs a loadable `wireguard` kernel module. If the
+running kernel cannot load one, set `MINUS_AIRVPN_VPN_TYPE=openvpn` to use
+AirVPN's alternate transport, or reboot into a kernel whose modules match.
+
+A malicious verdict deletes the staged payload immediately, writes a 0600
+record under `quarantine/rejected/` (hash, reasons, file names — never bytes),
+and returns an `ALERT` the harness shows. Promotion stays refused for anything
+that is not `clean`; `clean` requires a detonation that observed nothing and a
+model review that did not escalate.
+
+### The QEMU detonation guest
+
+A `clean` verdict needs a real Windows guest, not just the static checks, and
+the same guest reviews media it cannot execute. Install QEMU/KVM
+(`qemu-system-x86_64`, `qemu-img`) plus `mtools` for the unattended-answer
+floppy, and the Python transport the runner drives it with:
+
+```bash
+uv sync --extra windows          # adds pywinrm and pycdlib
+```
+
+Build the base image once from an **official Microsoft Windows 10 x64 ISO** —
+Enterprise LTSC or the Enterprise Evaluation both work; the Evaluation needs no
+licence at all, and LTSC installs with its published KMS client key and runs
+unactivated for the life of a detonation image:
+
+```bash
+MINUS_WINDOWS_WINRM_PASSWORD=...     # the guest account the harness drives
+minus vm-image --iso /path/to/Win10_Enterprise_x64.iso \
+               --work-dir /srv/minus/windows \
+               --sysmon-zip /path/to/Sysmon.zip \
+               --vlc-zip /path/to/vlc-3.0.24-win64.zip
+```
+
+`--sysmon-zip` turns process/network/file/registry evidence into event logs the
+harness reads directly; without it the harness falls back to polling
+`Get-Process`, `Get-NetTCPConnection` and the Windows `Run` keys, which sees less
+between samples but is still real telemetry, not a pretend result. `--vlc-zip`
+installs a portable VLC under `C:\tools\vlc`; review mode prefers it for video
+because Windows Media Player's first-run setup can exit instead of opening the
+file. Both are optional, but a media review without a working player leaves
+`opened` at zero and the verdict at `needs_review`. Do not use a trimmed
+"Tiny11"/"Lean11"-style ISO: those remove WinRM, Defender, PowerShell and often
+Sysmon, and a guest without them can neither be driven nor produce behaviour
+that means anything.
+
+Then point MINUS at the base image and the scratch space:
+
+```bash
+MINUS_WINDOWS_BASE_IMAGE=/srv/minus/windows/base.qcow2
+MINUS_WINDOWS_WORK_DIR=/srv/minus/windows/run
+```
+
+`minus vm-check` says whether a run could start and what is still missing
+before you build or scan. The other knobs are
+`MINUS_WINDOWS_WINRM_USER`, `MINUS_WINDOWS_CPUS`, `MINUS_WINDOWS_MEMORY_MB`,
+`MINUS_WINDOWS_BOOT_TIMEOUT`, `MINUS_WINDOWS_GUEST_TIMEOUT` (the WinRM
+operation timeout), `MINUS_WINDOWS_MAX_ARTIFACT_BYTES` (the detonation upload
+cap, 64 MiB) and `MINUS_WINDOWS_MIN_FREE_BYTES` (20 GiB). Review mode
+(`MINUS_TRIAGE_VM_REVIEW`, on by default) is bounded by
+`MINUS_TRIAGE_VM_REVIEW_TIMEOUT` (300 seconds); a failed run keeps its overlay,
+console log and pidfile under `<MINUS_WINDOWS_WORK_DIR>/failed/<run>/` rather
+than deleting the only record of what went wrong.
+
+The guest boots under SeaBIOS with an IDE disk and an e1000 NIC. That is the
+entire requirement: Windows 10 setup carries in-box drivers for both, so the
+unattended install completes with no driver ISO. There is no OVMF/UEFI, no
+emulated TPM and no virtio-win ISO to prepare — those are the things that turn
+a one-off image build into an afternoon of driver wrangling, and for a
+short detonation I/O speed is not what you are short of. A virtio-win ISO is
+optional only if you deliberately want faster disk I/O.
+
+The runner invokes `qemu-system-x86_64` (override with `MINUS_WINDOWS_QEMU`),
+boots an immutable base plus a throwaway per-run overlay, and never exposes a
+host share — do not add one back for convenience. A detonation pushes artifacts
+over WinRM in base64 chunks; a review attaches them as a read-only CD, and the
+guest copies them into its own writable working directory. Either way there is
+no host→guest filesystem path the guest can browse. The guest's only network is
+QEMU's `user,restrict=on` device with a single host→guest WinRM forward; keep it
+that way rather than bridging the NIC, because the point of the guest is that it
+has no route out.
+
+The base image is a 64 GiB sparse qcow2 that Windows fills out to roughly 20–30
+GiB of real blocks once installed. Put `MINUS_WINDOWS_BASE_IMAGE` and
+`MINUS_WINDOWS_WORK_DIR` on an ext4 volume with that much room — the ext4 root
+is usually the easiest (check `df`; this machine's root has about 62 GiB free).
+Do not put them on an NTFS partition shared with Windows. A hibernated or
+Fast-Startup volume still has Windows' journal open, so mounting it read-write
+lets Linux's NTFS driver replay a journal Windows still holds and corrupts the
+filesystem for both systems; the images would also compete with Windows for
+free space. If NTFS is the only large volume you have, disable Fast Startup,
+shut Windows down fully, mount read-write, and treat it as a stopgap.
+
+`MINUS_WINDOWS_MIN_FREE_BYTES` (default 20 GiB) is checked before a run starts,
+so a nearly-full disk fails before QEMU boots rather than mid-detonation. The
+Windows ISO is only an input to the image build: once `minus vm-image` has
+finished, it can be deleted, because every run boots the base image and a
+throwaway overlay.
+
+## Web bridge: search and grab from any frontend
+
+`minus bridge serve` exposes download mode's search-and-grab to something other
+than the harness: a loopback HTTP service, a JSON API, and a browser client any
+web app can mount with one script tag. It is one capability with pluggable
+frontends, not a Jellyfin integration that happens to be reachable elsewhere.
+
+| Consumer | Use |
+|---|---|
+| another agent, in-process | `minus.remote.DownloadService` |
+| another agent, over HTTP | the API below |
+| MCP client | the `torrent_search` / `torrent_ingest` tools |
+| Jellyfin | `--frontend jellyfin` (default) |
+| any other web app | `--frontend generic` |
+
+Nothing in it reimplements the pipeline: search is
+`DiscoveryTools.torrent_search`, and a grab runs `ensure_running`,
+`ingest(detonate=True, release=False)` and then `promote` only for a clean,
+non-low-confidence result. `release=False` is deliberate: releasing inside the
+pipeline would promote any clean verdict and skip that low-confidence gate.
+The browser names an infohash and the bridge re-resolves it, so a page cannot
+push a URL of its choosing into quarantine.
+
+```bash
+minus bridge serve                     # 127.0.0.1:8099, --frontend jellyfin
+minus bridge tag --frontend generic    # the <script> tag any page can paste
+sudo "$(command -v minus)" bridge install --frontend jellyfin
+minus bridge status --frontend jellyfin
+sudo "$(command -v minus)" bridge remove --frontend jellyfin
+```
+
+API (everything but `/health` and `/minus.js` needs `X-Minus-Token`, which is
+published only inside the served script):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | liveness and the active frontend |
+| GET | `/minus.js` | the browser client, config prefixed |
+| GET | `/api/search?q=&limit=` | ranked candidates and the score threshold |
+| POST | `/api/grab` | `{"query","infohash"}` -> job id |
+| GET | `/api/job/<id>` | state, stage, progress, eta, elapsed, event trace |
+
+The Jellyfin frontend patches `index.html` (one tag, idempotent,
+`index.html.minus-backup` kept, re-run after a `jellyfin-web` upgrade); its
+client adds a launcher in the bottom-right and a bar when a library search
+finds nothing. The generic frontend has no file to patch: it prints the tag.
+
+Every grab keeps a toast in the bottom-left until it settles: a progress bar,
+elapsed time, an ETA while qBittorrent reports one for the transfer, and an
+expandable trace of the pipeline's milestones (added, staged, verdict,
+promoted). A refused grab is reported as one -- `state: error` carrying the
+pipeline's own stage and message -- instead of a `done` job with a failed
+status inside it. And because the tunnel is checked before the magnet is
+handed to qBittorrent, a refusal cannot leave a 0% torrent behind that starts
+fetching by itself once the VPN comes back.
+
+A new frontend is one module under `src/minus/remote/frontends/` plus a
+registry entry -- an asset, a `script_tag`, and the three file operations
+(raising `FrontendError` when the target has no file to patch). The service and
+the transport never learn which frontend is active.
+
+The bridge is a `--user` service like the assistant itself; its unit's
+`ExecStart` is this checkout's `minus bridge serve`.
+
+It binds loopback deliberately -- it can add torrents, so it is not a LAN
+service -- which means the launcher works only in a browser on the machine that
+hosts the bridge. The token is generated per process and never written to disk.
+
+What comes back is not an instant play button. A grab is one `clean` verdict
+away from the library: the swarm downloads into `quarantine/incoming`, the
+pipeline scans it, and only a clean, non-low-confidence result is promoted
+automatically. Everything else waits in quarantine, exactly as `needs_review`
+does in the harness.
+
+## MCP server
+
+Every portable tool MINUS builds is also available to any Model Context
+Protocol client:
+
+```bash
+minus mcp                       # or: minus-mcp / python -m minus.mcp
+```
+
+The repository ships `.mcp.json`; point a client at it or at the same
+command/args. `minus mcp-config` prints the portable version for a client that
+does not start from this checkout — absolute interpreter and
+`MINUS_PROJECT_ROOT` — so the server mounts from any working directory:
+
+```bash
+minus mcp-config
+```
+
+The server is stdlib-only, speaks newline-delimited JSON-RPC over
+stdio, and exposes the built-in, alarm, triage, VPN and (when configured)
+Google groups. See `docs/MCP.md` for the protocol surface and safety boundary.
 
 ## Dashboard
 
