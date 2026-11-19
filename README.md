@@ -401,41 +401,71 @@ Windows ISO is only an input to the image build: once `minus vm-image` has
 finished, it can be deleted, because every run boots the base image and a
 throwaway overlay.
 
-## Jellyfin search bridge
+## Web bridge: search and grab from any frontend
 
-Jellyfin has no plugin hook for its web UI, so this is not a plugin:
-`minus jellyfin serve` runs a small HTTP service on loopback, and a one-time
-edit to `jellyfin-web`'s `index.html` adds a single script tag. Everything
-behind the search is download mode's own path -- `discover` ranks,
-`choose_best` picks, and the winner enters the same quarantine pipeline a typed
-magnet does -- so a click in Jellyfin replaces the keystroke and nothing else.
+`minus bridge serve` exposes download mode's search-and-grab to something other
+than the harness: a loopback HTTP service, a JSON API, and a browser client any
+web app can mount with one script tag. It is one capability with pluggable
+frontends, not a Jellyfin integration that happens to be reachable elsewhere.
 
-```bash
-minus jellyfin serve                              # 127.0.0.1:8099
-sudo "$(command -v minus)" jellyfin web install   # patch /usr/share/jellyfin/web/index.html
-minus jellyfin web status
-sudo "$(command -v minus)" jellyfin web remove
-```
+| Consumer | Use |
+|---|---|
+| another agent, in-process | `minus.remote.DownloadService` |
+| another agent, over HTTP | the API below |
+| MCP client | the `torrent_search` / `torrent_ingest` tools |
+| Jellyfin | `--frontend jellyfin` (default) |
+| any other web app | `--frontend generic` |
 
-`web install` keeps `index.html.minus-backup`, is idempotent, and must be re-run
-after a `jellyfin-web` upgrade replaces the file. Reload the web client and a
-launcher appears in the bottom-right corner: type a query, get the same ranked
-shortlist the harness shows with size, seeders and score, and send a row to
-quarantine. A library search that finds nothing also grows a bar offering the
-same search, which is the case that motivates the whole thing.
-
-The bridge is a `--user` service like the assistant itself; a unit whose
-`ExecStart` is this checkout's `minus jellyfin serve` keeps it up across
-logins:
+Nothing in it reimplements the pipeline: search is
+`DiscoveryTools.torrent_search`, and a grab runs `ensure_running`,
+`ingest(detonate=True, release=True)` and `promote` only for a clean,
+non-low-confidence result. The browser names an infohash and the bridge
+re-resolves it, so a page cannot push a URL of its choosing into quarantine.
 
 ```bash
-systemctl --user enable --now minus-jellyfin
+minus bridge serve                     # 127.0.0.1:8099, --frontend jellyfin
+minus bridge tag --frontend generic    # the <script> tag any page can paste
+sudo "$(command -v minus)" bridge install --frontend jellyfin
+minus bridge status --frontend jellyfin
+sudo "$(command -v minus)" bridge remove --frontend jellyfin
 ```
 
-The bridge binds loopback deliberately -- it can add torrents, so it is not a
-LAN service -- which means the launcher works only in a browser on the machine
-running Jellyfin. The token the script carries is generated per process and
-never written to disk.
+API (everything but `/health` and `/minus.js` needs `X-Minus-Token`, which is
+published only inside the served script):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | liveness and the active frontend |
+| GET | `/minus.js` | the browser client, config prefixed |
+| GET | `/api/search?q=&limit=` | ranked candidates and the score threshold |
+| POST | `/api/grab` | `{"query","infohash"}` -> job id |
+| GET | `/api/job/<id>` | state, stage, progress, eta, elapsed, event trace |
+
+The Jellyfin frontend patches `index.html` (one tag, idempotent,
+`index.html.minus-backup` kept, re-run after a `jellyfin-web` upgrade); its
+client adds a launcher in the bottom-right and a bar when a library search
+finds nothing. The generic frontend has no file to patch: it prints the tag.
+
+Every grab keeps a toast in the top-right until it settles: a progress bar,
+elapsed time, an ETA while qBittorrent reports one for the transfer, and an
+expandable trace of the pipeline's milestones (added, staged, verdict,
+promoted). A refused grab is reported as one -- `state: error` carrying the
+pipeline's own stage and message -- instead of a `done` job with a failed
+status inside it. And because the tunnel is checked before the magnet is
+handed to qBittorrent, a refusal cannot leave a 0% torrent behind that starts
+fetching by itself once the VPN comes back.
+
+A new frontend is one module under `src/minus/remote/frontends/` plus a
+registry entry -- an asset, a `script_tag`, and the three file operations
+(raising `FrontendError` when the target has no file to patch). The service and
+the transport never learn which frontend is active.
+
+The bridge is a `--user` service like the assistant itself; its unit's
+`ExecStart` is this checkout's `minus bridge serve`.
+
+It binds loopback deliberately -- it can add torrents, so it is not a LAN
+service -- which means the launcher works only in a browser on the machine that
+hosts the bridge. The token is generated per process and never written to disk.
 
 What comes back is not an instant play button. A grab is one `clean` verdict
 away from the library: the swarm downloads into `quarantine/incoming`, the
