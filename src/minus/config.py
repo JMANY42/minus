@@ -176,9 +176,6 @@ class Settings(BaseSettings):
     # keeps the download so a human can look at it. A cleanup failure is logged
     # and reported, never allowed to turn a release into a failure.
     triage_auto_cleanup: bool = True
-    # add -> wait for completion -> stage -> scan, as one tool call. The wait is
-    # bounded: a torrent that never finishes is reported, not retried forever.
-    triage_auto_flow: bool = True
     triage_download_timeout: float = 3600.0
     triage_poll_seconds: float = 5.0
     # The agent reads code-shaped files before anything is released. This is
@@ -190,6 +187,18 @@ class Settings(BaseSettings):
     # Empty uses the conversational model; naming a cheaper or stronger one is
     # allowed without touching code.
     triage_model_review_model: str = ""
+    # Sampling is bounded on purpose: a handful of frames and a single
+    # contact sheet answer "is this the title it claims to be", which is for a
+    # human or agent to verify. It is evidence, never a trust signal -- the
+    # deterministic verdict still decides what leaves quarantine.
+    triage_media_review: bool = True
+    triage_media_frames: int = 6
+    # Open every staged file in the Windows guest, including movies, so the
+    # parser path a real machine would use is watched. With no guest this
+    # degrades to the dry-run runner and promotion stays refused; with a guest
+    # it is the evidence a manual release requires.
+    triage_vm_review: bool = True
+    triage_vm_review_timeout: float = 300.0
 
     # ---- Torrent discovery ----
     # A query in download mode is resolved by cheap meta-search APIs, ranked
@@ -253,6 +262,10 @@ class Settings(BaseSettings):
     windows_iso: str = ""
     windows_virtio_iso: str = ""
     windows_sysmon_zip: str = ""
+    # A failed detonation is the only record of what went wrong, so its
+    # console/overlay is archived under `vm/failed/` rather than deleted with
+    # the run directory. Off means failed runs are discarded like good ones.
+    windows_keep_evidence: bool = True
 
     # ---- Alarm ----
     # The CLI the `set_alarm` tool runs: a full path, or a bare name looked up

@@ -835,7 +835,10 @@ class MinusHarness(App[None]):
                     from minus.scripts.qbt import ensure_running
 
                     ensure_running(self.settings)
-                result = ingest(target, detonate=True)
+                # A clean verdict is released without a second command; a
+                # review item stays put for the explicit promote path, and the
+                # pipeline's own gate decides, not this call site.
+                result = ingest(target, detonate=True, release=True)
             except Exception as exc:
                 self._ui(partial(self._append, "sys", f"download failed: {exc}"))
                 self._ui(partial(self._set_status, "download failed", False))
@@ -906,7 +909,7 @@ class MinusHarness(App[None]):
                     from minus.scripts.qbt import ensure_running
 
                     ensure_running(self.settings)
-                result = ingest(item.download_url, detonate=True)
+                result = ingest(item.download_url, detonate=True, expected_title=query)
                 status = str(result.get("status") or "")
                 auto_promote = self.settings.discovery_auto_promote and not low_confidence
                 if status == "clean" and auto_promote:

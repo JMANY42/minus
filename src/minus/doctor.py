@@ -172,7 +172,8 @@ def collect_posture(settings: Settings, *, socket_path: Path | None = None) -> d
             "require_detonation": settings.triage_require_detonation,
             "model_review": settings.triage_model_review,
             "delete_malicious": settings.triage_delete_malicious,
-            "auto_flow": settings.triage_auto_flow,
+            "media_review": settings.triage_media_review,
+            "media_frames": settings.triage_media_frames,
         },
         "plugins": {
             "enabled": settings.plugins_enabled,

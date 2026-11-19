@@ -15,11 +15,21 @@ from minus.errors import ToolExecutionError
 from minus.tools.triage import TriageTools
 from minus.triage import pipeline as pipeline_module
 from minus.triage.pipeline import TriageError, TriagePipeline
+from minus.triage.sandbox import SandboxReport
 from minus.triage.scoring import CLEAN, MALICIOUS, Verdict
 from minus.triage.static import FileReport, StaticReport
 
 HASH = "d" * 40
 MAGNET = f"magnet:?xt=urn:btih:{HASH}&dn=Movie"
+
+
+class DetonatingSandbox:
+    """A guest that ran and observed nothing; tests patch `decide` clean."""
+
+    name = "fake-guest"
+
+    def run(self, artifacts, *, timeout, review=False, keep=None):
+        return SandboxReport(engine=self.name, detonated=True, completed=True)
 
 
 class ScriptedClient:
@@ -80,7 +90,7 @@ def _static(flags: list[str] | None = None, score: int = 0) -> StaticReport:
         root="/quarantine",
         files=[
             FileReport(
-                relative="Movie/file.txt",
+                relative="Movie/movie.mp4",
                 size=5,
                 sha256="0" * 64,
                 kind="text",
@@ -108,7 +118,7 @@ def _pipeline(tmp_path: Path, client: ScriptedClient, events: list, **kwargs) ->
 def _content(tmp_path: Path) -> Path:
     content = tmp_path / "downloads" / "Movie"
     content.mkdir(parents=True)
-    (content / "file.txt").write_bytes(b"hello")
+    (content / "movie.mp4").write_bytes(b"hello")
     return content
 
 
@@ -120,7 +130,7 @@ def _promote_clean(tmp_path: Path, monkeypatch, client: ScriptedClient, **kwargs
         "decide",
         lambda *args, **options: Verdict(CLEAN, 0, True, ()),
     )
-    pipeline = _pipeline(tmp_path, client, [], **kwargs)
+    pipeline = _pipeline(tmp_path, client, [], sandbox=DetonatingSandbox(), **kwargs)
     assert pipeline.ingest(MAGNET)["status"] == CLEAN
     return pipeline.promote(HASH)
 
@@ -156,6 +166,42 @@ def test_ingest_adds_waits_stages_and_scans_in_order(tmp_path, monkeypatch):
 
     assert (tmp_path / "quarantine" / HASH / "manifest.json").is_file()
     assert not (tmp_path / "library").exists()
+
+
+def test_ingest_release_promotes_a_clean_verdict_and_removes_the_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    monkeypatch.setattr(
+        pipeline_module,
+        "decide",
+        lambda *args, **options: Verdict(CLEAN, 0, True, ()),
+    )
+    client = ScriptedClient(_content(tmp_path))
+    pipeline = _pipeline(tmp_path, client, [], sandbox=DetonatingSandbox())
+
+    result = pipeline.ingest(MAGNET, release=True)
+
+    assert result["status"] == CLEAN
+    assert result["release"]["promoted"] is True
+    moved = Path(result["release"]["moved_to"])
+    assert moved.name == "movie.mp4"
+    assert moved.read_bytes() == b"hello"
+    assert client.deleted == [(HASH, True)]
+    assert not (tmp_path / "quarantine" / HASH / "files" / "Movie").exists()
+
+
+def test_ingest_release_leaves_needs_review_in_quarantine(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_module, "analyse", lambda root: _static())
+    client = ScriptedClient(_content(tmp_path))
+    pipeline = _pipeline(tmp_path, client, [])
+
+    result = pipeline.ingest(MAGNET, release=True)
+
+    assert result["status"] == "needs_review"
+    assert result["release"]["promoted"] is False
+    assert "needs_review" in result["release"]["reason"]
+    assert not (tmp_path / "library").exists()
+    assert (tmp_path / "quarantine" / HASH / "files" / "Movie" / "movie.mp4").is_file()
+    assert client.deleted == []
 
 
 def test_a_malicious_scan_deletes_the_payload_and_emits_an_alert(tmp_path, monkeypatch):
@@ -295,7 +341,7 @@ def test_a_clean_promotion_deletes_the_torrent_and_its_files(tmp_path, monkeypat
     client = ScriptedClient(_content(tmp_path))
     promoted = _promote_clean(tmp_path, monkeypatch, client)
 
-    assert Path(promoted["moved_to"]).is_dir()
+    assert Path(promoted["moved_to"]).is_file()
     assert promoted["cleanup"] == {"deleted": True}
     assert client.deleted == [(HASH, True)]
     assert ("delete_torrent", HASH, True) in client.calls
@@ -330,7 +376,7 @@ def test_auto_cleanup_off_keeps_the_torrent_in_qbittorrent(tmp_path, monkeypatch
     client = ScriptedClient(_content(tmp_path))
     promoted = _promote_clean(tmp_path, monkeypatch, client, auto_cleanup=False)
 
-    assert Path(promoted["moved_to"]).is_dir()
+    assert Path(promoted["moved_to"]).is_file()
     assert promoted["cleanup"] == {"skipped": True, "reason": "auto cleanup is disabled"}
     assert client.deleted == []
     assert not any(isinstance(call, tuple) and call[0] == "delete_torrent" for call in client.calls)
@@ -340,6 +386,6 @@ def test_a_delete_failure_leaves_the_promotion_successful(tmp_path, monkeypatch)
     client = ScriptedClient(_content(tmp_path), delete_error=RuntimeError("qBittorrent went away"))
     promoted = _promote_clean(tmp_path, monkeypatch, client)
 
-    assert Path(promoted["moved_to"]).is_dir()
+    assert Path(promoted["moved_to"]).is_file()
     assert promoted["cleanup"] == {"deleted": False, "error": "qBittorrent went away"}
     assert client.deleted == []

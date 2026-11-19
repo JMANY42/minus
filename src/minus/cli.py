@@ -115,6 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--work-dir", required=True, help="Where base.qcow2 goes (needs >= 40 GiB free)"
     )
     vm_image.add_argument("--sysmon-zip", default=None, help="Optional Sysmon zip to install")
+    vm_image.add_argument(
+        "--vlc-zip",
+        default=None,
+        help="Optional VLC portable zip; media review prefers it over Windows Media Player",
+    )
 
     subcommands.add_parser("vm-check", help="Report whether the Windows sandbox could run")
     subcommands.add_parser("vpn-check", help="Report whether the VPN preflight passes")
@@ -139,17 +144,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     triage = subcommands.add_parser(
-        "triage", help="Ingest, scan, review, verdict or promote a torrent"
+        "triage",
+        help=(
+            "Ingest, scan, review, verdict, promote, trace or preview a torrent "
+            "(preview samples media frames without staging)"
+        ),
     )
     triage.add_argument(
         "action",
         nargs="?",
-        choices=("ingest", "download", "scan", "verdict", "review", "promote"),
+        choices=(
+            "ingest",
+            "download",
+            "scan",
+            "verdict",
+            "review",
+            "promote",
+            "trace",
+            "preview",
+            "vm",
+        ),
         default="ingest",
-        help="Stage of the pipeline (default: ingest)",
+        help="Stage of the pipeline (default: ingest); `trace <hash>` reads the JSONL event log",
     )
     triage.add_argument("target", nargs="?", help="Magnet/http URL to ingest, or info hash")
-    triage.add_argument("--name", default="", help="Library name for promote")
+    triage.add_argument("--name", default="", help="Library name for promote or ingest --release")
+    triage.add_argument(
+        "--keep",
+        default="",
+        help="With vm/promote: comma-separated staged files to keep; the rest graveyard",
+    )
+    triage.add_argument(
+        "--release",
+        action="store_true",
+        help="With ingest: move a clean verdict into the library",
+    )
     triage.add_argument("--no-detonate", action="store_true", help="Skip the sandbox stage")
     triage.add_argument(
         "--accept-review",
@@ -162,6 +191,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --accept-review: skip the interactive hash confirmation",
     )
     triage.add_argument("--reason", default="", help="Recorded with a manual acceptance")
+    triage.add_argument("--frames", type=int, default=6, help="Preview: sampled frames")
+    triage.add_argument(
+        "--title",
+        default="",
+        help="Expected title for preview/ingest media verification",
+    )
 
     harness = subcommands.add_parser("harness", help="Open the interactive MINUS harness")
     harness.add_argument(
@@ -173,6 +208,11 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser(
         "mcp", help="Serve the MINUS tools over the Model Context Protocol (stdio)"
     )
+    mcp_config = subcommands.add_parser(
+        "mcp-config",
+        help="Print an MCP client config for MINUS (starts nothing)",
+    )
+    mcp_config.add_argument("--name", default="minus", help="Server name in the generated config")
 
     doctor = subcommands.add_parser(
         "doctor", help="Report the security posture without changing anything"
@@ -493,6 +533,34 @@ def run_qbt_command(args) -> int:
         return 1
 
 
+def run_mcp_config(args) -> int:
+    """Print the JSON an MCP client needs to launch this checkout.
+
+    Only JSON goes to stdout: the output is meant to be pasted into another
+    program's config, so a log line or a human sentence would corrupt it. The
+    interpreter is the venv's when it exists, because that is the one with
+    MINUS installed; a resolved `sys.executable` keeps the path absolute when
+    it does not.
+    """
+    import json
+
+    root = project_root()
+    venv_python = root / ".venv" / "bin" / "python"
+    command = venv_python if venv_python.exists() else Path(sys.executable).resolve()
+    config = {
+        "mcpServers": {
+            args.name: {
+                "type": "stdio",
+                "command": str(command),
+                "args": ["-m", "minus.mcp"],
+                "env": {"MINUS_PROJECT_ROOT": str(root)},
+            }
+        }
+    }
+    print(json.dumps(config, indent=2))
+    return 0
+
+
 def run_triage_command(args) -> int:
     """Drive one stage of the torrent triage pipeline."""
     import json
@@ -504,21 +572,60 @@ def run_triage_command(args) -> int:
     if pipeline is None:
         print("qBittorrent is not configured (set MINUS_QBITTORRENT_URL).")
         return 1
-    if not args.target:
-        print("triage needs a magnet/http URL (ingest) or an info hash.")
-        return 1
     if args.accept_review and args.action != "promote":
         print("--accept-review is only valid with `triage promote`.")
         return 1
+    if args.release and args.action != "ingest":
+        print("--release is only valid with `triage ingest`.")
+        return 1
+    if args.keep and args.action not in ("promote", "vm"):
+        print("--keep is only valid with `triage vm` or `triage promote`.")
+        return 1
+    if args.action == "trace":
+        # Reading the trace is a query, not a stage: it needs no torrent hash
+        # (the whole tail is useful when you do not know which hash to blame)
+        # and it writes nothing, so it stays ahead of the target guard.
+        from minus.triage.trace import read_trace
+
+        path = pipeline.trace_file
+        if not path:
+            print("tracing is not configured (no tracer attached)")
+            return 1
+        events = read_trace(path, torrent_hash=args.target or "", limit=200)
+        print(
+            json.dumps(
+                {"trace_file": str(path), "events": events, "count": len(events)},
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+    if not args.target:
+        print("triage needs a magnet/http URL (ingest) or an info hash.")
+        return 1
 
     try:
-        if args.action == "ingest":
+        if args.action == "preview":
+            # Sampling is read-only: nothing is staged or copied, so this is a
+            # look at the hazard's media before committing to the pipeline.
+            result = pipeline.preview(
+                args.target,
+                frames=args.frames,
+                expected_title=args.title,
+            )
+        elif args.action == "ingest":
             # The pipeline's client speaks HTTP; it does not start the
             # downloader. Doing that here makes ingest work on a cold machine.
             from minus.scripts.qbt import ensure_running
 
             ensure_running(settings)
-            result = pipeline.ingest(args.target, detonate=not args.no_detonate)
+            result = pipeline.ingest(
+                args.target,
+                detonate=not args.no_detonate,
+                expected_title=args.title,
+                release=args.release,
+                name=args.name,
+            )
         elif args.action == "download":
             result = pipeline.download(args.target)
         elif args.action == "scan":
@@ -527,6 +634,9 @@ def run_triage_command(args) -> int:
             result = pipeline.verdict(args.target)
         elif args.action == "review":
             result = pipeline.review(args.target)
+        elif args.action == "vm":
+            selected = [item.strip() for item in args.keep.split(",") if item.strip()]
+            result = pipeline.vm_review(args.target, keep=selected or None)
         elif args.accept_review:
             # The hash confirmation is deliberately separate from --yes: a
             # terminal operator has to acknowledge which item is being released,
@@ -549,15 +659,18 @@ def run_triage_command(args) -> int:
                     return 1
             import getpass
 
+            selected = [item.strip() for item in args.keep.split(",") if item.strip()]
             result = pipeline.promote(
                 args.target,
                 name=args.name,
                 accept_review=True,
                 accepted_by=getpass.getuser(),
                 reason=args.reason,
+                keep=selected or None,
             )
         else:
-            result = pipeline.promote(args.target, name=args.name)
+            selected = [item.strip() for item in args.keep.split(",") if item.strip()]
+            result = pipeline.promote(args.target, name=args.name, keep=selected or None)
     except Exception as exc:  # pipeline errors are MinusError subclasses
         print(f"triage: {exc}")
         return 1
@@ -681,6 +794,7 @@ def run_vm_image(args) -> int:
             virtio_iso=Path(args.virtio_iso).expanduser() if args.virtio_iso else None,
             work_dir=Path(args.work_dir).expanduser(),
             sysmon_zip=Path(args.sysmon_zip).expanduser() if args.sysmon_zip else None,
+            vlc_zip=Path(args.vlc_zip).expanduser() if args.vlc_zip else None,
         )
     except MinusError as exc:
         print(exc)
@@ -702,6 +816,10 @@ def run_vm_check() -> int:
     print(f"available: {'yes' if not reason else 'no'}")
     if reason:
         print(f"reason:    {reason}")
+    review_reason = runner.review_unavailable_reason()
+    print(f"vm review: {'yes' if not review_reason else 'no'}")
+    if review_reason:
+        print(f"review:    {review_reason}")
     if runner.base_image.is_file():
         print(f"base image: {runner.base_image}")
         metadata = runner.base_image.with_name("base.json")
@@ -869,6 +987,9 @@ def main() -> None:
 
     if args.command == "triage":
         raise SystemExit(run_triage_command(args))
+
+    if args.command == "mcp-config":
+        raise SystemExit(run_mcp_config(args))
 
     if args.command in (None, "harness"):
         # Bare `minus` is the harness now: one surface for chat, code, torrents

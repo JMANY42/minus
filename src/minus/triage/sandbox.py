@@ -27,12 +27,19 @@ class SandboxReport:
 
     engine: str
     detonated: bool
+    # False when the guest could not copy or open every artifact -- a partial
+    # review is not evidence that the missing file is safe.
+    completed: bool = True
     defender_detections: tuple[str, ...] = ()
     processes: tuple[str, ...] = ()
     network_endpoints: tuple[str, ...] = ()
     file_writes: tuple[str, ...] = ()
     registry_writes: tuple[str, ...] = ()
     notes: str = ""
+    # Files the guest opened with a Windows application rather than executing.
+    # A media file is not a program, but opening it in a player is the parser
+    # path a real machine would take, and that is what review mode watches.
+    opened: int = 0
 
 
 @runtime_checkable
@@ -44,8 +51,24 @@ class SandboxRunner(Protocol):
     def available(self) -> bool:
         """Whether a run would mean anything right now."""
 
-    def run(self, artifacts: list[Path], *, timeout: float) -> SandboxReport:
-        """Detonate `artifacts` and report. Must not raise on malware."""
+    def run(
+        self,
+        artifacts: list[Path],
+        *,
+        timeout: float,
+        review: bool = False,
+        keep: set[str] | None = None,
+    ) -> SandboxReport:
+        """Detonate (or, with `review`, open) `artifacts` and report.
+
+        `review=True` asks a guest that only executes launchable Windows shapes
+        to open every artifact with a Windows application instead, so a movie or
+        document exercises the parser a user's machine would use. `keep` names
+        the guest-side files that should survive verification; the rest are
+        moved to the guest's graveyard. A runner with no such capability may
+        ignore both; its report then says nothing ran. Must not raise on
+        malware.
+        """
 
 
 @dataclass
@@ -63,9 +86,19 @@ class DryRunRunner:
     def available(self) -> bool:
         return True
 
-    def run(self, artifacts: list[Path], *, timeout: float) -> SandboxReport:
+    def run(
+        self,
+        artifacts: list[Path],
+        *,
+        timeout: float,
+        review: bool = False,
+        keep: set[str] | None = None,
+    ) -> SandboxReport:
         return SandboxReport(
             engine=self.name,
             detonated=False,
-            notes=f"{self.reason} Artifacts staged: {len(artifacts)}.",
+            notes=(
+                f"{self.reason} Artifacts staged: {len(artifacts)}"
+                + (" for review." if review else ".")
+            ),
         )

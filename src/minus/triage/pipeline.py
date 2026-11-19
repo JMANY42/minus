@@ -20,6 +20,7 @@ import contextlib
 import logging
 import os
 import re
+import shlex
 import shutil
 import time
 from collections.abc import Callable
@@ -30,13 +31,16 @@ from typing import Any
 
 from minus.errors import MinusError
 from minus.services.json import read_json, write_json
+from minus.services.qbittorrent import QBittorrentError
 from minus.triage.airlock import inspect_tree
-from minus.triage.library import promote_to_library
+from minus.triage.library import choose_primary_files, promote_files_to_library
 from minus.triage.media import clean_review_blockers, manual_review_blockers, probe_media
+from minus.triage.media_review import MediaReview, review_media
 from minus.triage.review import ModelReviewer
 from minus.triage.sandbox import DryRunRunner, SandboxReport, SandboxRunner
-from minus.triage.scoring import CLEAN, MALICIOUS, NEEDS_REVIEW, decide
+from minus.triage.scoring import CLEAN, MALICIOUS, NEEDS_REVIEW, Verdict, decide
 from minus.triage.static import HEAD_HASH_BYTES, analyse, sha256_file
+from minus.triage.trace import TraceEvent, Tracer, new_op_id, trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,20 @@ _HASH = re.compile(r"\A[0-9a-fA-F]{6,64}\Z")
 _MAGNET_HASH = re.compile(r"xt=urn:btih:([0-9a-fA-F]{40})", re.IGNORECASE)
 
 DEFAULT_MAX_BYTES = 5 * 1024**3
+
+# A container that carries a data or attachment stream, or whose bytes are not
+# the format its name claims, is a second file inside the first. A detonation
+# cannot clear that shape, so a `clean` verdict carrying one of these is held at
+# `needs_review`: parser facts are advisory, but this particular anomaly is not
+# something a human should have to notice for themselves.
+CLEAN_BLOCKING_MEDIA_FLAGS = frozenset(
+    {
+        "media:data-stream",
+        "media:attachment-stream",
+        "media:extension-mismatch",
+        "media:no-video-stream",
+    }
+)
 
 
 class TriageError(MinusError):
@@ -106,6 +124,9 @@ class TriagePipeline:
 
     quarantine: Path
     library: Path
+    # Provenance is evidence, not media; keep it out of the Jellyfin-facing
+    # library. None means `<library parent>/memory/library_provenance`.
+    provenance_dir: Path | None = None
     client: Any | None = None
     sandbox: SandboxRunner = field(default_factory=DryRunRunner)
     max_bytes: int = DEFAULT_MAX_BYTES
@@ -128,8 +149,65 @@ class TriagePipeline:
     # can escalate a verdict, never clear one, and is absent when the caller
     # did not want a second model call.
     reviewer: ModelReviewer | None = None
+    # Media sampling runs ffprobe/ffmpeg inside the airlock after the static
+    # pass. It is advisory, and it costs a probe plus one decode per frame, so
+    # a caller can turn it off and `media_frames` bounds the work when it is on.
+    media_enabled: bool = True
+    media_frames: int = 6
+    # A real Windows guest can open a movie in Windows Media Player and watch
+    # the same process/network/file/registry telemetry a launchable sample
+    # gets. That is the only way a media-only torrent can earn a `clean`
+    # verdict; the host-side ffprobe pass is evidence, not a detonation. It is
+    # on by default because promotion of anything not VM-reviewed is refused.
+    vm_review_media: bool = True
     download_timeout: float = 3600.0
     poll_seconds: float = 5.0
+    # An observer like `notify`, but with a durable, ordered record behind it:
+    # `JsonlTracer(settings.triage_trace_path)` when the caller wants to replay
+    # a run afterwards. Absent means the pipeline behaves exactly as before.
+    tracer: Tracer | None = None
+
+    # ---- Paths and tracing ----
+
+    @property
+    def trace_file(self) -> Path | None:
+        """Where trace events land, when the tracer writes to a file."""
+        return getattr(self.tracer, "path", None)
+
+    def _trace(
+        self,
+        op_id: str,
+        stage: str,
+        event: str,
+        torrent_hash: str = "",
+        *,
+        payload: dict[str, Any] | None = None,
+        **data: Any,
+    ) -> None:
+        """Emit one event if a tracer is attached, never at the pipeline's expense.
+
+        A tracer is a reporter, not a dependency: even a broken custom tracer
+        must not turn a completed stage into an exception, so its errors are
+        logged at debug and dropped. `payload` exists because a data key can
+        be named `torrent_hash` (the model wants it in both places for the
+        skip case), which `**data` cannot spell without colliding.
+        """
+        if self.tracer is None:
+            return
+        merged = dict(payload or {})
+        merged.update(data)
+        try:
+            self.tracer.emit(
+                TraceEvent(
+                    stage=stage,
+                    event=event,
+                    op_id=op_id,
+                    torrent_hash=torrent_hash,
+                    data=merged,
+                )
+            )
+        except Exception:
+            logger.debug("triage tracer failed for %s/%s", stage, event, exc_info=True)
 
     # ---- Notifications ----
 
@@ -184,15 +262,214 @@ class TriagePipeline:
     def verdict_path(self, torrent_hash: str) -> Path:
         return self.root(torrent_hash) / "verdict.json"
 
+    def vm_review_path(self, torrent_hash: str) -> Path:
+        return self.root(torrent_hash) / "vm_review.json"
+
+    # ---- Selection ----
+
+    def _review_artifacts(self, torrent_hash: str) -> list[Path]:
+        """Every non-empty staged file, in the order the review ISO uses."""
+        root = self.files_root(torrent_hash)
+        return [
+            path
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+        ]
+
+    def _selected_files(self, manifest: dict, keep: list[str] | None = None) -> list[str]:
+        """Manifest-relative paths to promote; everything else is graveyard.
+
+        Explicit `keep` entries are matched against the manifest's relative
+        paths or their basenames, so a caller can say `movie.mp4` without
+        repeating the release directory. With no explicit list the primary
+        media rule applies: videos, else audio, else every file.
+        """
+        entries = [entry for entry in (manifest.get("entries") or []) if entry.get("relative")]
+        if keep:
+            selected: list[str] = []
+            for item in keep:
+                wanted = str(item).replace("\\", "/").strip().lstrip("./")
+                matches = [
+                    str(entry["relative"])
+                    for entry in entries
+                    if str(entry["relative"]) == wanted
+                    or Path(str(entry["relative"])).name == wanted
+                ]
+                if not matches:
+                    raise TriageError(f"No staged file matches keep entry: {item!r}")
+                selected.extend(match for match in matches if match not in selected)
+            if selected:
+                return selected
+        selected = choose_primary_files(entries)
+        if not selected:
+            raise TriageError("Manifest lists no files to promote.")
+        return selected
+
+    def _guest_keep_names(
+        self,
+        torrent_hash: str,
+        manifest: dict,
+        selected: list[str],
+    ) -> set[str]:
+        """The sanitized names the guest should keep out of its graveyard."""
+        from minus.triage.windows_vm import guest_name
+
+        root = self.files_root(torrent_hash)
+        order = {
+            path.relative_to(root): index
+            for index, path in enumerate(self._review_artifacts(torrent_hash))
+        }
+        names: set[str] = set()
+        for relative in selected:
+            path = Path(relative)
+            index = order.get(path)
+            if index is not None:
+                names.add(guest_name(index, root / path))
+        return names
+
+    def vm_review_evidence(self, torrent_hash: str, payload: dict) -> dict:
+        """The verdict's sandbox facts, or the standalone review file's.
+
+        `triage vm` deliberately does not rewrite the verdict; it writes
+        `vm_review.json` beside it. Promotion and review facts must see that
+        evidence, otherwise a successful review would be invisible to the gate.
+        """
+        sandbox = dict(payload.get("sandbox") or {})
+        review = _read_optional(self.vm_review_path(torrent_hash)) or {}
+        for key in (
+            "engine",
+            "completed",
+            "detonated",
+            "opened",
+            "defender_detections",
+            "processes",
+            "network_endpoints",
+            "file_writes",
+            "registry_writes",
+            "notes",
+        ):
+            if key in review and sandbox.get(key) in (None, False, 0, "", []):
+                sandbox[key] = review[key]
+        if review:
+            sandbox["reviewed"] = True
+            sandbox.setdefault("selected", review.get("selected") or [])
+        return sandbox
+
+    @staticmethod
+    def _sandbox_payload(
+        run: SandboxReport | None,
+        *,
+        reviewed: bool = False,
+    ) -> dict | None:
+        if run is None:
+            return None
+        return {
+            "engine": run.engine,
+            "completed": run.completed,
+            "detonated": run.detonated,
+            "opened": run.opened,
+            "reviewed": reviewed,
+            "defender_detections": list(run.defender_detections),
+            "processes": list(run.processes),
+            "network_endpoints": list(run.network_endpoints),
+            "file_writes": list(run.file_writes),
+            "registry_writes": list(run.registry_writes),
+            "notes": run.notes,
+        }
+
+    def vm_review(
+        self,
+        torrent_hash: str,
+        *,
+        keep: list[str] | None = None,
+        op_id: str = "",
+    ) -> dict:
+        """Open every staged file in the Windows guest, changing no verdict.
+
+        This is the explicit review pass for a torrent whose verdict already
+        exists (or whose files were staged without a detonation). `scan` runs
+        the same mode automatically when a guest is configured; this method
+        exists so an operator can re-run it and read per-file evidence without
+        rescanning static analysis. It never promotes.
+        """
+        manifest = _read_optional(self.manifest_path(torrent_hash))
+        if manifest is None:
+            raise TriageError(f"No manifest for {torrent_hash!r}; run the download stage first.")
+
+        checker = getattr(self.sandbox, "review_unavailable_reason", None)
+        reason = checker() if callable(checker) else "the configured sandbox has no review mode"
+        if reason:
+            raise TriageError(reason)
+
+        selected = self._selected_files(manifest, keep)
+        keep_names = self._guest_keep_names(torrent_hash, manifest, selected)
+        artifacts = self._review_artifacts(torrent_hash)
+        op_id = op_id or new_op_id("vm-review", torrent_hash)
+        with trace_span(
+            self.tracer,
+            op_id=op_id,
+            stage="vm_review",
+            event="review",
+            torrent_hash=torrent_hash,
+            artifacts=len(artifacts),
+            kept=len(keep_names),
+        ) as span:
+            run = self.sandbox.run(
+                artifacts,
+                timeout=self.sandbox_timeout,
+                review=True,
+                keep=keep_names,
+            )
+            span.update(
+                {
+                    "detonated": run.detonated,
+                    "opened": run.opened,
+                    "engine": run.engine,
+                }
+            )
+        payload = {
+            "torrent_hash": torrent_hash.lower(),
+            "name": manifest.get("name"),
+            "reviewed_at": _utc(),
+            "selected": selected,
+            **(self._sandbox_payload(run, reviewed=True) or {}),
+        }
+        write_json(self.vm_review_path(torrent_hash), payload)
+        return payload
+
     # ---- Stage 1: fetch ----
 
-    def download(self, torrent_hash: str) -> dict:
+    def download(self, torrent_hash: str, *, op_id: str = "", expected_title: str = "") -> dict:
         """Copy a completed torrent's content into quarantine, with a manifest.
 
         Refuses an incomplete torrent rather than staging half of one: a verdict
         on a partial download would describe files that do not exist.
+
+        `expected_title` is the name the user asked for, kept in the manifest so
+        a later media sample can compare the container's title against it
+        without the caller having to remember what the query was.
         """
+        op_id = op_id or new_op_id("download", torrent_hash)
+        with trace_span(
+            self.tracer,
+            op_id=op_id,
+            stage="download",
+            event="stage",
+            torrent_hash=torrent_hash,
+        ) as result:
+            summary = self._download(torrent_hash, op_id=op_id, expected_title=expected_title)
+            result.update(summary)
+            return summary
+
+    def _download(self, torrent_hash: str, *, op_id: str, expected_title: str = "") -> dict:
         if self.client is None:
+            self._trace(
+                op_id,
+                "download",
+                "refused",
+                torrent_hash,
+                reason="qBittorrent is not configured",
+            )
             raise TriageError("qBittorrent is not configured (set MINUS_QBITTORRENT_URL).")
 
         # Validate before anything else: the hash becomes a path component, and
@@ -212,23 +489,60 @@ class TriagePipeline:
                 elif self.vpn_interface:
                     require_tunnel(self.vpn_interface)
                 else:
+                    self._trace(
+                        op_id,
+                        "vpn",
+                        "preflight.refused",
+                        torrent_hash,
+                        reason="no VPN interface configured",
+                    )
                     raise TriageError(
                         "VPN enforcement is on but no interface is configured "
                         "(MINUS_QBITTORRENT_VPN_INTERFACE or MINUS_VPN_INTERFACE); "
                         "no VPN interface configured means no download is safe."
                     )
             except VpnError as exc:
+                self._trace(
+                    op_id,
+                    "vpn",
+                    "preflight.refused",
+                    torrent_hash,
+                    reason=str(exc),
+                )
                 raise TriageError(str(exc)) from exc
+            self._trace(
+                op_id,
+                "vpn",
+                "preflight.done",
+                torrent_hash,
+                interface=self.qbittorrent_vpn_interface or self.vpn_interface,
+            )
 
         info = self.client.torrent(torrent_hash)
         progress = float(info.get("progress") or 0.0)
         if progress < 1.0:
+            self._trace(
+                op_id,
+                "download",
+                "refused",
+                torrent_hash,
+                reason="torrent is incomplete",
+                progress=progress,
+            )
             raise TriageError(
                 f"Torrent {torrent_hash!r} is {progress:.0%} complete; refusing to triage it."
             )
 
         content = Path(str(info.get("content_path") or ""))
         if not str(content) or not content.exists():
+            self._trace(
+                op_id,
+                "download",
+                "refused",
+                torrent_hash,
+                reason="content is not on disk",
+                content=str(content),
+            )
             raise TriageError(
                 f"qBittorrent reports content at {content}, which is not on disk. "
                 "Is the download directory visible to MINUS?"
@@ -251,6 +565,14 @@ class TriagePipeline:
             else [content]
         )
         if not sources:
+            self._trace(
+                op_id,
+                "download",
+                "refused",
+                torrent_hash,
+                reason="nothing to copy",
+                content=str(content),
+            )
             raise TriageError(f"Nothing to copy from {content}")
 
         for source in sources:
@@ -258,6 +580,15 @@ class TriagePipeline:
             total += size
             if total > self.max_bytes:
                 shutil.rmtree(root, ignore_errors=True)
+                self._trace(
+                    op_id,
+                    "download",
+                    "refused",
+                    torrent_hash,
+                    reason="content exceeds the staging cap",
+                    total_bytes=total,
+                    max_bytes=self.max_bytes,
+                )
                 raise TriageError(
                     f"Content exceeds the {self.max_bytes} byte cap; refusing to stage it."
                 )
@@ -290,6 +621,7 @@ class TriagePipeline:
             "save_path": info.get("save_path"),
             "staged_at": _utc(),
             "total_bytes": total,
+            "expected_title": expected_title,
             "entries": entries,
         }
         write_json(self.manifest_path(torrent_hash), manifest)
@@ -308,50 +640,240 @@ class TriagePipeline:
 
     # ---- Stage 2: inspect ----
 
-    def scan(self, torrent_hash: str, *, detonate: bool = True) -> dict:
+    def scan(self, torrent_hash: str, *, detonate: bool = True, op_id: str = "") -> dict:
         """Static analysis, optional detonation, and a verdict on disk."""
+        op_id = op_id or new_op_id("scan", torrent_hash)
+        with trace_span(
+            self.tracer,
+            op_id=op_id,
+            stage="scan",
+            event="inspect",
+            torrent_hash=torrent_hash,
+            detonate=detonate,
+        ) as result:
+            summary = self._scan(torrent_hash, detonate=detonate, op_id=op_id)
+            result.update(summary)
+            return summary
+
+    def _scan(self, torrent_hash: str, *, detonate: bool, op_id: str) -> dict:
         manifest = _read_optional(self.manifest_path(torrent_hash))
         if manifest is None:
+            self._trace(
+                op_id,
+                "scan",
+                "refused",
+                torrent_hash,
+                reason="no manifest; run the download stage first",
+            )
             raise TriageError(f"No manifest for {torrent_hash!r}; run the download stage first.")
 
         static = analyse(self.files_root(torrent_hash))
         airlock = inspect_tree(self.files_root(torrent_hash))
+        self._trace(
+            op_id,
+            "static",
+            "static.done",
+            torrent_hash,
+            score=static.score,
+            flags=list(static.flags),
+            files=len(static.files),
+        )
+
+        # Media sampling is advisory and its parser is attack surface: it runs
+        # in the airlock, and every failure is a note rather than an exception.
+        # A scan without media facts is still a scan; a scan that dies because
+        # ffprobe is missing is not.
+        media: MediaReview | None = None
+        media_notes: list[str] = []
+        if self.media_enabled:
+            try:
+                with trace_span(
+                    self.tracer,
+                    op_id=op_id,
+                    stage="media",
+                    event="sample",
+                    torrent_hash=torrent_hash,
+                ) as span:
+                    media = review_media(
+                        self.files_root(torrent_hash),
+                        output_dir=self.root(torrent_hash) / "review" / "frames",
+                        frames=self.media_frames,
+                        expected_title=manifest.get("expected_title") or "",
+                    )
+                    span.update(
+                        {
+                            "available": media.available,
+                            "flags": list(media.flags),
+                            "frames": media.sampled,
+                            "duration_seconds": media.duration,
+                        }
+                    )
+            except Exception as exc:
+                media = None
+                media_notes.append(f"Media review failed: {exc}")
+            if media is not None and media.flags:
+                media_notes.append("Media flags: " + ", ".join(sorted(media.flags)))
 
         run: SandboxReport | None = None
+        reviewed = False
         notes = ""
         if detonate:
             # A runner that says why it cannot run is more useful than a generic
             # "not available": the operator needs to know what to install.
-            reason = getattr(self.sandbox, "unavailable_reason", lambda: "")()
-            if reason:
-                notes = f"Sandbox {getattr(self.sandbox, 'name', '?')} is not available: {reason}"
-            else:
-                artifacts = [
-                    path
-                    for path in sorted(self.files_root(torrent_hash).rglob("*"))
-                    if path.is_file() and not path.is_symlink()
-                ]
+            artifacts = [
+                path
+                for path in sorted(self.files_root(torrent_hash).rglob("*"))
+                if path.is_file() and not path.is_symlink()
+            ]
+            review_reason = getattr(
+                self.sandbox, "review_unavailable_reason", lambda: "review unsupported"
+            )()
+            use_review = bool(self.vm_review_media and artifacts and not review_reason)
+            if use_review:
+                # A media-only torrent has nothing Windows can execute, but it
+                # does have a parser path: the player. Review mode opens every
+                # file with a Windows application and watches the same
+                # telemetry, so this is the detonation for a movie.
                 try:
-                    run = self.sandbox.run(artifacts, timeout=self.sandbox_timeout)
+                    selected = self._selected_files(manifest)
+                    keep = self._guest_keep_names(torrent_hash, manifest, selected)
+                    with trace_span(
+                        self.tracer,
+                        op_id=op_id,
+                        stage="sandbox",
+                        event="review",
+                        torrent_hash=torrent_hash,
+                        artifacts=len(artifacts),
+                    ) as span:
+                        run = self.sandbox.run(
+                            artifacts,
+                            timeout=self.sandbox_timeout,
+                            review=True,
+                            keep=keep,
+                        )
+                        reviewed = True
+                        span.update(
+                            {
+                                "detonated": run.detonated,
+                                "opened": run.opened,
+                                "engine": run.engine,
+                                "notes": run.notes,
+                            }
+                        )
                 except Exception as exc:
                     from minus.triage.windows_vm import WindowsVmError
 
                     if not isinstance(exc, WindowsVmError):
                         raise
+                    self._trace(
+                        op_id,
+                        "sandbox",
+                        "sandbox.failed",
+                        torrent_hash,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
                     # A wedged guest is not evidence of cleanliness: leave the
                     # run empty so the verdict stays needs_review.
-                    notes = f"Sandbox failed: {exc}"
+                    notes = f"Sandbox review failed: {exc}"
+            else:
+                skipper = getattr(self.sandbox, "skip_reason", None)
+                skipped = skipper(artifacts) if callable(skipper) else ""
+                reason = getattr(self.sandbox, "unavailable_reason", lambda: "")()
+                if skipped:
+                    self._trace(
+                        op_id,
+                        "sandbox",
+                        "sandbox.skipped",
+                        torrent_hash,
+                        reason=skipped,
+                    )
+                    notes = f"Sandbox {getattr(self.sandbox, 'name', '?')} skipped: {skipped}"
+                elif reason:
+                    notes = (
+                        f"Sandbox {getattr(self.sandbox, 'name', '?')} is not available: {reason}"
+                    )
+                else:
+                    try:
+                        with trace_span(
+                            self.tracer,
+                            op_id=op_id,
+                            stage="sandbox",
+                            event="run",
+                            torrent_hash=torrent_hash,
+                            artifacts=len(artifacts),
+                        ) as span:
+                            run = self.sandbox.run(artifacts, timeout=self.sandbox_timeout)
+                            span.update(
+                                {
+                                    "detonated": run.detonated,
+                                    "engine": run.engine,
+                                    "notes": run.notes,
+                                }
+                            )
+                    except Exception as exc:
+                        from minus.triage.windows_vm import WindowsVmError
+
+                        if not isinstance(exc, WindowsVmError):
+                            raise
+                        self._trace(
+                            op_id,
+                            "sandbox",
+                            "sandbox.failed",
+                            torrent_hash,
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                        )
+                        # A wedged guest is not evidence of cleanliness: leave
+                        # the run empty so the verdict stays needs_review.
+                        notes = f"Sandbox failed: {exc}"
 
         review = self.reviewer.review(self.files_root(torrent_hash)) if self.reviewer else None
         if review is not None and not review.available:
             note = f"Model review unavailable: {review.error}"
             notes = f"{notes}; {note}" if notes else note
+        for note in media_notes:
+            notes = f"{notes}; {note}" if notes else note
+        self._trace(
+            op_id,
+            "review",
+            "review.done",
+            torrent_hash,
+            risk=review.risk if review is not None else "",
+            available=review.available if review is not None else False,
+            error=review.error if review is not None else "",
+        )
 
         verdict = decide(
             static,
             run,
             require_detonation=self.require_detonation,
             review=review,
+        )
+        # Structural media anomalies survive a detonation: review mode may open
+        # the container in a player, but the player only consumes the streams it
+        # understands, so "clean" says nothing about a second file hidden inside
+        # it. The verdict is held at needs_review and the flags join the
+        # reasons, so the record says why.
+        if verdict.label == CLEAN and media is not None:
+            blockers = sorted(set(media.flags) & CLEAN_BLOCKING_MEDIA_FLAGS)
+            if blockers:
+                verdict = Verdict(
+                    NEEDS_REVIEW,
+                    verdict.score,
+                    verdict.detonated,
+                    verdict.reasons + tuple(blockers),
+                )
+                note = "Media flags block a clean release: " + ", ".join(blockers)
+                notes = f"{notes}; {note}" if notes else note
+        self._trace(
+            op_id,
+            "verdict",
+            "verdict.done",
+            torrent_hash,
+            label=verdict.label,
+            score=verdict.score,
+            reasons=list(verdict.reasons),
         )
 
         payload = {
@@ -375,26 +897,25 @@ class TriagePipeline:
                     for file in static.files
                 ],
             },
-            "sandbox": (
-                {
-                    "engine": run.engine,
-                    "detonated": run.detonated,
-                    "defender_detections": list(run.defender_detections),
-                    "processes": list(run.processes),
-                    "network_endpoints": list(run.network_endpoints),
-                    "file_writes": list(run.file_writes),
-                    "registry_writes": list(run.registry_writes),
-                    "notes": run.notes,
-                }
-                if run is not None
-                else None
-            ),
+            "sandbox": self._sandbox_payload(run, reviewed=reviewed),
             "airlock": airlock,
             "model_review": review.as_dict() if review is not None else None,
+            "media": media.as_dict() if media is not None else None,
             "verdict": verdict.as_dict(),
             "notes": notes,
         }
         write_json(self.verdict_path(torrent_hash), payload)
+        if reviewed and run is not None:
+            write_json(
+                self.vm_review_path(torrent_hash),
+                {
+                    "torrent_hash": torrent_hash.lower(),
+                    "name": manifest.get("name"),
+                    "reviewed_at": _utc(),
+                    "selected": self._selected_files(manifest),
+                    **(self._sandbox_payload(run, reviewed=True) or {}),
+                },
+            )
 
         # The model gets a summary, not every file: a 4,000-entry manifest in a
         # tool result is context spent on filenames.
@@ -405,7 +926,15 @@ class TriagePipeline:
             "static_flags": static.flags,
             "files": len(static.files),
             "detonated": run.detonated if run is not None else False,
+            "reviewed": reviewed,
+            "opened": run.opened if run is not None else 0,
             "review_risk": review.risk if review is not None else "",
+            "media_flags": list(media.flags) if media is not None else [],
+            "frames": [frame["path"] for frame in media.frames if frame.get("ok")]
+            if media is not None
+            else [],
+            "duration_seconds": media.duration if media is not None else None,
+            "contact_sheet": media.contact_sheet if media is not None else "",
             "notes": "; ".join(
                 (([notes] if notes else []) + airlock["flags"] + airlock["notes"])[:8]
             ),
@@ -488,28 +1017,96 @@ class TriagePipeline:
         static = payload.get("static") or {}
         airlock = payload.get("airlock") or {}
         label = (payload.get("verdict") or {}).get("label")
-        sandbox = payload.get("sandbox") or {}
+        sandbox = self.vm_review_evidence(torrent_hash, payload)
         blockers = manual_review_blockers(payload)
         accept = label == NEEDS_REVIEW and not blockers
-        return {
+        vm_reviewed = bool(sandbox.get("detonated") or int(sandbox.get("opened") or 0) > 0)
+        result = {
             "torrent_hash": torrent_hash.lower(),
             "name": payload.get("name"),
             "verdict": payload.get("verdict"),
             "detonated": bool(sandbox.get("detonated")),
+            "vm_reviewed": vm_reviewed,
+            "opened": int(sandbox.get("opened") or 0),
             "static_flags": static.get("flags", []),
             "files": (static.get("files") or [])[:200],
             "engines": airlock.get("engines", []),
+            "media": payload.get("media"),
             "media_probe": probe_media(self.files_root(torrent_hash)),
             "promotion": {
                 "label": label,
-                "can_accept_review": accept,
+                "can_accept_review": accept and vm_reviewed,
                 "manual_blockers": blockers,
+                "vm_reviewed": vm_reviewed,
                 "command": (
-                    f"minus triage promote {torrent_hash.lower()} --accept-review --yes"
-                    if accept
+                    "minus triage promote "
+                    f"{torrent_hash.lower()} --accept-review --yes"
+                    + (
+                        " --keep "
+                        + shlex.quote(",".join(str(item) for item in sandbox.get("selected") or []))
+                        if sandbox.get("selected")
+                        else ""
+                    )
+                    if accept and vm_reviewed
                     else None
                 ),
             },
+        }
+        op_id = new_op_id("review", torrent_hash)
+        self._trace(
+            op_id,
+            "review",
+            "review.done",
+            torrent_hash,
+            can_accept_review=accept,
+            verdict=payload.get("verdict"),
+        )
+        return result
+
+    def preview(
+        self,
+        torrent_hash: str,
+        *,
+        frames: int | None = None,
+        expected_title: str = "",
+    ) -> dict:
+        """Sample frames from a staged torrent on demand, changing nothing else.
+
+        The scan's contact sheet is bounded and may be stale; a reviewer who
+        wants one more look should not have to rescan to get it. This writes
+        frames and `preview/media.json` under quarantine and never touches the
+        verdict, never promotes, and never deletes: it is a viewer, not a stage
+        in the decision.
+        """
+        manifest = _read_optional(self.manifest_path(torrent_hash))
+        if manifest is None:
+            raise TriageError(f"No manifest for {torrent_hash!r}; run the download stage first.")
+
+        count = self.media_frames if frames is None else frames
+        output_dir = self.root(torrent_hash) / "preview"
+        media = review_media(
+            self.files_root(torrent_hash),
+            output_dir=output_dir,
+            frames=count,
+            expected_title=expected_title or manifest.get("expected_title") or "",
+        )
+        write_json(output_dir / "media.json", media.as_dict())
+        self._trace(
+            new_op_id("preview", torrent_hash),
+            "preview",
+            "media.done",
+            torrent_hash,
+            flags=list(media.flags),
+            frames=media.sampled,
+            contact_sheet=media.contact_sheet,
+        )
+        return {
+            "torrent_hash": torrent_hash.lower(),
+            "name": manifest.get("name"),
+            "media": media.as_dict(),
+            "frames": [frame["path"] for frame in media.frames if frame.get("ok")],
+            "contact_sheet": media.contact_sheet,
+            "flags": list(media.flags),
         }
 
     def promote(
@@ -520,20 +1117,90 @@ class TriagePipeline:
         accept_review: bool = False,
         accepted_by: str = "",
         reason: str = "",
+        keep: list[str] | None = None,
+        op_id: str = "",
     ) -> dict:
-        """Move clean content into the library, with its verdict alongside.
+        """Move clean MP4 content into the flat library, with provenance outside it.
 
         `clean` is the normal gate. `accept_review` is the explicit manual
         release for `needs_review` only: the operator has seen the facts and
         accepts the risk, and the provenance records that no detonation
-        happened. `suspicious` and `malicious` are never releasable this way.
+        happened. A manual release now also requires VM review evidence: the
+        guest must have opened or launched a file and observed no signals.
+
+        `keep` selects what reaches the library; without it, videos are reviewed,
+        else audio, else every file. Only `.mp4` is copied into `library/`; a
+        selection with no `.mp4` is refused. Everything else is graveyard: the
+        guest moved it aside, and the staged copy is deleted after the release.
+        Provenance goes to `memory/library_provenance/`, never beside the MP4s.
+        `suspicious` and `malicious` are never releasable this way.
         """
+        op_id = op_id or new_op_id("promote", torrent_hash)
+        with trace_span(
+            self.tracer,
+            op_id=op_id,
+            stage="promote",
+            event="release",
+            torrent_hash=torrent_hash,
+            accept_review=accept_review,
+            keep=list(keep or ()),
+        ) as result:
+            moved = self._promote(
+                torrent_hash,
+                name=name,
+                accept_review=accept_review,
+                accepted_by=accepted_by,
+                reason=reason,
+                keep=keep,
+                op_id=op_id,
+            )
+            result.update(moved)
+            return moved
+
+    def _promote(
+        self,
+        torrent_hash: str,
+        *,
+        name: str,
+        accept_review: bool,
+        accepted_by: str,
+        reason: str,
+        keep: list[str] | None,
+        op_id: str,
+    ) -> dict:
         payload = self.verdict(torrent_hash)
         label = payload.get("verdict", {}).get("label")
+        evidence = self.vm_review_evidence(torrent_hash, payload)
         manual: dict | None = None
         if label == CLEAN:
+            if not (
+                evidence.get("completed") is not False
+                and (evidence.get("detonated") or int(evidence.get("opened") or 0) > 0)
+            ):
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="clean verdict without VM evidence",
+                    label=label,
+                )
+                raise TriageError(
+                    f"Refusing to promote {torrent_hash!r}: the verdict is clean but there is "
+                    "no VM detonation or review evidence. Run `minus triage scan` or "
+                    f"`minus triage vm {torrent_hash.lower()}` first."
+                )
             linux_active = clean_review_blockers(payload)
             if linux_active:
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="Windows detonation did not exercise Linux-active content",
+                    label=label,
+                    blockers=linux_active[:6],
+                )
                 raise TriageError(
                     f"Refusing to promote {torrent_hash!r}: the Windows detonation did not "
                     "exercise Linux-active content: " + "; ".join(linux_active[:6])
@@ -541,58 +1208,190 @@ class TriagePipeline:
         if label != CLEAN:
             reasons = payload.get("verdict", {}).get("reasons", [])
             if not accept_review:
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="verdict is not clean",
+                    label=label,
+                    verdict_reasons=reasons,
+                )
                 raise TriageError(
                     f"Refusing to promote {torrent_hash!r}: verdict is {label!r}. "
                     f"Reasons: {'; '.join(reasons) or 'none recorded'}"
                 )
             if label == MALICIOUS:
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="verdict is malicious",
+                    label=label,
+                )
                 raise TriageError(
                     f"Refusing to manually promote {torrent_hash!r}: the verdict is malicious."
                 )
             if label != NEEDS_REVIEW:
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="verdict is not needs_review",
+                    label=label,
+                )
                 raise TriageError(
                     f"Refusing to manually promote {torrent_hash!r}: verdict is {label!r}, "
                     "not needs_review."
                 )
             blockers = manual_review_blockers(payload)
             if blockers:
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="manual acceptance is only for passive media",
+                    label=label,
+                    blockers=blockers[:6],
+                )
                 raise TriageError(
                     f"Refusing to manually promote {torrent_hash!r}: manual acceptance is "
                     "only for passive media. Blockers: " + "; ".join(blockers[:6])
                 )
-            sandbox = payload.get("sandbox") or {}
+            sandbox = evidence
+            review_evidence = bool(
+                sandbox.get("completed") is not False
+                and (sandbox.get("detonated") or int(sandbox.get("opened") or 0) > 0)
+            )
+            if not review_evidence:
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="no VM review evidence",
+                    label=label,
+                )
+                raise TriageError(
+                    f"Refusing to manually promote {torrent_hash!r}: no VM review evidence. "
+                    "Run `minus triage vm "
+                    f"{torrent_hash.lower()}` (or triage_vm_review) first; a manual release "
+                    "of passive media now requires the guest to have opened or launched it."
+                )
             manual = {
                 "accepted_at": _utc(),
                 "accepted_by": accepted_by or "local operator",
                 "reason": reason or "manual acceptance of a needs_review verdict",
                 "detonated": bool(sandbox.get("detonated")),
+                "vm_reviewed": review_evidence,
                 "verdict": label,
                 "reasons": reasons,
             }
 
         manifest = _read_optional(self.manifest_path(torrent_hash)) or {}
         content_name = manifest.get("content_name") or manifest.get("name") or "content"
-        source = self.files_root(torrent_hash) / content_name
-        if not source.exists():
-            raise TriageError(f"Staged content is gone: {source}")
+        content_root = self.files_root(torrent_hash) / content_name
+        if not content_root.exists():
+            self._trace(
+                op_id,
+                "promote",
+                "refused",
+                torrent_hash,
+                reason="staged content is gone",
+                source=str(content_root),
+            )
+            raise TriageError(f"Staged content is gone: {content_root}")
 
+        selected = self._selected_files(manifest, keep)
+        reviewed_selected = [str(item) for item in (evidence.get("selected") or [])]
+        if reviewed_selected:
+            extra = [item for item in selected if item not in reviewed_selected]
+            if extra:
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="promotion selection includes files the VM review did not keep",
+                    extra=extra[:6],
+                )
+                raise TriageError(
+                    f"Refusing to promote {torrent_hash!r}: the selection includes files the "
+                    "VM review did not keep: "
+                    + "; ".join(extra[:6])
+                    + ". Pass the same --keep list used for review, or review again."
+                )
+        mp4_selected = [
+            relative for relative in selected if Path(relative).suffix.lower() == ".mp4"
+        ]
+        if not mp4_selected:
+            self._trace(
+                op_id,
+                "promote",
+                "refused",
+                torrent_hash,
+                reason="no .mp4 files selected",
+                selected=selected[:6],
+            )
+            raise TriageError(
+                f"Refusing to promote {torrent_hash!r}: no .mp4 files selected. "
+                "The library accepts only .mp4; pass --keep with an .mp4 file."
+            )
+        sources: list[tuple[Path, str]] = []
+        for relative in mp4_selected:
+            source = self.files_root(torrent_hash) / relative
+            if not source.is_file():
+                self._trace(
+                    op_id,
+                    "promote",
+                    "refused",
+                    torrent_hash,
+                    reason="selected file is gone",
+                    source=str(source),
+                )
+                raise TriageError(f"Selected file is gone: {source}")
+            # The library is flat: a movie is `library/<name>.mp4`, not a
+            # release directory. Basenames are unique enough for a movie; a
+            # collision gets a timestamp in promote_files_to_library.
+            sources.append((source, source.name))
+
+        entries = [entry for entry in (manifest.get("entries") or []) if entry.get("relative")]
+        graveyard = [
+            str(entry["relative"])
+            for entry in entries
+            if str(entry["relative"]) not in mp4_selected
+        ]
         provenance = {
             "torrent_hash": torrent_hash.lower(),
             "name": manifest.get("name"),
             "manifest": manifest,
             "verdict": payload.get("verdict"),
+            "selected": mp4_selected,
+            "graveyard": graveyard,
+            "vm_review": self.vm_review_evidence(torrent_hash, payload),
         }
         if manual is not None:
             provenance["manual_acceptance"] = manual
         try:
-            moved = promote_to_library(
-                source,
+            moved = promote_files_to_library(
+                sources,
                 Path(self.library),
                 name=name or str(manifest.get("name") or content_name),
                 provenance=provenance,
+                provenance_dir=self.provenance_dir,
             )
         except ValueError as exc:
+            self._trace(op_id, "promote", "refused", torrent_hash, reason=str(exc))
             raise TriageError(str(exc)) from exc
+
+        # The selected files were copied into the library; the staged copy is
+        # now the graveyard. Delete it so the host does not keep a second copy
+        # of the torrent (the guest already moved its non-kept files aside and
+        # its overlay dies with the run).
+        shutil.rmtree(self.files_root(torrent_hash), ignore_errors=True)
 
         logger.info("Promoted %s to %s", torrent_hash, moved["moved_to"])
         result = {
@@ -600,6 +1399,8 @@ class TriagePipeline:
             "moved_to": moved["moved_to"],
             "provenance": moved["provenance"],
             "bytes": moved["bytes"],
+            "files": moved.get("files", []),
+            "graveyard": graveyard,
         }
         result["cleanup"] = self._cleanup_download(torrent_hash)
         self._notify("promoted", result)
@@ -681,13 +1482,29 @@ class TriagePipeline:
                 )
             time.sleep(min(max(0.0, poll), remaining))
 
-    def ingest(self, url: str, *, detonate: bool = True, wait: bool = True) -> dict:
-        """Add, wait, stage, and scan one torrent as a single call.
+    def ingest(
+        self,
+        url: str,
+        *,
+        detonate: bool = True,
+        wait: bool = True,
+        expected_title: str = "",
+        release: bool = False,
+        name: str = "",
+    ) -> dict:
+        """Add, wait, stage, scan, and optionally release one torrent.
 
-        Nothing is promoted: the result is a verdict for the harness to show.
+        `release=True` promotes only a `clean` verdict into the library and lets
+        the cleanup remove the download copy. `needs_review` is deliberately
+        left in quarantine: releasing passive media after a detonation-free scan
+        is a separate, explicit `promote(accept_review=True)` after review, not
+        something an ingest flag may decide on the operator's behalf.
+
         A refusal or a timeout comes back as `status: failed` with the reason,
         because this is called from a conversation that needs to render the
-        answer rather than trace a stack.
+        answer rather than trace a stack. `expected_title` is the query the
+        torrent was picked for, carried into the manifest so media sampling can
+        compare the container's title against what was asked for.
         """
         if self.client is None:
             return {
@@ -695,39 +1512,147 @@ class TriagePipeline:
                 "error": "qBittorrent is not configured (set MINUS_QBITTORRENT_URL).",
             }
 
+        op_id = new_op_id("ingest", url)
         torrent_hash = ""
+        stage = "add"
         try:
+            # A magnet names its own hash, so it can be matched against the
+            # list qBittorrent already returns -- adding it again would either
+            # fail or duplicate the bytes. There is deliberately no equivalent
+            # guess for an HTTP URL: its hash is only known after the add.
+            # The same list read gives the `before` set, because a second read
+            # or a per-hash probe would be a second source of truth for what
+            # was present.
             before = {str(torrent.get("hash") or "").lower() for torrent in self.client.torrents()}
-            self.client.add_torrent(
-                [url],
-                paused=False,
-                save_path=str(Path(self.quarantine) / "incoming"),
-            )
-            torrent_hash = self.find_new_torrent(before, url)
+            named = _MAGNET_HASH.search(url or "")
+            if named is not None:
+                torrent_hash = named.group(1).lower()
+
+            if torrent_hash and torrent_hash in before:
+                self._trace(
+                    op_id,
+                    "add",
+                    "skipped",
+                    torrent_hash,
+                    payload={"reason": "already present", "torrent_hash": torrent_hash},
+                )
+            else:
+                self.client.add_torrent(
+                    [url],
+                    paused=False,
+                    save_path=str(Path(self.quarantine) / "incoming"),
+                )
+                self._trace(op_id, "add", "add.done", torrent_hash, url=url)
+                torrent_hash = self.find_new_torrent(before, url)
+            stage = "find"
+            self._trace(op_id, "find", "find.done", torrent_hash, url=url)
             if wait:
-                self.wait_for_completion(torrent_hash)
-            staged = self.download(torrent_hash)
-            summary = self.scan(torrent_hash, detonate=detonate)
-        except TriageError as exc:
+                stage = "wait"
+                info = self.wait_for_completion(torrent_hash)
+                self._trace(
+                    op_id,
+                    "wait",
+                    "wait.done",
+                    torrent_hash,
+                    progress=info.get("progress"),
+                    size=info.get("size"),
+                )
+            stage = "download"
+            staged = self.download(torrent_hash, op_id=op_id, expected_title=expected_title)
+            stage = "scan"
+            summary = self.scan(torrent_hash, detonate=detonate, op_id=op_id)
+        except (TriageError, QBittorrentError) as exc:
+            self._trace(
+                op_id,
+                stage,
+                "failed",
+                torrent_hash,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             # The hash is still useful to a caller: a timeout leaves the
             # download in qBittorrent, and naming it is what lets the harness
             # report it (or a later retry resume it) instead of orphaning it.
             return {
                 "status": "failed",
                 "torrent_hash": torrent_hash or None,
+                "stage": stage,
                 "error": str(exc),
+                "error_type": type(exc).__name__,
             }
 
         verdict = summary.get("verdict") or {}
-        return {
+        result = {
             "status": verdict.get("label") or "scanned",
             "torrent_hash": torrent_hash,
+            "op_id": op_id,
             "name": summary.get("name") or staged.get("name"),
             "verdict": verdict,
             "files": summary.get("files", staged.get("files")),
             "alert": summary.get("alert"),
             "error": None,
         }
+        if release:
+            result["release"] = self._release_ingested(
+                torrent_hash,
+                verdict=verdict,
+                name=name,
+                op_id=op_id,
+            )
+        return result
+
+    def _release_ingested(
+        self,
+        torrent_hash: str,
+        *,
+        verdict: dict,
+        name: str,
+        op_id: str,
+    ) -> dict:
+        """Promote a just-scanned torrent only when the verdict already allows it.
+
+        This is the automatic half of the gate, not a second gate: the decision
+        still comes from `promote`, which re-reads the verdict and refuses a
+        `needs_review` item unless the caller asked for manual acceptance. An
+        ingest caller that passed `release=True` did not, so a review item stays
+        in quarantine and its result says why.
+        """
+        label = verdict.get("label")
+        if label != CLEAN:
+            self._trace(
+                op_id,
+                "release",
+                "skipped",
+                torrent_hash,
+                reason="verdict is not clean",
+                label=label,
+            )
+            return {
+                "requested": True,
+                "promoted": False,
+                "reason": f"verdict is {label}; left in quarantine",
+            }
+        try:
+            moved = self.promote(
+                torrent_hash,
+                name=name,
+                reason="clean verdict",
+            )
+        except TriageError as exc:
+            self._trace(
+                op_id,
+                "release",
+                "refused",
+                torrent_hash,
+                reason=str(exc),
+                label=label,
+            )
+            return {
+                "requested": True,
+                "promoted": False,
+                "reason": str(exc),
+            }
+        return {"requested": True, "promoted": True, **moved}
 
     def find_torrents(
         self,

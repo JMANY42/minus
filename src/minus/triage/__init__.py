@@ -20,6 +20,15 @@ from minus.triage.scoring import (
     decide,
 )
 from minus.triage.static import StaticReport, analyse, inspect
+from minus.triage.trace import (
+    JsonlTracer,
+    NullTracer,
+    TraceEvent,
+    Tracer,
+    new_op_id,
+    read_trace,
+    trace_span,
+)
 
 __all__ = [
     "CLEAN",
@@ -27,13 +36,20 @@ __all__ = [
     "NEEDS_REVIEW",
     "SUSPICIOUS",
     "DryRunRunner",
+    "JsonlTracer",
+    "NullTracer",
     "SandboxReport",
     "SandboxRunner",
     "StaticReport",
+    "TraceEvent",
+    "Tracer",
     "TriageError",
     "TriagePipeline",
     "Verdict",
     "analyse",
     "decide",
     "inspect",
+    "new_op_id",
+    "read_trace",
+    "trace_span",
 ]

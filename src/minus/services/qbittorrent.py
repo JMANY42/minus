@@ -28,6 +28,15 @@ class QBittorrentError(MinusError):
     """qBittorrent refused, or was not there."""
 
 
+class TorrentAlreadyAdded(QBittorrentError):
+    """The torrent's infohash is already in the session.
+
+    qBittorrent 5.x answers HTTP 409 here; that is an answer about the torrent,
+    not a transport failure, so callers can treat it as success and go on to
+    find the existing torrent rather than reporting a broken client.
+    """
+
+
 class QBittorrentClient:
     """A minimal qBittorrent Web API client."""
 
@@ -102,8 +111,9 @@ class QBittorrentClient:
         torrent, so the pipeline can land a download in quarantine without
         changing what every other torrent does. The API answers "Ok." on
         success and "Fails." on refusal, with HTTP 200 in both cases -- the
-        body is the only signal, so it is checked here and returned rather than
-        discarded.
+        body is the only signal for those two, so it is checked here and
+        returned rather than discarded. A duplicate infohash is the one answer
+        that comes as a status code instead, and raises `TorrentAlreadyAdded`.
         """
         self._ensure_login()
         form = {
@@ -116,6 +126,12 @@ class QBittorrentClient:
             response = self.client.post("/api/v2/torrents/add", data=form)
             response.raise_for_status()
         except httpx.HTTPError as exc:
+            # A 409 is qBittorrent saying "I have this infohash already" -- an
+            # answer, not a transport failure -- so it gets its own type and the
+            # response body, rather than being flattened into "it failed".
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 409:
+                body = exc.response.text.strip() or "Conflict"
+                raise TorrentAlreadyAdded(f"qBittorrent already has this torrent: {body}") from exc
             raise QBittorrentError(f"Adding a torrent failed: {exc}") from exc
 
         body = response.text.strip()

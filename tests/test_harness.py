@@ -45,12 +45,20 @@ class FakePipeline:
 
     def __init__(self, result: dict) -> None:
         self.result = result
-        self.ingested: list[tuple[str, bool]] = []
+        self.ingested: list[tuple[str, bool, str]] = []
+        self.releases: list[bool] = []
         self.promoted: list[tuple[str, str]] = []
         self.notify = None
 
-    def ingest(self, url: str, detonate: bool = True) -> dict:
-        self.ingested.append((url, detonate))
+    def ingest(
+        self,
+        url: str,
+        detonate: bool = True,
+        expected_title: str = "",
+        release: bool = False,
+    ) -> dict:
+        self.ingested.append((url, detonate, expected_title))
+        self.releases.append(release)
         return dict(self.result)
 
     def promote(self, torrent_hash: str, name: str = "") -> dict:
@@ -223,7 +231,7 @@ async def test_download_mode_query_searches_ingests_and_promotes_clean(monkeypat
         )
         await pilot.pause()
 
-        assert pipeline.ingested == [(download_candidate().magnet, True)]
+        assert pipeline.ingested == [(download_candidate().magnet, True, "the great gatsby")]
         assert pipeline.promoted == [("a" * 40, download_candidate().title)]
         written = "\n".join(body for role, body in app.conversation_lines if role == "sys")
         assert "pick:" in written
@@ -302,7 +310,7 @@ async def test_download_mode_low_confidence_pick_does_not_auto_promote(monkeypat
         )
         await pilot.pause()
 
-        assert pipeline.ingested
+        assert pipeline.ingested == [(download_candidate().magnet, True, "the great gatsby")]
         assert pipeline.promoted == []
         written = "\n".join(body for role, body in app.conversation_lines if role == "sys")
         assert "below the normal score cutoff" in written
@@ -337,7 +345,8 @@ async def test_download_mode_magnet_bypasses_search(monkeypatch) -> None:
         )
         await pilot.pause()
 
-        assert pipeline.ingested == [(magnet, True)]
+        assert pipeline.ingested == [(magnet, True, "")]
+        assert pipeline.releases == [True]
         assert pipeline.promoted == []
 
 

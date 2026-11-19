@@ -116,6 +116,22 @@ class InspectTests(unittest.TestCase):
         self.assertIn("packed-section", report.flags)
         self.assertIn("high-entropy", report.flags)
 
+    def test_a_compressed_container_is_not_high_entropy(self):
+        movie = inspect(self.write("movie.mp4", os.urandom(4096)))
+        cover = inspect(self.write("cover.jpg", os.urandom(4096)))
+
+        self.assertNotIn("high-entropy", movie.flags)
+        self.assertNotIn("high-entropy", cover.flags)
+
+    def test_analyse_does_not_score_compressed_content(self):
+        self.write("movie.mp4", os.urandom(4096))
+        self.write("cover.jpg", os.urandom(4096))
+
+        report = analyse(self.root)
+
+        self.assertEqual(report.score, 0)
+        self.assertEqual(report.flags, [])
+
     def test_analyse_unions_flags_and_ignores_symlinks(self):
         self.write("a.exe", make_pe())
         self.write("b.docm", b"\xd0\xcf\x11\xe0" + bytes(64))

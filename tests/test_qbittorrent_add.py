@@ -14,7 +14,11 @@ from urllib.parse import parse_qs
 import pytest
 
 from minus.errors import ToolExecutionError
-from minus.services.qbittorrent import QBittorrentClient, QBittorrentError
+from minus.services.qbittorrent import (
+    QBittorrentClient,
+    QBittorrentError,
+    TorrentAlreadyAdded,
+)
 from minus.tools.triage import TriageTools
 from minus.triage.pipeline import TriagePipeline
 
@@ -27,8 +31,9 @@ OTHER_MAGNET = "magnet:?xt=urn:btih:" + "b" * 40
 class FakeQbittorrent:
     """A Web UI that logs in, accepts every add, and records what it was sent."""
 
-    def __init__(self, add_response: str = "Ok.") -> None:
+    def __init__(self, add_response: str = "Ok.", add_status: int = 200) -> None:
         self.add_response = add_response
+        self.add_status = add_status
         self.paths: list[str] = []
         self.bodies: list[str] = []
         self._server: ThreadingHTTPServer | None = None
@@ -49,7 +54,7 @@ class FakeQbittorrent:
                     self._send("Ok.")
                 elif self.path == ADD_PATH:
                     owner.bodies.append(raw.decode("utf-8"))
-                    self._send(owner.add_response)
+                    self._send(owner.add_response, status=owner.add_status)
                 else:
                     self._send("", status=404)
 
@@ -147,6 +152,35 @@ def test_a_refusal_raises_naming_the_body():
     assert "Fails." in str(caught.value)
 
 
+def test_a_duplicate_infohash_raises_torrent_already_added():
+    # qBittorrent 5.x answers 409 when it already has the infohash. That is a
+    # fact about the torrent, not a broken client, so it gets its own type.
+    with FakeQbittorrent("Torrent already in session.", add_status=409) as fake:
+        client = QBittorrentClient(fake.url)
+        try:
+            with pytest.raises(TorrentAlreadyAdded) as caught:
+                client.add_torrent([MAGNET])
+        finally:
+            client.close()
+
+    assert isinstance(caught.value, QBittorrentError)
+    assert "already has this torrent" in str(caught.value)
+    assert "Torrent already in session." in str(caught.value)
+
+
+def test_other_http_errors_stay_plain_qbittorrent_errors():
+    with FakeQbittorrent("Server broke.", add_status=500) as fake:
+        client = QBittorrentClient(fake.url)
+        try:
+            with pytest.raises(QBittorrentError) as caught:
+                client.add_torrent([MAGNET])
+        finally:
+            client.close()
+
+    assert not isinstance(caught.value, TorrentAlreadyAdded)
+    assert "Adding a torrent failed" in str(caught.value)
+
+
 def test_the_tool_adds_a_magnet(tmp_path):
     with FakeQbittorrent() as fake:
         client = QBittorrentClient(fake.url)
@@ -156,9 +190,9 @@ def test_the_tool_adds_a_magnet(tmp_path):
         finally:
             client.close()
 
-    assert result == {"status": "Ok.", "url": MAGNET, "paused": True}
+    assert result == {"status": "Ok.", "url": MAGNET, "paused": False}
     assert ADD_PATH in fake.paths
-    assert "paused=true" in fake.bodies[0]
+    assert "paused=false" in fake.bodies[0]
 
 
 def test_the_tool_refuses_paths_and_empty_strings_without_a_request(tmp_path):

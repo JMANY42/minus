@@ -17,7 +17,8 @@ __pycache__/
 /quarantine/
 /library/
 
-# Sandbox base image and per-run overlays. Large, machine-specific, never tracked.
+# Sandbox base image, per-run overlays, downloaded Sysmon/VLC zips and review
+# probes. Large, machine-specific, never tracked.
 /vm/
 
 # Rust build artifacts. The core is source; target/ is machine-specific and

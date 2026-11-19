@@ -258,9 +258,12 @@ input works with the assistant stopped. Restarts go through `systemctl --user`
 `src/minus/triage/` is the tooling behind the "is this download safe" workflow, and
 `src/minus/tools/triage.py` exposes its stages as tools under the `triage` category. They
 register only when `MINUS_QBITTORRENT_URL` is set (`assembly.build_triage_tools`), because every
-flow starts at the torrent list.
+flow starts at the torrent list. `torrent_add` now adds unpaused by default: quarantine inspects
+the completed copy, and this client has no resume call, so a paused add would never finish.
 
-`TriagePipeline` (`triage/pipeline.py`) runs four stages, each leaving a file behind. The
+`TriagePipeline` (`triage/pipeline.py`) runs four core stages — download, scan, verdict,
+promote — plus the read-only `review`, `preview` and `vm_review` passes, each leaving a file
+behind. The
 `qbittorrent_find` tool still searches only torrents already in the client; finding a new
 torrent is the separate, opt-in path in `triage/discovery.py`. That module queries cheap
 meta-index APIs (Knaben, Bitsearch, apibay, Nyaa by default; Internet Archive as a fallback;
@@ -273,22 +276,111 @@ passes (fail-closed; see `docs/SECURITY.md`):
 `download` copies a *completed* torrent (progress must be 1.0) into
 `quarantine/<hash>/files/` and writes `manifest.json` with per-file sizes and 16 MiB head
 hashes; `scan` runs `triage/static.py` (magic bytes, PE header and section entropy, name-lie
-flags) plus an optional detonation, then writes `verdict.json`; `verdict` reads it back;
+flags) plus an optional detonation, then writes `verdict.json`; `verdict` reads it back.
+Whole-file entropy is only evidence for non-compressed shapes: a movie or JPEG reads near 8
+bits/byte whether or not anything is hidden in it, so those containers are not flagged
+`high-entropy`, while the PE section check still catches a packed executable;
 `review` adds the static file list plus a bounded `ffprobe` pass under the
-airlock, without promoting; `promote` moves content into `library/<name>/` for a
-`clean` label (0755/0644, atomic rename or staged copy, 0600 provenance), with
-the verdict stored beside it as provenance. A `needs_review` item can be
-released only by the explicit CLI `--accept-review` path, and only when every
-staged file is passive media/text with no active-content flags; it records the
-operator, time, reason and `detonated: false`. `suspicious`, `malicious` and
-active-content payloads are never releasable that way. A torrent hash is validated as hex
-before it becomes a path component.
+airlock, without promoting; `promote` copies the selected `.mp4` files into the flat
+`library/` for a `clean` label (0644 files in a 0755 directory, fsynced staging
+copy renamed into place); a selection with no `.mp4` is refused. The 0600
+provenance JSON is written outside the library under
+`memory/library_provenance/`, then the staged host tree is deleted. `ingest(..., release=True)` is a
+convenience over the same gate, not a weaker one: it calls `promote` only after
+the scan reports `clean`, and a `needs_review` result is returned with
+`release.promoted: false` and left in quarantine for the explicit accept step.
+A `needs_review` item can be released only by an explicit accept-review call — the CLI
+`--accept-review` path or `triage_promote(accept_review=True, reason=...)` over MCP — and
+only when every staged file is passive media/text with no active-content flags.
+It also requires **VM review evidence**: `_vm_review_evidence` reads the verdict's
+`sandbox` block first and falls back to `quarantine/<hash>/vm_review.json`, and promotion
+refuses unless `detonated` is true or `opened > 0`. A dry-run scan or a host-only ffprobe
+pass therefore cannot unlock a manual release; the error names `minus triage vm`. The
+provenance records the operator, time, reason, `detonated` and `vm_reviewed: true`.
+`suspicious`, `malicious` and active-content payloads are never releasable that way. A
+torrent hash is validated as hex before it becomes a path component.
+
+`vm_review(torrent_hash, keep=[...])` is the standalone review stage: it runs the same guest
+mode, writes `quarantine/<hash>/vm_review.json`, and changes no verdict. It is exposed as
+`minus triage vm <hash> [--keep ...]` and as `triage_vm_review`. `scan` runs the same mode
+automatically when `MINUS_TRIAGE_VM_REVIEW` is on and `review_unavailable_reason()` is empty,
+writing the file too; the trace records a `sandbox`/`review` span rather than a
+`sandbox`/`run` one.
+
+Selection and cleanup are part of promotion, not a second gate. `_selected_files` resolves
+explicit `keep` entries (manifest-relative paths or basenames) and otherwise applies the
+primary-file rule in `library.choose_primary_files`: every video, else every audio file, else
+every file. A `keep` entry matching nothing raises rather than falling back. For `scan`'s
+automatic review the same default selection is computed before the guest starts, so the
+guest's graveyard keeps exactly the files the host intends to promote; non-kept files are
+moved under `C:\triage\graveyard` in the throwaway overlay. A standalone
+`vm_review(keep=...)` writes the list it used to `vm_review.json`, but promotion recomputes
+from the manifest, so an operator passing a custom list must pass it to `promote` as well.
+After a successful promotion the staged host tree is
+deleted (`shutil.rmtree`), because the guest already moved the rest aside and the library copy
+is the only one worth keeping. `promote` records both lists in the provenance under
+`memory/library_provenance/`: `selected` and `graveyard`.
+
+Media gets two answers, because they answer different questions. `scan` hands media files to
+`triage/media_review.py`, where ffprobe and ffmpeg run inside bubblewrap with the staged tree
+read-only at `/input` and a separate frame directory writable at `/output`; that samples what
+the file *is* — format, streams, frames, title coverage. And when a Windows guest is configured,
+`scan` runs the guest in **review mode** instead of a launch-only detonation: the artifacts
+travel on a read-only ISO, the guest copies them to its own writable working directory, and it
+opens every file — video in VLC (Windows Media Player if VLC is absent), images in Paint,
+text/subtitles in Notepad, anything else through the shell association — while watching process,
+network, file, registry and Defender telemetry. A launchable shape (`.exe`, `.ps1`, `.lnk`, …)
+is still executed. Only an explicit handler that stays alive counts as opened; the
+shell-association dialog is not a parser and is never counted, and a missing CD
+or an unopened kept file leaves `completed: false`, so neither can manufacture a
+`clean` verdict. The host sample is namespace containment, not VM-grade isolation;
+the guest review is the VM boundary. Neither substitutes for the other, and the guest's report
+is evidence about parser behaviour, not proof of safety.
+
+The ISO channel exists for size. A detonation uploads artifacts over WinRM under
+`max_artifact_bytes` (64 MiB by default), which a single episode already exceeds. Review mode
+builds an ISO9660 level-3 image (Joliet names for Windows) with every non-empty artifact, attaches
+it read-only as a second CD, and refuses a file above the just-under-4-GiB ISO per-file limit
+before writing the image. QEMU's `readonly=on` means the guest can read the CD but cannot write
+back to it, and there is still no host share: the guest copies into its own overlay, which dies
+with the run.
+
+`scan` stores the host media review in `verdict.json` — format, duration, stream
+layout, sampled frame paths, a contact sheet and flags — so `verdict` and
+`triage_review` read it back instead of probing again. The flags are what a reviewer must not overlook: `media:no-video-stream`,
+`media:data-stream`, `media:attachment-stream`, `media:extension-mismatch`,
+`media:probe-failed`, `media:no-frames` and `media:title-mismatch`. `media:data-stream`,
+`media:attachment-stream` and `media:extension-mismatch` block manual acceptance, and a `clean`
+verdict is downgraded to `needs_review` when one appears: content hidden in a container is
+exactly the shape a server-side media parser bug feeds on, so a well-formed file is not a
+reason to lower the gate. `triage_preview` samples on demand into
+`quarantine/<hash>/preview/`, for when the default six frames did not show the title card or
+the scene a human wanted to see.
+
+`torrent_ingest` and `triage_preview` both take `expected_title`, from the harness discovery
+query or as a tool argument. It is advisory only: it feeds `title_coverage` and the
+`media:title-mismatch` flag, which says the sampled file does not resemble what was asked for.
+It never turns a verdict clean, and with no expected title no mismatch is claimed — a release
+name is evidence of neither safety nor danger.
+
+`quarantine/trace.jsonl` is the run's append-only record: one JSON object per line with
+`{ts, op_id, stage, event, torrent_hash, duration_ms, data}`, where `stage` names the work
+(`ingest`, `download`, `vpn`, `scan`, `static`, `media`, `sandbox`, `verdict`, `review`,
+`preview`, `vm_review`, `promote`, `release`) and
+`op_id` groups every line belonging to one operation. Each stage appends its own line, so
+a stage that dies still leaves its evidence, and a failure carries the same `op_id` plus
+`stage` and `error_type` alongside the message — enough to say *where* a run broke instead
+of only that it did. `minus triage trace [<hash>]` and the `triage_trace` tool both read that
+one file through `read_trace`, rather than each inventing a progress feed; a missing file or a
+torn line reads as "nothing happened" rather than an error. Tracing is an observer, never a
+participant: an unwritable path is logged and cannot turn a completed stage into a failure.
 
 `MINUS_TRIAGE_AUTO_CLEANUP` (default on) closes the loop after the verdict rather than
-leaving two copies of the same bytes on disk. Once `promote` has moved the staged tree into
+leaving two copies of the same bytes on disk. Once `promote` has copied the selected MP4s into
 `library/` — or a manual `--accept-review` release has recorded its provenance — the pipeline
-asks qBittorrent to delete the torrent and the files it downloaded; the library copy and its
-0600 provenance are a separate tree, so the deletion cannot reach what was released. A
+asks qBittorrent to delete the torrent and the files it downloaded; the library MP4 and the
+0600 provenance under `memory/library_provenance/` are separate trees, so the deletion cannot
+reach what was released. A
 `malicious` rejection takes the same route after `reject_malicious` removes the staged payload,
 because the client would otherwise keep the downloaded copy that payload was taken from. The
 delete is deliberately downstream of the verdict, never part of it: `needs_review` and
@@ -301,10 +393,29 @@ outcome.
 observed nothing, so with the default `DryRunRunner` (no guest, nothing executed) every result is
 `needs_review`. `triage/windows_vm.py::WindowsVmRunner` is the real guest: an immutable
 `base.qcow2` plus a per-run overlay, launched under QEMU/KVM with `-netdev user,restrict=on`
-and only a host→guest WinRM forward, so artifacts are pushed in base64 chunks and the report
-pulled back with no guest→host path at all. `minus vm-image` builds the base once from official
-Microsoft Windows 10 x64 media (Enterprise LTSC or the Enterprise Evaluation); `minus vm-check`
-says what is missing when it cannot run.
+and only a host→guest WinRM forward. In detonation mode artifacts are pushed in base64 chunks
+under `MAX_ARTIFACT_BYTES` and the report is pulled back with no guest→host path at all. In
+review mode every non-empty artifact goes onto a read-only ISO, which QEMU attaches as a second
+CD; the guest opens each file directly from it with VLC (or Windows Media Player), Paint,
+Notepad or the shell association, and the guest harness copies small non-kept files into
+`C:\triage\graveyard`; a large non-kept file stays on the CD. `SandboxReport.opened`
+counts those opens, and `_to_report` sets
+`detonated` when `completed` is true and launched + opened > 0: a movie opened by a player is
+the parser path a real machine takes, so it counts, while a guest that opened nothing leaves
+the verdict at `needs_review`. Sysmon, when `minus vm-image --sysmon-zip` installed it, supplies
+process/network/file/registry events; without it the harness polls `Get-Process`,
+`Get-NetTCPConnection` and the `Run` keys.
+
+Before booting a plain detonation, `WindowsVmRunner.skip_reason` declines when the torrent holds
+no launchable artifact (`.exe`, `.ps1`, `.lnk`, …) under the artifact cap, and the trace records
+`sandbox.skipped`; that is why media-only torrents use review mode, which has no such skip.
+`review_unavailable_reason()` adds the review-only dependency check (`pycdlib`) on top of
+`unavailable_reason()`, so a detonation can run without the ISO extra while review refuses with
+the install command. A run that does start and then fails keeps its overlay, console log and
+pidfile under `<MINUS_WINDOWS_WORK_DIR>/failed/<run>/` instead of deleting the only evidence of what went wrong.
+`minus vm-image --iso ... [--sysmon-zip ...]` builds the base once from official Microsoft
+Windows 10 x64 media (Enterprise LTSC or the Enterprise Evaluation); `minus vm-check` says what
+is missing when it cannot run.
 
 The guest uses the oldest virtual hardware Windows 10 still supports out of the box: SeaBIOS,
 an IDE disk and an e1000 NIC. Every one of those has an in-box driver, so the unattended
@@ -398,7 +509,8 @@ override the root and the socket.
 | `quarantine/qbt-profile/` | qBittorrent config/log for the private profile |
 | `quarantine/<hash>/` | staged torrent, `manifest.json`, `verdict.json` |
 | `quarantine/rejected/` | 0600 records of malicious payloads (names, never bytes) |
-| `library/<name>/` + `<name>.provenance.json` | content released by a `clean` verdict |
+| `library/<movie>.mp4` | flat MP4s released by a `clean` verdict; Jellyfin points here |
+| `memory/library_provenance/` | 0600 release provenance, outside the library |
 | `models/kokoro-v1.0.onnx`, `voices-v1.0.bin` | Kokoro weights and voices, via git-lfs |
 | `.env` | `OPENROUTER_API_KEY`, `MINUS_*` overrides, Google grant |
 

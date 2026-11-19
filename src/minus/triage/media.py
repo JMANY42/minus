@@ -93,6 +93,21 @@ LINUX_ACTIVE_SUFFIXES = frozenset(
     {".sh", ".bash", ".zsh", ".fish", ".py", ".pyw", ".pl", ".rb", ".lua", ".jar"}
 )
 
+# Media structures a detonation cannot clear. A container carrying `data` or
+# `attachment` streams is a second file inside the first, and bytes that do not
+# match the format their suffix promises are either mislabelled or a polyglot.
+# `media:probe-failed`, `media:no-frames` and `media:title-mismatch` stay visible
+# in the payload but are deliberately not here: a parser that could not answer,
+# or a title that does not look like the query, is a question for the human, not
+# proof of hiding.
+MEDIA_BLOCKING_FLAGS = frozenset(
+    {
+        "media:data-stream",
+        "media:attachment-stream",
+        "media:extension-mismatch",
+    }
+)
+
 
 def clean_review_blockers(payload: dict) -> list[str]:
     """Files a Windows detonation did not exercise and Linux could execute.
@@ -124,6 +139,13 @@ def manual_review_blockers(payload: dict) -> list[str]:
     airlock = payload.get("airlock") or {}
     flags = set(static.get("flags") or []) | set(airlock.get("flags") or [])
     blockers = [f"flag:{flag}" for flag in sorted(flags & MANUAL_BLOCKING_FLAGS)]
+
+    # Media flags are already namespaced (`media:...`), so they are reported as
+    # they are; prefixing them again would make the two lists unreadable side by
+    # side, and the operator is comparing exactly those two lists.
+    media = payload.get("media") or {}
+    media_flags = set(media.get("flags") or [])
+    blockers.extend(sorted(media_flags & MEDIA_BLOCKING_FLAGS))
 
     files = static.get("files") or []
     if not files:

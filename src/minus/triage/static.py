@@ -63,6 +63,43 @@ DOCUMENT_SUFFIXES = {
     ".7z",
 }
 MACRO_SUFFIXES = {".docm", ".xlsm", ".pptm", ".dotm", ".xlam"}
+# Compressed containers are noisy by construction -- a movie or a JPEG reads near
+# 8 bits/byte whether or not anything is hidden in it -- so whole-file entropy is
+# no evidence about them. The PE section check still catches a packed executable.
+COMPRESSED_SUFFIXES = frozenset(
+    {
+        ".mp4",
+        ".m4v",
+        ".mkv",
+        ".avi",
+        ".mov",
+        ".webm",
+        ".mpg",
+        ".mpeg",
+        ".wmv",
+        ".flv",
+        ".ts",
+        ".mp3",
+        ".flac",
+        ".m4a",
+        ".aac",
+        ".ogg",
+        ".opus",
+        ".wav",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".zip",
+        ".rar",
+        ".7z",
+        ".gz",
+        ".tar",
+        ".xz",
+        ".bz2",
+    }
+)
 
 # Weight of each flag in the static score. Weights are a judgement, not a
 # measurement: a double extension outweighs an unsigned binary because one is a
@@ -72,6 +109,8 @@ FLAG_WEIGHTS = {
     "elf-binary": 1,
     "macho-binary": 1,
     "unsigned-pe": 1,
+    # Only produced for non-compressed shapes now: a movie or image carries the
+    # weight of being what it says it is, not of looking random.
     "high-entropy": 2,
     "packed-section": 3,
     "double-extension": 4,
@@ -290,7 +329,7 @@ def inspect(path: Path, relative: str | None = None) -> FileReport:
         flags.append("shortcut")
 
     entropy = shannon_entropy(head)
-    if entropy >= 7.2:
+    if entropy >= 7.2 and path.suffix.lower() not in COMPRESSED_SUFFIXES:
         flags.append("high-entropy")
 
     if pe is not None:

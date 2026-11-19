@@ -69,40 +69,64 @@ permissions, and each risky flag. It is read-only and makes no network calls.
   around. `MINUS_DISCOVERY_ENABLED=false` removes search entirely and leaves the
   typed-magnet path unchanged.
 - **A Windows detonation is Windows-only.** The guest launches Windows shapes
-  (`.exe`, `.bat`, `.ps1`, `.msi`, `.lnk`, `.scr`, `.com`); it never runs ELF,
-  Mach-O, Linux scripts, or `.jar` files. `TriagePipeline.promote` therefore
-  refuses a `clean` verdict when the staged tree contains those Linux-active
-  files, even if another artifact was detonated. They need a Linux-side
-  detonation or manual quarantine review; a Windows-clean label is not proof
-  they are safe on this host.
-- **Manual release is explicit, passive-only and recorded.** `triage review`
-  shows the static facts and runs `ffprobe` over up to five media files under
-  bubblewrap, with read-only input and no network; that is parser evidence, not
-  a detonation. `triage promote --accept-review` releases **only** a
-  `needs_review` verdict whose files are passive media/text and whose
-  static/airlock flags contain no executable, script, archive, document or
-  other active content. Its provenance records the accepting user, UTC time,
-  reason and `detonated: false`. `suspicious`, `malicious` and active-content
-  payloads are never releasable this way; the model-facing `triage_promote`
-  tool cannot pass the flag at all.
+  (`.exe`, `.bat`, `.ps1`, `.msi`, `.lnk`, `.scr`, `.com`) and, in review mode,
+  opens everything else with a Windows application — VLC for video (Windows
+  Media Player when VLC is absent), Paint for images, Notepad for text, the shell
+  association otherwise. A movie opened by a player is a real parser path and
+  counts as a detonation when an explicit handler stays alive; the
+  shell-association dialog is never counted, and a missing CD or an unopened kept
+  file keeps the review incomplete. It is still a *Windows* parser path: the
+  guest never runs ELF, Mach-O, Linux scripts, or `.jar` files.
+  `TriagePipeline.promote` therefore refuses a `clean`
+  verdict when the staged tree contains those Linux-active files, even if
+  another artifact was opened or detonated. They need a Linux-side detonation or
+  manual quarantine review; a Windows-clean label is not proof they are safe on
+  this host.
+- **Manual release is explicit, passive-only and requires VM evidence.**
+  `triage review` shows the static facts and runs `ffprobe` over up to five media
+  files under bubblewrap, with read-only input and no network; that is parser
+  evidence, not a detonation, and it cannot satisfy the manual-release gate.
+  `triage promote --accept-review` releases **only** a `needs_review` verdict
+  whose files are passive media/text and whose static/airlock flags contain no
+  executable, script, archive, document or other active content, *and* only when
+  `verdict.json` or `vm_review.json` records `sandbox.detonated` or
+  `sandbox.opened > 0` from the Windows guest. A dry run, a host-only scan, or
+  `--no-detonate` is refused, and the error names `minus triage vm`. Its
+  provenance records the accepting user, UTC time, reason, `detonated` and
+  `vm_reviewed: true`. `suspicious`, `malicious` and active-content payloads are
+  never releasable this way. The model-facing `triage_promote` tool can pass
+  `accept_review` and `reason`, and the same evidence requirement applies to it.
 - **The guest has no route anywhere.** The QEMU NIC is
   `-netdev user,restrict=on` plus a host→guest WinRM forward; QEMU's own
   documentation states the guest cannot contact the host and no guest packet is
-  routed out, while forwarding rules are unaffected. Artifacts are pushed and the
-  report is pulled over WinRM, so there is no guest→host connection at all.
+  routed out, while forwarding rules are unaffected. In detonation mode artifacts
+  are pushed and the report is pulled over WinRM; in review mode artifacts travel
+  on a read-only ISO/CD that QEMU mounts with `readonly=on`. Either way there is
+  no guest→host connection at all.
 - **No host filesystem in the guest.** No shared folders, no SMB, no 9p. The base
   image is immutable; each run gets a throwaway qcow2 overlay that is deleted with
-  the run directory.
+  the run directory. Review mode's ISO is a read-only second CD, not a share: the
+  guest copies files into its own overlay and anything not kept is moved to a
+  guest-side graveyard inside that overlay, which dies with the run.
 - **Untrusted filenames are sanitised** before they become guest paths: a torrent
   can name a file `..\..\Windows\x`, and on Windows a backslash is a separator.
   Only `[A-Za-z0-9._-]` survives, with a numeric prefix that also rules out
-  reserved device names.
-- **Released content is Jellyfin-ready and least-privilege:** `library/<slug>/`
-  with 0755 directories and 0644 files, no group/write bits, atomic move
-  (same-filesystem rename, cross-device copy into a staging dir then rename),
-  no-clobber suffixes, and a 0600 provenance JSON beside it.
-- **Bounded input:** artifacts over `MINUS_WINDOWS_MAX_ARTIFACT_BYTES` are skipped
-  and named in the verdict's notes, never silently dropped.
+  reserved device names. The ISO's ISO9660 names are reduced to `A-Z0-9_`, while
+  the sanitised name rides in Joliet for Windows to display.
+- **Released content is Jellyfin-ready and least-privilege:** `library/` is flat
+  and MP4-only — `library/<movie>.mp4`, 0644 files in a 0755 directory, no
+  group/write bits, an atomic publish (each selected file is copied and fsynced
+  into a hidden staging directory, then renamed into place), and no-clobber
+  suffixes. A selected `.mkv`, audio file or document is not copied; a promotion
+  with no `.mp4` is refused. The 0600 provenance JSON lives outside the library
+  at `memory/library_provenance/<slug>.provenance.json`, so a media scanner sees
+  only videos. The staged host tree is deleted after a successful promotion.
+- **Bounded input:** detonation uploads are bounded by
+  `MINUS_WINDOWS_MAX_ARTIFACT_BYTES`, per file and in total; anything over it is
+  skipped and named in the verdict's notes, never silently dropped. Review
+  mode instead refuses before building the ISO when a single file exceeds the
+  ISO9660 level-3 per-file limit (just under 4 GiB) or the work volume lacks the
+  image space plus `MINUS_WINDOWS_MIN_FREE_BYTES`.
 
 ## Airlock without a Windows guest
 
@@ -136,19 +160,21 @@ not have. `triage/airlock.py` is the no-execution alternative:
 - **Auto-cleanup deletes the download only after a verdict.** `MINUS_TRIAGE_AUTO_CLEANUP`
   (default on) asks qBittorrent to remove the torrent and the files it downloaded once a
   promotion has succeeded — a `clean` release, or a manual `--accept-review` whose
-  provenance (operator, UTC time, reason, `detonated: false`) is already written beside
-  the library copy — or a `malicious` verdict has been rejected. It never deletes before
+  provenance (operator, UTC time, reason, `detonated`, `vm_reviewed: true`) is already written
+  under `memory/library_provenance/` — or a `malicious` verdict has been rejected. It never deletes before
   a verdict exists, and it keeps the download for `needs_review` and `suspicious`, which
   are exactly the states a human is meant to inspect and possibly release. A failed
   qBittorrent call is logged and does not undo the promotion or rejection. This changes
   only what happens to the duplicate copy; the trust boundary is unchanged — discovery
   is still a pre-filter and only a verdict can promote.
-- **Boundary, stated plainly:** storing a file is inert; nothing here executes
-  Windows binaries (no Wine/VM), so a PE cannot run. `run_isolated` is namespace
-  containment, not a VM — kernel bugs remain in scope, and the downloader's own
-  parser (qBittorrent/libtorrent) is attack surface MINUS does not sandbox. Keep
-  qBittorrent updated, bind its WebUI to loopback, and mount quarantine
-  `noexec,nosuid,nodev` if the filesystem allows it.
+- **Boundary, stated plainly:** without the Windows guest configured, storing a
+  file is inert; nothing in the airlock path executes Windows binaries (no
+  Wine/VM), so a PE cannot run, and the verdict stays `needs_review`.
+  `run_isolated` is namespace containment, not a VM — kernel bugs remain in
+  scope, and the downloader's own parser (qBittorrent/libtorrent) is attack
+  surface MINUS does not sandbox. Keep qBittorrent updated, bind its WebUI to
+  loopback, and mount quarantine `noexec,nosuid,nodev` if the filesystem allows
+  it.
 - `torrent_add` accepts only magnet/HTTP(S) strings — never a local path — so
   MINUS cannot be handed a file to seed; qBittorrent uses its own configured
   save path.
@@ -194,9 +220,16 @@ JSON-RPC; logs go to stderr and the run log.
 - The guest is treated as hostile. Keep KVM/QEMU patched; the hypervisor is the
   isolation boundary and MINUS cannot add to it.
 - Defender runs with `-DisableRemediation` so evidence survives; the guest is
-  discarded afterwards regardless.
+  discarded afterwards regardless. Sysmon is optional but preferred: the base
+  image installs it from `minus vm-image --sysmon-zip`, and without it the
+  harness polls processes, TCP connections and the `Run` keys instead. Polling
+  sees less; it does not turn "nothing observed" into proof.
 - A verdict is evidence, not a guarantee. `clean` means "detonated and nothing was
-  observed", never "safe". Promotion refuses anything else.
+  observed", never "safe". For a reviewed movie that means the guest's player
+  opened the container and telemetry recorded no suspicious process, network,
+  file or registry activity — exactly the parser a user's Windows machine would
+  use, but still one guest, one build and one time window. Promotion refuses
+  anything else.
 - Never detonate on the host, and never mount the library into the guest.
 - **Keep the guest's one network device restricted.** The runner uses QEMU's
   `user,restrict=on` NIC with a single host→guest WinRM forward; do not bridge it or add a

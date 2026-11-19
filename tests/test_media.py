@@ -6,10 +6,28 @@ import shutil
 
 import pytest
 
-from minus.triage.media import PROBE_TIMEOUT, probe_media
+from minus.triage.media import PROBE_TIMEOUT, manual_review_blockers, probe_media
 
 BWRAP = shutil.which("bwrap")
 FFPROBE = shutil.which("ffprobe")
+
+
+def test_a_media_data_stream_blocks_a_manual_release():
+    payload = {
+        "static": {"files": [{"relative": "Movie/movie.mkv"}]},
+        "media": {"flags": ["media:data-stream"]},
+    }
+
+    assert manual_review_blockers(payload) == ["media:data-stream"]
+
+
+def test_incomplete_media_facts_are_visible_but_do_not_block():
+    payload = {
+        "static": {"files": [{"relative": "Movie/movie.mkv"}]},
+        "media": {"flags": ["media:no-frames", "media:probe-failed", "media:title-mismatch"]},
+    }
+
+    assert manual_review_blockers(payload) == []
 
 
 def test_non_media_files_are_not_probed(tmp_path):

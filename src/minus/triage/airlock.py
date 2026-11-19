@@ -6,8 +6,13 @@ answer wrongly: a torrent is a stranger's filesystem, so its executable bits,
 its loose permissions, and its archives are all untrusted input.
 
 `run_isolated` is the other half: bubblewrap around a command with the staged
-tree read-only at `/input`, an empty environment, and no host paths. Nothing in
-this module decides "malicious"; it reports facts the verdict may weigh.
+tree read-only at `/input`, an empty environment, and no host paths. A caller
+that needs the command to *write* (frame extraction) passes `output_dir`, which
+is bound writable at `/output` while `/input` stays read-only. That directory
+must live under quarantine: a writable path inside the namespace is a writable
+path on the host, so pointing it anywhere else hands a parser bug the ability to
+write outside the airlock. Nothing in this module decides "malicious"; it
+reports facts the verdict may weigh.
 
 WHAT THIS DOES AND DOES NOT BUY
 -------------------------------
@@ -180,13 +185,16 @@ def inspect_tree(
     }
 
 
-def sandbox_command(root: Path, command: list[str]) -> list[str]:
+def sandbox_command(root: Path, command: list[str], *, output_dir: Path | None = None) -> list[str]:
     """The bubblewrap argv that runs `command` with `root` at read-only `/input`.
 
     Every namespace is unshared, capabilities are dropped, the environment is
     cleared, host binaries and libraries are read-only, and `/tmp` is a fresh
-    tmpfs. `root` is read-only at `/input`. Without seccomp this is still
-    namespace containment, not a VM: the kernel is the boundary.
+    tmpfs. `root` is read-only at `/input`. `output_dir`, when given, is created
+    0700 on the host and bound writable at `/output`; it must live under
+    quarantine, since that is the one writable path the sandbox gets. Without
+    seccomp this is still namespace containment, not a VM: the kernel is the
+    boundary.
     """
     if shutil.which("bwrap") is None:
         raise RuntimeError(
@@ -221,6 +229,15 @@ def sandbox_command(root: Path, command: list[str]) -> list[str]:
         "--ro-bind",
         str(root),
         "/input",
+    ]
+    if output_dir is not None:
+        # A host directory the command may write is the only writable mount in
+        # the namespace; create it private so a parser bug cannot widen access.
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.chmod(0o700)
+        argv += ["--bind", str(output_dir.resolve()), "/output"]
+    argv += [
         "--chdir",
         "/input",
     ]
@@ -239,14 +256,21 @@ def _truncate(text: str) -> str:
     return text if len(text) <= _MAX_OUTPUT_CHARS else text[:_MAX_OUTPUT_CHARS] + _TRUNCATED
 
 
-def run_isolated(root: Path, command: list[str], *, timeout: float = 30.0) -> dict:
+def run_isolated(
+    root: Path,
+    command: list[str],
+    *,
+    timeout: float = 30.0,
+    output_dir: Path | None = None,
+) -> dict:
     """Run `command` under `sandbox_command`, always returning a result.
 
     A timeout is an observation ("it hung") rather than an exception; the child
     is killed, and `timed_out` carries the distinction so a caller never has to
-    parse an error to learn it.
+    parse an error to learn it. `output_dir` is passed through to
+    `sandbox_command`, which is what makes it writable at `/output`.
     """
-    argv = sandbox_command(root, command)
+    argv = sandbox_command(root, command, output_dir=output_dir)
     try:
         completed = subprocess.run(
             argv,

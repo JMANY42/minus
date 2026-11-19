@@ -71,6 +71,9 @@ plugins = [
 # core install and the dry-run path stay dependency-free.
 windows = [
     "pywinrm>=0.5",
+    # Review mode attaches a read-only ISO instead of uploading multi-gigabyte
+    # media over WinRM's 2 KiB chunks. Imported lazily, like pywinrm.
+    "pycdlib>=1.14",
 ]
 
 # Tooling, not a feature of the package. A dependency group rather than an

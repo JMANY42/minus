@@ -113,6 +113,7 @@ def install_qemu(
     floppy: Path,
     port: int,
     virtio_iso: Path | None = None,
+    tools_iso: Path | None = None,
 ) -> list[str]:
     """The installer's argv. Separate so the test can assert it.
 
@@ -138,6 +139,8 @@ def install_qemu(
     ]
     if virtio_iso is not None:
         command += ["-drive", f"file={virtio_iso},media=cdrom,readonly=on"]
+    if tools_iso is not None:
+        command += ["-drive", f"file={tools_iso},media=cdrom,readonly=on"]
     command += [
         "-drive",
         f"file={floppy},if=floppy",
@@ -181,6 +184,28 @@ def _press_boot_key(monitor: Path, *, seconds: float = 12.0) -> None:
         time.sleep(0.75)
 
 
+def _tool_iso(zip_path: Path, destination: Path) -> Path:
+    """A tiny read-only CD carrying one tool zip, labelled MINUS_TOOLS.
+
+    Uploading a 79 MB VLC portable through WinRM would be ~40,000 two-kilobyte
+    calls; a second CD is the same one-way channel review mode already uses.
+    """
+    try:
+        import pycdlib
+    except ImportError as exc:  # pragma: no cover - windows extra is required
+        raise WindowsVmError(
+            "pycdlib is required to attach a tools ISO (uv sync --extra windows)"
+        ) from exc
+    iso = pycdlib.PyCdlib()
+    try:
+        iso.new(joliet=3, vol_ident="MINUS_TOOLS")
+        iso.add_file(str(zip_path), iso_path="/VLC_ZIP", joliet_path="/vlc.zip")
+        iso.write(str(destination))
+    finally:
+        iso.close()
+    return destination
+
+
 def build_base_image(
     settings,
     *,
@@ -188,6 +213,7 @@ def build_base_image(
     work_dir: Path,
     virtio_iso: Path | None = None,
     sysmon_zip: Path | None = None,
+    vlc_zip: Path | None = None,
 ) -> Path:
     """Create `work_dir/base.qcow2` and return it."""
     require_tools()
@@ -197,6 +223,8 @@ def build_base_image(
         raise WindowsVmError(f"virtio-win ISO not found: {virtio_iso}")
     if sysmon_zip is not None and not sysmon_zip.is_file():
         raise WindowsVmError(f"Sysmon zip not found: {sysmon_zip}")
+    if vlc_zip is not None and not vlc_zip.is_file():
+        raise WindowsVmError(f"VLC zip not found: {vlc_zip}")
 
     qemu = _which(settings.windows_qemu)
     qemu_img = _which("qemu-img")
@@ -224,6 +252,12 @@ def build_base_image(
         handle.write(render_unattend(template, password))
     floppy = work_dir / "autounattend.img"
     build_floppy(autounattend, floppy)
+    try:
+        tools_iso = _tool_iso(vlc_zip, work_dir / "tools.iso") if vlc_zip is not None else None
+    except BaseException:
+        autounattend.unlink(missing_ok=True)
+        floppy.unlink(missing_ok=True)
+        raise
 
     created = subprocess.run(
         [str(qemu_img), "create", "-f", "qcow2", str(base), BASE_IMAGE_SIZE],
@@ -231,13 +265,17 @@ def build_base_image(
         text=True,
     )
     if created.returncode != 0:
+        autounattend.unlink(missing_ok=True)
+        floppy.unlink(missing_ok=True)
+        if tools_iso is not None:
+            tools_iso.unlink(missing_ok=True)
         raise WindowsVmError(f"qemu-img create failed: {created.stderr.strip()}")
 
     port = _free_port()
     monitor = base.parent / "monitor.sock"
     monitor.unlink(missing_ok=True)
     process = subprocess.Popen(
-        install_qemu(qemu, base, iso, floppy, port, virtio_iso=virtio_iso),
+        install_qemu(qemu, base, iso, floppy, port, virtio_iso=virtio_iso, tools_iso=tools_iso),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -265,6 +303,20 @@ def build_base_image(
                 "Expand-Archive -Path $z -DestinationPath 'C:\\triage\\sysmon' -Force; "
                 "& 'C:\\triage\\sysmon\\Sysmon64.exe' -accepteula -i | Out-Null",
             )
+        if vlc_zip is not None:
+            # VLC portable is the reliable media parser: Windows Media Player's
+            # first-run setup can exit instead of opening the file. It arrives
+            # on the tools CD, not through 40,000 WinRM chunks.
+            runner._ps(
+                session,
+                "New-Item -ItemType Directory -Force -Path 'C:\\tools' | Out-Null; "
+                "$cd = Get-CimInstance Win32_LogicalDisk | "
+                "Where-Object { $_.VolumeName -eq 'MINUS_TOOLS' } | Select-Object -First 1; "
+                "if ($null -eq $cd) { throw 'MINUS_TOOLS CD not found' }; "
+                "Copy-Item -Path \"$($cd.DeviceID)\\*\" -Destination 'C:\\tools' -Force; "
+                "$z = Get-ChildItem -Path 'C:\\tools' -Filter '*.zip' | Select-Object -First 1; "
+                "Expand-Archive -Path $z.FullName -DestinationPath 'C:\\tools\\vlc' -Force",
+            )
         version = (
             _text(runner._ps(session, "(Get-CimInstance Win32_OperatingSystem).Caption").std_out)
             or "unknown"
@@ -277,6 +329,8 @@ def build_base_image(
     finally:
         autounattend.unlink(missing_ok=True)
         monitor.unlink(missing_ok=True)
+        if tools_iso is not None:
+            tools_iso.unlink(missing_ok=True)
         if process.poll() is None:
             try:
                 process.terminate()
@@ -288,6 +342,7 @@ def build_base_image(
         "windows_version": version,
         "qemu_version": _qemu_version(qemu),
         "sysmon": sysmon_zip is not None,
+        "vlc": vlc_zip is not None,
         "built_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     (work_dir / "base.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")

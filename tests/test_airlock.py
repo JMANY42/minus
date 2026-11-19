@@ -136,6 +136,7 @@ class SandboxCommandTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--chdir") + 1], "/input")
         self.assertEqual(argv[-1], "/bin/true")
 
+
 def test_a_sandboxed_command_reads_the_staged_tree(tmp_path):
     if BWRAP is None:
         pytest.skip("bwrap is not installed")
@@ -152,9 +153,7 @@ def test_the_host_home_is_not_visible(tmp_path):
     if BWRAP is None:
         pytest.skip("bwrap is not installed")
 
-    result = run_isolated(
-        tmp_path, ["/bin/sh", "-c", "test -e /home && exit 1 || exit 0"]
-    )
+    result = run_isolated(tmp_path, ["/bin/sh", "-c", "test -e /home && exit 1 || exit 0"])
 
     assert result["timed_out"] is False
     assert result["exit_code"] == 0
@@ -168,6 +167,30 @@ def test_a_hanging_command_times_out_and_is_killed(tmp_path):
 
     assert result["timed_out"] is True
     assert result["exit_code"] is None
+
+
+def test_output_is_writable_while_input_stays_read_only(tmp_path):
+    if BWRAP is None:
+        pytest.skip("bwrap is not installed")
+    (tmp_path / "stage.txt").write_text("input\n", encoding="utf-8")
+
+    result = run_isolated(
+        tmp_path,
+        ["/bin/sh", "-c", "echo hi > /output/probe.txt"],
+        output_dir=tmp_path / "out",
+    )
+
+    assert result["exit_code"] == 0
+    assert (tmp_path / "out" / "probe.txt").read_text(encoding="utf-8") == "hi\n"
+
+    denied = run_isolated(
+        tmp_path,
+        ["/bin/sh", "-c", "echo nope > /input/nope"],
+        output_dir=tmp_path / "out",
+    )
+
+    assert denied["exit_code"] != 0
+    assert not (tmp_path / "nope").exists()
 
 
 class PipelineAirlockTests(unittest.TestCase):
@@ -211,7 +234,6 @@ class PipelineAirlockTests(unittest.TestCase):
         result = self.pipeline.scan(HASH)
 
         self.assertLessEqual(len(result["notes"].split("; ")), 8)
-
 
 
 class AirLockResourceCapTests(unittest.TestCase):

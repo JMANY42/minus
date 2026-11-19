@@ -1167,6 +1167,7 @@ plugins = [
     { name = "lupa" },
 ]
 windows = [
+    { name = "pycdlib" },
     { name = "pywinrm" },
 ]
 
@@ -1188,6 +1189,7 @@ requires-dist = [
     { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'linux' and extra == 'audio'", specifier = ">=12.9" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux' and extra == 'audio'", specifier = ">=9.22" },
     { name = "openai", specifier = ">=2.0" },
+    { name = "pycdlib", marker = "extra == 'windows'", specifier = ">=1.14" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -1663,6 +1665,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/6a/d25812e5f79f06285767ec607b39149d02aa3b31d50c2269768f48768930/PyAudio-0.2.14-cp312-cp312-win_amd64.whl", hash = "sha256:12f2f1ba04e06ff95d80700a78967897a489c05e093e3bffa05a84ed9c0a7fa3", size = 164126, upload-time = "2023-11-07T07:11:41.539Z" },
     { url = "https://files.pythonhosted.org/packages/3a/77/66cd37111a87c1589b63524f3d3c848011d21ca97828422c7fde7665ff0d/PyAudio-0.2.14-cp313-cp313-win32.whl", hash = "sha256:95328285b4dab57ea8c52a4a996cb52be6d629353315be5bfda403d15932a497", size = 150982, upload-time = "2024-11-20T19:12:12.404Z" },
     { url = "https://files.pythonhosted.org/packages/a5/8b/7f9a061c1cc2b230f9ac02a6003fcd14c85ce1828013aecbaf45aa988d20/PyAudio-0.2.14-cp313-cp313-win_amd64.whl", hash = "sha256:692d8c1446f52ed2662120bcd9ddcb5aa2b71f38bda31e58b19fb4672fffba69", size = 173655, upload-time = "2024-11-20T19:12:13.616Z" },
+]
+
+[[package]]
+name = "pycdlib"
+version = "1.22.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c3/4a/894c8cb0fbc8a7f3846a3ff1d24cd05d6acca962b9610d61a65c74398aea/pycdlib-1.22.0.tar.gz", hash = "sha256:00456c146e2834eac96ddf738b6b2cbe81564d9efe2022ae6a155fc6649870c6", size = 362477, upload-time = "2026-10-09T13:56:15.768Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/64/5a5912a3f3ba47dba3eb7f707e51f91926b26be4bde25fe2da483f3c4a9b/pycdlib-1.22.0-py3-none-any.whl", hash = "sha256:bfa0b3631345a14b2741fe088398b6b8dc2838442ea607fd07d027dcc67b9e94", size = 238118, upload-time = "2026-10-09T13:56:14.117Z" },
 ]
 
 [[package]]

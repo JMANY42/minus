@@ -31,7 +31,7 @@ from pathlib import Path
 from queue import Queue
 from typing import Any
 
-from minus import __version__
+from minus import __version__, paths
 from minus.config import Settings
 from minus.control.config_control import ConfigController, LiveField
 from minus.control.instrument import ObservedSpeaker
@@ -165,6 +165,7 @@ def build_triage_pipeline(settings: Settings):
     from minus.services.qbittorrent import QBittorrentClient
     from minus.triage.pipeline import TriagePipeline
     from minus.triage.sandbox import DryRunRunner
+    from minus.triage.trace import JsonlTracer
 
     if not settings.qbittorrent_url:
         logger.info("Triage is off: MINUS_QBITTORRENT_URL is not set")
@@ -198,6 +199,7 @@ def build_triage_pipeline(settings: Settings):
     return TriagePipeline(
         quarantine=settings.triage_quarantine_dir,
         library=settings.triage_library_dir,
+        provenance_dir=paths.library_provenance_dir(),
         client=QBittorrentClient(
             settings.qbittorrent_url,
             settings.qbittorrent_username,
@@ -212,8 +214,15 @@ def build_triage_pipeline(settings: Settings):
         delete_malicious=settings.triage_delete_malicious,
         auto_cleanup=settings.triage_auto_cleanup,
         reviewer=reviewer,
+        media_enabled=settings.triage_media_review,
+        media_frames=settings.triage_media_frames,
+        vm_review_media=settings.triage_vm_review,
+        sandbox_timeout=settings.triage_vm_review_timeout,
         download_timeout=settings.triage_download_timeout,
         poll_seconds=settings.triage_poll_seconds,
+        # A durable record next to quarantine, so a run can be replayed after
+        # the fact; the pipeline treats a tracer as a reporter, never a dependency.
+        tracer=JsonlTracer(settings.triage_quarantine_dir / "trace.jsonl"),
     )
 
 
@@ -225,10 +234,11 @@ def build_triage_tools(settings: Settings) -> list:
     so with no client there is nothing to offer the model but a failure. The
     static and verdict halves stay reachable through the pipeline directly.
     """
+    from minus.tools.discovery import DiscoveryTools
     from minus.tools.triage import TriageTools
 
     pipeline = build_triage_pipeline(settings)
-    return [] if pipeline is None else [TriageTools(pipeline)]
+    return [] if pipeline is None else [TriageTools(pipeline), DiscoveryTools(settings)]
 
 
 def build_vpn_tools(settings: Settings) -> list:

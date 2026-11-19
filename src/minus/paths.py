@@ -130,6 +130,16 @@ def library_dir() -> Path:
     return project_root() / "library"
 
 
+def library_provenance_dir() -> Path:
+    """Where release provenance lives, outside the Jellyfin-facing library.
+
+    The library is deliberately only media files, so a provenance JSON beside a
+    movie would be release furniture a media scanner sees. It is still evidence,
+    so it lives under the private runtime data directory instead.
+    """
+    return memory_dir() / "library_provenance"
+
+
 def alarm_command() -> Path:
     """Where `cargo install` puts the `alarm` CLI.
 
