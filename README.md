@@ -401,6 +401,48 @@ Windows ISO is only an input to the image build: once `minus vm-image` has
 finished, it can be deleted, because every run boots the base image and a
 throwaway overlay.
 
+## Jellyfin search bridge
+
+Jellyfin has no plugin hook for its web UI, so this is not a plugin:
+`minus jellyfin serve` runs a small HTTP service on loopback, and a one-time
+edit to `jellyfin-web`'s `index.html` adds a single script tag. Everything
+behind the search is download mode's own path -- `discover` ranks,
+`choose_best` picks, and the winner enters the same quarantine pipeline a typed
+magnet does -- so a click in Jellyfin replaces the keystroke and nothing else.
+
+```bash
+minus jellyfin serve                              # 127.0.0.1:8099
+sudo "$(command -v minus)" jellyfin web install   # patch /usr/share/jellyfin/web/index.html
+minus jellyfin web status
+sudo "$(command -v minus)" jellyfin web remove
+```
+
+`web install` keeps `index.html.minus-backup`, is idempotent, and must be re-run
+after a `jellyfin-web` upgrade replaces the file. Reload the web client and a
+launcher appears in the bottom-right corner: type a query, get the same ranked
+shortlist the harness shows with size, seeders and score, and send a row to
+quarantine. A library search that finds nothing also grows a bar offering the
+same search, which is the case that motivates the whole thing.
+
+The bridge is a `--user` service like the assistant itself; a unit whose
+`ExecStart` is this checkout's `minus jellyfin serve` keeps it up across
+logins:
+
+```bash
+systemctl --user enable --now minus-jellyfin
+```
+
+The bridge binds loopback deliberately -- it can add torrents, so it is not a
+LAN service -- which means the launcher works only in a browser on the machine
+running Jellyfin. The token the script carries is generated per process and
+never written to disk.
+
+What comes back is not an instant play button. A grab is one `clean` verdict
+away from the library: the swarm downloads into `quarantine/incoming`, the
+pipeline scans it, and only a clean, non-low-confidence result is promoted
+automatically. Everything else waits in quarantine, exactly as `needs_review`
+does in the harness.
+
 ## MCP server
 
 Every portable tool MINUS builds is also available to any Model Context
