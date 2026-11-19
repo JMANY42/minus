@@ -1,0 +1,231 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      # The dashboard extra carries textual, which the dashboard and harness
+      # tests import. Core-only installs make those tests skip, not pass.
+      - name: Install the project
+        run: uv sync --locked --extra dashboard
+
+      - name: Run the test suite
+        run: uv run pytest -q
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the project
+        run: uv sync --locked
+
+      # The diff base is the pull request's target commit, or the commit the
+      # push replaced. Neither exists for a brand-new branch (the "before" is
+      # the all-zero object), so fall back to the parent; a repository with no
+      # parent at all yields an empty list and the gates skip.
+      - name: Compute changed Python files
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || ! git rev-parse --verify --quiet "${base}^{commit}" > /dev/null; then
+            echo "No usable base commit; falling back to HEAD^"
+            base="HEAD^"
+          fi
+          if git rev-parse --verify --quiet "${base}^{commit}" > /dev/null; then
+            git diff --name-only --diff-filter=ACMRT "${base}...HEAD" -- '*.py' \
+              | sort -u > changed-python.txt
+          else
+            echo "Repository has no parent commit; nothing to compare."
+            : > changed-python.txt
+          fi
+          echo "Changed Python files:"
+          cat changed-python.txt
+
+      - name: Ruff on changed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s changed-python.txt ]; then
+            echo "No changed Python files; skipping ruff."
+            exit 0
+          fi
+          mapfile -t files < changed-python.txt
+          uv run ruff check --ignore E501 "${files[@]}"
+          uv run ruff format --check "${files[@]}"
+
+      # Advisory: the tree has a pre-existing backlog, so a full run is
+      # visibility, not a gate. This is expected to shrink over time.
+      - name: Ruff over the whole tree (advisory)
+        continue-on-error: true
+        run: uv run ruff check src tests --ignore E501
+
+  types:
+    name: types
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the project
+        run: uv sync --locked
+
+      - name: Compute changed Python files
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || ! git rev-parse --verify --quiet "${base}^{commit}" > /dev/null; then
+            echo "No usable base commit; falling back to HEAD^"
+            base="HEAD^"
+          fi
+          if git rev-parse --verify --quiet "${base}^{commit}" > /dev/null; then
+            git diff --name-only --diff-filter=ACMRT "${base}...HEAD" -- '*.py' \
+              | sort -u > changed-python.txt
+          else
+            echo "Repository has no parent commit; nothing to compare."
+            : > changed-python.txt
+          fi
+          echo "Changed Python files:"
+          cat changed-python.txt
+
+      - name: Mypy on changed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s changed-python.txt ]; then
+            echo "No changed Python files; skipping mypy."
+            exit 0
+          fi
+          mapfile -t files < changed-python.txt
+          uv run mypy --follow-imports=silent "${files[@]}"
+
+      # Advisory: dashboard errors against Textual's stubs are pre-existing.
+      - name: Mypy over the package (advisory)
+        continue-on-error: true
+        run: uv run mypy src
+
+  runtime-deps:
+    name: runtime-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # qbittorrent-nox and QEMU back the provisioning and Windows-sandbox
+      # code paths; mtools writes the unattended answer floppy.
+      - name: Install the runtime binaries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends \
+            qbittorrent-nox qemu-system-x86 qemu-utils mtools
+
+      - name: Report the installed versions
+        run: |
+          qbittorrent-nox --version
+          qemu-system-x86_64 --version | head -n 1
+          qemu-img --version | head -n 1
+          mtools --version | head -n 1 || true
+
+      - name: Install the project
+        run: uv sync --locked
+
+      - name: Check that the CLI starts
+        run: uv run minus --help
+
+      # The upstream tree and the development tree do not expose the same
+      # subcommands. Guard every probe on the module that provides it so a
+      # missing feature is a skip, not a failure.
+      - name: Probe the optional runtime subcommands
+        run: |
+          uv run python - <<'PY'
+          import importlib.util
+          import subprocess
+          import sys
+
+          probes = (
+              ("minus.remote", ("-m", "minus", "bridge", "tag", "--frontend", "generic")),
+              ("minus.scripts.qbt", ("-m", "minus", "qbt", "--help")),
+              ("minus.triage", ("-m", "minus", "vm-check")),
+          )
+
+          failed = False
+          for module, argv in probes:
+              if importlib.util.find_spec(module) is None:
+                  print(f"SKIP {' '.join(argv)}: module {module} is absent")
+                  continue
+              print(f"RUN  {' '.join(argv)}")
+              try:
+                  subprocess.run(
+                      [sys.executable, *argv],
+                      check=True,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+              except subprocess.CalledProcessError as exc:
+                  print(f"FAIL {' '.join(argv)} exited {exc.returncode}")
+                  failed = True
+
+          if failed:
+              sys.exit(1)
+          print("runtime probes passed")
+          PY
