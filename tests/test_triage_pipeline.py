@@ -131,6 +131,33 @@ class PipelineTests(unittest.TestCase):
             self.pipeline.download(HASH)
         self.assertIn("not configured", str(caught.exception))
 
+    def test_a_refused_tunnel_refuses_before_anything_is_added(self):
+        """The gate runs before qBittorrent is touched.
+
+        A grab refused for a down tunnel used to be added first and only then
+        rejected, leaving a 0% torrent that would start fetching by itself the
+        moment the tunnel came back -- bytes the pipeline never saw.
+        """
+        from minus.services.vpn import VpnError
+
+        client = mock.Mock()
+        pipeline = TriagePipeline(
+            quarantine=self.quarantine,
+            library=self.library,
+            client=client,
+        )
+        pipeline.vpn_interface = "tun0"
+        with mock.patch(
+            "minus.services.vpn.require_tunnel",
+            side_effect=VpnError("VPN preflight failed: tun0 is down"),
+        ):
+            result = pipeline.ingest("magnet:?xt=urn:btih:" + HASH)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["stage"], "vpn")
+        self.assertIn("tun0 is down", result["error"])
+        client.add_torrent.assert_not_called()
+
     def test_scanning_without_a_manifest_names_the_missing_stage(self):
         with self.assertRaises(TriageError) as caught:
             self.pipeline.scan(HASH)

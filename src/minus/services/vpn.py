@@ -127,14 +127,22 @@ def require_torrent_tunnel(client: QBittorrentClient, expected_interface: str) -
 
     preferences = client.preferences()
     observed = preferences.get("current_network_interface") or ""
-    if observed == expected_interface:
-        return
+    if observed != expected_interface:
+        raise VpnError(
+            f"qBittorrent is bound to {observed or '(all interfaces)'}, not "
+            f"{expected_interface!r}. Set qBittorrent's Network Interface to the VPN "
+            "device, or ensure the download user's traffic is policy-routed through it."
+        )
 
-    raise VpnError(
-        f"qBittorrent is bound to {observed or '(all interfaces)'}, not "
-        f"{expected_interface!r}. Set qBittorrent's Network Interface to the VPN "
-        "device, or ensure the download user's traffic is policy-routed through it."
-    )
+    # The binding records intent; it does not create a route. A device that is
+    # gone leaves the transfer at 0% while the pipeline waits for bytes that
+    # cannot arrive, so the tunnel has to exist to count as one.
+    if not link_is_up(expected_interface):
+        raise VpnError(
+            f"qBittorrent is bound to {expected_interface!r}, but that interface is "
+            "down or does not exist: the binding cannot carry the download. Bring "
+            "the tunnel up, then retry."
+        )
 
 
 def require_tunnel(interface: str) -> TunnelStatus:

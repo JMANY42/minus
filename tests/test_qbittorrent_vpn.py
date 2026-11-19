@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 import pytest
 
@@ -48,9 +49,7 @@ class FakeQbittorrent:
             def do_GET(self) -> None:
                 owner.paths.append(self.path)
                 if self.path == "/api/v2/app/preferences":
-                    body = json.dumps(
-                        {"current_network_interface": owner.interface}
-                    ).encode()
+                    body = json.dumps({"current_network_interface": owner.interface}).encode()
                     self._send(200, body)
                 else:
                     self._send(404, b"")
@@ -82,7 +81,10 @@ class FakeQbittorrent:
 
 
 def test_matching_interface_passes():
-    with FakeQbittorrent("wg0") as fake:
+    with (
+        FakeQbittorrent("wg0") as fake,
+        mock.patch("minus.services.vpn.link_is_up", return_value=True),
+    ):
         client = QBittorrentClient(fake.url)
         try:
             require_torrent_tunnel(client, "wg0")
@@ -90,6 +92,24 @@ def test_matching_interface_passes():
             client.close()
 
     assert "/api/v2/app/preferences" in fake.paths
+
+
+def test_a_matching_binding_to_a_missing_device_is_refused():
+    """Bound to wg0, but wg0 is gone: intent without a route is not a tunnel."""
+    with (
+        FakeQbittorrent("wg0") as fake,
+        mock.patch("minus.services.vpn.link_is_up", return_value=False),
+    ):
+        client = QBittorrentClient(fake.url)
+        try:
+            with pytest.raises(VpnError) as caught:
+                require_torrent_tunnel(client, "wg0")
+        finally:
+            client.close()
+
+    message = str(caught.value)
+    assert "wg0" in message
+    assert "down or does not exist" in message
 
 
 def test_a_mismatched_interface_names_both_sides():
