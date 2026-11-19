@@ -316,7 +316,7 @@ def test_grab_uses_the_re_search_not_the_request(run_bridge) -> None:
         {
             "url": MAGNET,
             "detonate": True,
-            "release": True,
+            "release": False,
             "expected_title": "debian 12",
         }
     ]
@@ -343,6 +343,9 @@ def test_low_confidence_candidate_is_never_promoted(run_bridge) -> None:
 
     assert job["state"] == "done"
     assert pipeline.promoted == []
+    # `release=True` would have promoted the clean verdict inside the pipeline
+    # and made this assertion a lie; the service must keep that decision.
+    assert pipeline.ingested[0]["release"] is False
     assert "moved_to" not in job["result"]
     assert job["result"]["status"] == "clean"
 

@@ -562,7 +562,12 @@ class DownloadService:
                 result = pipeline.ingest(
                     snapshot["download_url"],
                     detonate=True,
-                    release=True,
+                    # `release=True` promotes any clean verdict inside the
+                    # pipeline, which would bypass the low-confidence gate this
+                    # service applies below. The harness makes the same two-step
+                    # call for the same reason: scan now, decide about the
+                    # library here.
+                    release=False,
                     expected_title=snapshot["query"],
                 )
                 status = str(result.get("status") or "")
